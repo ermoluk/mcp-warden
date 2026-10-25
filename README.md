@@ -128,4 +128,4 @@ See `docs/web-ui.md` for the web UI design notes.
 
 Apache-2.0 — permanent commitment for the OSS core. See [LICENSE](LICENSE).
 
-For the open-core philosophy and what may eventually be paid, see [BUSINESS.md](BUSINESS.md).
+mcp-warden stays fully functional for free, forever — see our [open-core commitment](docs/open-core.md).

@@ -180,4 +180,4 @@ TUI approval transport, and host-key verification ship with them.
 Future, still-gated work (NOT in this release without renewed sign-off):
 Homebrew tap and packaging, multi-IDE deep setup guides, `doctor`
 expansion (auto-fix), and any hosted/closed-source paid features
-described in `BUSINESS.md`.
+described in `docs/open-core.md`.

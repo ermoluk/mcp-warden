@@ -5,7 +5,7 @@
 //! ships one implementation per trait; additional implementations attach
 //! here without modifying or weakening the existing ones.
 //!
-//! See the project's `BUSINESS.md` for the open-core commitment.
+//! See the project's `docs/open-core.md` for the open-core commitment.
 
 pub mod approval;
 pub mod audit;

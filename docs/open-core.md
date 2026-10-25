@@ -1,4 +1,4 @@
-# BUSINESS.md — open-core commitment
+# Open-core commitment
 
 This document describes how `mcp-warden` is funded and what we promise
 about the relationship between the open-source binary and any future
