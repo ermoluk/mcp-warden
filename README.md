@@ -44,6 +44,8 @@ mcp-warden preset add github-read \
   --approval auto --confirm-auto
 ```
 
+This preset has no `--allowed-paths`, so every path under `base_url` is allowed (`preset add` and `doctor` warn about it): with a classic PAT the agent can read every private repo the token can see, so narrow it — e.g. `--allowed-paths '/user/repos,/repos/OWNER/[^/]+'` — or use a fine-grained PAT limited to specific repos. Patterns match the whole path, as exact strings or regexes anchored as `^(?:…)$`, never as prefixes; `[^/]+` is safer than `.*` for one segment.
+
 Wire `mcp-warden` into your agent — see [`docs/claude-code-setup.md`](docs/claude-code-setup.md) or [`docs/cursor-setup.md`](docs/cursor-setup.md).
 
 In your agent: ask "list my GitHub repos via mcp-warden". Watch the agent call `list_presets`, then `proxy_http` — and watch your PAT stay out of the prompt.

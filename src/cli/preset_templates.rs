@@ -8,6 +8,10 @@ pub struct Template {
     pub description: &'static str,
     pub default_secret_name: &'static str,
     pub build: fn(preset_name: &str, secret_name: &str) -> Preset,
+    /// Comment lines `scaffold --dry-run` prints above a template that ships
+    /// without `allowed_paths`: an example allow-list and token advice.
+    /// Empty for templates that list their paths.
+    pub open_paths_note: &'static [&'static str],
 }
 
 pub const TEMPLATES: &[Template] = &[
@@ -16,48 +20,66 @@ pub const TEMPLATES: &[Template] = &[
         description: "GitHub API (read-only), auto-approve GET",
         default_secret_name: "gh_pat",
         build: github_read,
+        open_paths_note: &[
+            "  allowed_paths = [\"/user/repos\", \"/repos/OWNER/[^/]+\"]",
+            "A classic PAT lets this preset read every private repo the token can see.",
+            "Prefer a fine-grained PAT limited to specific repositories, read-only.",
+        ],
     },
     Template {
         name: "github-write",
         description: "GitHub API write (repos/orgs), prompt per call",
         default_secret_name: "gh_pat",
         build: github_write,
+        open_paths_note: &[],
     },
     Template {
         name: "notion-read",
         description: "Notion API read (databases/pages/search), auto-approve",
         default_secret_name: "notion_token",
         build: notion_read,
+        open_paths_note: &[],
     },
     Template {
         name: "stripe-read",
         description: "Stripe API read-only, prompt per call",
         default_secret_name: "stripe_key",
         build: stripe_read,
+        open_paths_note: &[
+            "  allowed_paths = [\"/customers(/[^/]+)?\", \"/charges(/[^/]+)?\"]",
+            "Prefer a restricted key (rk_...) with read-only permissions over a secret key.",
+        ],
     },
     Template {
         name: "openai-chat",
         description: "OpenAI chat completions + embeddings, prompt per call",
         default_secret_name: "openai_api_key",
         build: openai_chat,
+        open_paths_note: &[],
     },
     Template {
         name: "anthropic-messages",
         description: "Anthropic Messages API, prompt per call",
         default_secret_name: "anthropic_api_key",
         build: anthropic_messages,
+        open_paths_note: &[],
     },
     Template {
         name: "gitea-read",
         description: "Gitea API read-only, auto-approve GET",
         default_secret_name: "gitea_token",
         build: gitea_read,
+        open_paths_note: &[
+            "  allowed_paths = [\"/api/v1/user/repos\", \"/api/v1/repos/OWNER/[^/]+\"]",
+            "Prefer a token with read-only scopes (e.g. read:repository) over an all-access one.",
+        ],
     },
     Template {
         name: "cloudflare-dns",
         description: "Cloudflare DNS zones (read/write), prompt per call",
         default_secret_name: "cloudflare_api_token",
         build: cloudflare_dns,
+        open_paths_note: &[],
     },
 ];
 
@@ -236,6 +258,19 @@ mod tests {
         match p.auth.as_ref().unwrap() {
             Auth::Bearer { secret } => assert_eq!(secret, "gh_pat"),
             _ => panic!("expected Bearer"),
+        }
+    }
+
+    #[test]
+    fn templates_without_allowed_paths_explain_the_risk() {
+        for t in TEMPLATES {
+            let p = (t.build)(t.name, t.default_secret_name);
+            assert_eq!(
+                p.allowed_paths.is_empty(),
+                !t.open_paths_note.is_empty(),
+                "template {}: open_paths_note must be set exactly when allowed_paths is empty",
+                t.name
+            );
         }
     }
 

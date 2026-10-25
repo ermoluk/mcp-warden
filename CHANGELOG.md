@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file. The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Warnings for HTTP presets without `allowed_paths`.** An empty `allowed_paths` allows every path under `base_url`, and the built-in `github-read` template ships that way with `approval = "auto"`: with a classic PAT the agent can read every private repo the token can see. Behaviour is unchanged so existing configs keep working, but it is now visible: `mcp-warden doctor` prints a warning per such preset (and adds a `warnings` field to each `--deep --format json` probe result), `preset add --type http` without `--allowed-paths` warns on stderr, and `preset scaffold` explains it in `--dry-run` output for `github-read`, `stripe-read` and `gitea-read` (with an example allow-list and token advice) and warns when it writes the config. README and the presets cookbook now say that patterns match the whole path (exact strings or regexes anchored as `^(?:…)$`, never prefixes) and that `[^/]+` is safer than `.*` for one segment.
+
 ## [0.4.2]
 
 ### Fixed

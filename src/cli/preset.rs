@@ -204,8 +204,10 @@ fn scaffold(args: ScaffoldArgs, config_path: &Path) -> Result<()> {
         .to_string();
 
     let preset = (template.build)(&preset_name, &secret_name);
+    let open_paths_warning = unrestricted_paths_warning(&preset);
 
     if args.dry_run {
+        let open_paths_comment = open_paths_comment(&preset, template.open_paths_note);
         let wrapper = ScaffoldWrapper {
             preset: vec![preset],
         };
@@ -214,6 +216,9 @@ fn scaffold(args: ScaffoldArgs, config_path: &Path) -> Result<()> {
         println!("# Generated from template '{}'", template.name);
         println!("# Secret '{secret_name}' must exist in the keychain:");
         println!("#   mcp-warden secret add {secret_name}");
+        if let Some(comment) = open_paths_comment {
+            print!("{comment}");
+        }
         println!();
         print!("{rendered}");
         return Ok(());
@@ -238,6 +243,9 @@ fn scaffold(args: ScaffoldArgs, config_path: &Path) -> Result<()> {
         preset_name, template.name
     );
     eprintln!("    mcp-warden secret add {secret_name}");
+    if let Some(w) = open_paths_warning {
+        eprintln!("warning: {w}");
+    }
     Ok(())
 }
 
@@ -371,12 +379,57 @@ fn add(args: AddArgs, config_path: &Path, kc: &dyn KeychainStore) -> Result<()> 
         database: args.database,
         queries: vec![],
     };
+    if let Some(w) = unrestricted_paths_warning(&preset) {
+        eprintln!("warning: {w}");
+    }
     cfg.preset.push(preset);
     cfg.validate(kc)?;
     let toml_str = toml::to_string_pretty(&cfg).map_err(|e| WardenError::Config(e.to_string()))?;
     fs::write(config_path, toml_str).map_err(WardenError::Io)?;
     eprintln!("Added preset '{}'.", args.name);
     Ok(())
+}
+
+/// Warning for an HTTP preset with no `allowed_paths`, which lets the agent
+/// reach every path under `base_url`. Existing configs rely on that, so it
+/// is surfaced by `doctor`, `preset add` and `preset scaffold`, not refused.
+pub(crate) fn unrestricted_paths_warning(p: &Preset) -> Option<String> {
+    if !matches!(p.preset_type, PresetType::Http) || !p.allowed_paths.is_empty() {
+        return None;
+    }
+    Some(format!(
+        "preset '{}' has no allowed_paths: every path under {} is allowed. \
+         Narrow it to the paths the agent needs (exact strings or full-match regexes, \
+         e.g. \"/users/[^/]+\")",
+        p.name,
+        p.base_url.as_deref().unwrap_or("base_url"),
+    ))
+}
+
+/// TOML comment for `scaffold --dry-run` above a preset with no
+/// `allowed_paths`: what that allows, how patterns match, and the
+/// template's own example and token advice.
+fn open_paths_comment(preset: &Preset, note: &[&str]) -> Option<String> {
+    if !preset.allowed_paths.is_empty() {
+        return None;
+    }
+    let mut out = format!(
+        "#\n# No allowed_paths: every path under {} is allowed",
+        preset.base_url.as_deref().unwrap_or("base_url"),
+    );
+    if matches!(preset.approval, ApprovalPolicy::Auto) {
+        out.push_str(",\n# and approval = \"auto\" means no prompt either");
+    }
+    out.push_str(
+        ".\n# To narrow it, list exact paths or full-match regexes. Patterns are anchored\n\
+         # as ^(?:…)$, never prefixes; use [^/]+ for one path segment, not .* — e.g.:\n",
+    );
+    for line in note {
+        out.push_str("# ");
+        out.push_str(line);
+        out.push('\n');
+    }
+    Some(out)
 }
 
 fn list(config_path: &Path) -> Result<()> {
@@ -456,4 +509,100 @@ fn test_preset(name: &str, config_path: &Path, kc: &dyn KeychainStore) -> Result
         p.name
     );
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::Parser;
+    use mcp_warden_core::keychain::memory::InMemoryKeychain;
+    use mcp_warden_core::secret::Secret;
+
+    #[derive(Parser)]
+    struct AddCli {
+        #[command(flatten)]
+        add: AddArgs,
+    }
+
+    fn parse_add() -> AddArgs {
+        let argv = [
+            "add",
+            "github-read",
+            "--type",
+            "http",
+            "--base-url",
+            "https://api.github.com",
+            "--auth-bearer",
+            "gh_pat",
+            "--allowed-methods",
+            "GET",
+        ];
+        AddCli::try_parse_from(argv).unwrap().add
+    }
+
+    fn presets(raw: &str) -> Vec<Preset> {
+        toml::from_str::<Config>(raw).unwrap().preset
+    }
+
+    const HTTP_OPEN: &str = r#"
+[[preset]]
+name = "open"
+type = "http"
+description = ""
+approval = "prompt"
+base_url = "https://api.github.com"
+auth = { type = "bearer", secret = "gh_pat" }
+allowed_methods = ["GET"]
+"#;
+
+    #[test]
+    fn open_paths_warning_names_preset_and_base_url() {
+        let p = &presets(HTTP_OPEN)[0];
+        let w = unrestricted_paths_warning(p).expect("expected a warning");
+        assert!(
+            w.starts_with(
+                "preset 'open' has no allowed_paths: every path under https://api.github.com is allowed"
+            ),
+            "{w}"
+        );
+    }
+
+    #[test]
+    fn open_paths_warning_skips_presets_with_paths() {
+        let mut p = presets(HTTP_OPEN).remove(0);
+        p.allowed_paths = vec!["/user/repos".into()];
+        assert!(unrestricted_paths_warning(&p).is_none());
+    }
+
+    #[test]
+    fn open_paths_warning_skips_non_http_presets() {
+        let p = &presets(
+            r#"
+[[preset]]
+name = "box"
+type = "ssh"
+description = ""
+approval = "prompt"
+host = "example.com"
+user = "deploy"
+secret = "key"
+allowed_commands = ["uptime"]
+"#,
+        )[0];
+        assert!(unrestricted_paths_warning(p).is_none());
+    }
+
+    #[test]
+    fn add_http_without_allowed_paths_still_succeeds() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("config.toml");
+        fs::write(&path, "").unwrap();
+        let kc = InMemoryKeychain::new();
+        kc.set("gh_pat", Secret::new("ghp_test".into())).unwrap();
+
+        add(parse_add(), &path, &kc).unwrap();
+
+        let cfg: Config = toml::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
+        assert!(cfg.find("github-read").unwrap().allowed_paths.is_empty());
+    }
 }
