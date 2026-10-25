@@ -8,6 +8,8 @@ The agent calls high-level tools (`proxy_http`); `mcp-warden` injects the secret
 [![crates.io](https://img.shields.io/crates/v/mcp-warden.svg)](https://crates.io/crates/mcp-warden)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
+![mcp-warden demo: the agent calls the GitHub API through a preset without seeing the token, a prompt-injected DELETE is refused before any request is sent, and an SSH deploy runs after approval in Telegram](docs/demo.gif)
+
 ## How it works
 
 1. You store a credential once in the OS keychain via the `mcp-warden` CLI.
