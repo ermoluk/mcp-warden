@@ -5,6 +5,7 @@ edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
 repository = "https://github.com/ermoluk/mcp-warden"
+readme = "README.md"
 description = "Core traits and types for mcp-warden — local-first credential broker for AI agents. Implement these traits to plug in alternate keychain, approval, audit, or preset backends."
 keywords = ["mcp", "credentials", "ai-agent", "security", "keychain"]
 categories = ["authentication", "api-bindings"]
