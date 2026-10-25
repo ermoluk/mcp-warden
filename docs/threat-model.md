@@ -25,7 +25,7 @@ Without scoping, a GitHub PAT lets the agent do everything. Presets restrict by 
 
 ### T4. Silent credential reuse for unintended actions
 
-Every call lands in `~/.config/mcp-warden/audit.db`. The user can review what the agent did. Append-only by trait-surface design (no `delete` / `clear` method).
+Every call lands in `audit.db` next to the config file (`mcp-warden doctor` prints the path). The user can review what the agent did. Append-only by trait-surface design (no `delete` / `clear` method).
 
 ### T5. Approval-prompt phishing via crafted preset names
 

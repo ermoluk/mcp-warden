@@ -80,24 +80,23 @@ mcp-warden audit --last 5                     # see what the agent did
 - **`db_query`** *(v0.2.0)* — run a NAMED QUERY against PostgreSQL / MySQL / Redis. SQL/command is fixed at preset definition; agent supplies only `query_name` + positional params.
 - **`get_secret_for_env`** — last-resort tool when a child process must read a secret from `env`. Always prompts for approval, regardless of preset policy.
 
-## Claude Code skill (optional but recommended)
+## Claude Code plugin
 
-This repo ships a [Claude Code](https://claude.com/claude-code) skill at [`skills/using-mcp-warden/`](skills/using-mcp-warden/) that teaches the agent how to use `mcp-warden` correctly — discover presets first, never paste tokens, respect approval prompts, treat `get_secret_for_env` as last resort.
+For [Claude Code](https://claude.com/claude-code) there is a plugin that bundles the MCP server config, a skill that teaches Claude to use mcp-warden correctly (discover presets first, never ask for tokens, respect approvals, treat `get_secret_for_env` as a last resort) and a guided `/mcp-warden:setup` command. Install the binary first, then in Claude Code:
 
-Install:
-
-```bash
-cp -r skills/using-mcp-warden ~/.claude/skills/
-# or symlink to track this repo's canonical version:
-ln -s "$(pwd)/skills/using-mcp-warden" ~/.claude/skills/using-mcp-warden
+```
+/plugin marketplace add ermoluk/mcp-warden
+/plugin install mcp-warden@mcp-warden
 ```
 
-Then `/reload-plugins` in Claude Code (or restart). The skill activates automatically when its description matches what you're doing.
+Restart Claude Code and run `/mcp-warden:setup`. If you previously added the server with `claude mcp add`, remove that entry so it isn't registered twice. Details: [`plugins/mcp-warden/`](plugins/mcp-warden/).
+
+Other MCP clients: see [`docs/claude-code-setup.md`](docs/claude-code-setup.md) and [`docs/cursor-setup.md`](docs/cursor-setup.md) for manual setup.
 
 ## What's new in v0.4.0
 
 - **Workspace split.** The project is now two crates: `mcp-warden-core` (library — trait surfaces + shared types) and `mcp-warden` (binary — CLI, MCP server, executor, web UI, concrete approval transports). Alternate implementations of `KeychainStore`, `ApprovalTransport`, `AuditSink`, or `PresetSource` now depend only on `mcp-warden-core` and don't drag the binary's GUI/runtime stack.
-- **Telegram approval transport wired in.** The impl already existed in v0.3.0; v0.4.0 makes it actually selectable. Add to `~/.config/mcp-warden/config.toml`:
+- **Telegram approval transport wired in.** The impl already existed in v0.3.0; v0.4.0 makes it actually selectable. Add to your config file (`mcp-warden doctor` prints its path: `~/.config/mcp-warden/` on Linux, `~/Library/Application Support/io.mcp-warden.mcp-warden/` on macOS):
   ```toml
   [approval.telegram]
   bot_token_secret = "tg_bot_token"   # name of the keychain entry, not the token value

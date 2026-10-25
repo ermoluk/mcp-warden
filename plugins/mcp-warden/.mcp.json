@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "mcp-warden": {
+      "command": "sh",
+      "args": ["-c", "exec \"$(command -v mcp-warden || echo \"$HOME/.cargo/bin/mcp-warden\")\" mcp"]
+    }
+  }
+}

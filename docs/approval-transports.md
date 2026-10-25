@@ -43,7 +43,7 @@ approvals.
    mcp-warden secret add tg_bot_token
    ```
 
-4. Add to `~/.config/mcp-warden/config.toml`:
+4. Add to your `config.toml` (`mcp-warden doctor` prints where it is):
 
    ```toml
    [approval.telegram]

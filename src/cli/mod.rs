@@ -72,7 +72,8 @@ pub fn keychain_for_env() -> Arc<dyn mcp_warden_core::keychain::KeychainStore> {
 /// Resolve the config directory.
 ///
 /// `MCP_WARDEN_CONFIG_DIR` env var overrides; otherwise the platform default
-/// (`~/.config/mcp-warden/` on Linux/macOS, `%APPDATA%\mcp-warden\` on Windows).
+/// (`~/.config/mcp-warden/` on Linux, `~/Library/Application Support/io.mcp-warden.mcp-warden/`
+/// on macOS, `%APPDATA%\mcp-warden\mcp-warden\config\` on Windows).
 pub fn config_dir_for_env() -> PathBuf {
     if let Ok(v) = std::env::var("MCP_WARDEN_CONFIG_DIR") {
         return PathBuf::from(v);

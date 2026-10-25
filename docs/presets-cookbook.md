@@ -1,6 +1,6 @@
 # Presets cookbook
 
-Worked examples for each preset type. Copy → adjust → drop into `~/.config/mcp-warden/config.toml`. Validate with `mcp-warden preset test <name>`.
+Worked examples for each preset type. Copy → adjust → drop into your config file (`mcp-warden doctor` prints its path: `~/.config/mcp-warden/` on Linux, `~/Library/Application Support/io.mcp-warden.mcp-warden/` on macOS). Validate with `mcp-warden preset test <name>`.
 
 ## HTTP — GitHub read-only
 

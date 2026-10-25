@@ -1,0 +1,19 @@
+{
+  "$schema": "https://anthropic.com/claude-code/marketplace.schema.json",
+  "name": "mcp-warden",
+  "description": "mcp-warden: let AI coding agents use your credentials without ever seeing them.",
+  "owner": {
+    "name": "ermoluk",
+    "url": "https://github.com/ermoluk"
+  },
+  "plugins": [
+    {
+      "name": "mcp-warden",
+      "source": "./plugins/mcp-warden",
+      "description": "Let Claude Code use your API keys, SSH keys and database passwords without ever seeing them. Bundles the mcp-warden MCP server config, a skill that teaches Claude to call it, and a guided /mcp-warden:setup.",
+      "version": "0.4.1",
+      "category": "security",
+      "homepage": "https://github.com/ermoluk/mcp-warden"
+    }
+  ]
+}

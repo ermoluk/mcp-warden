@@ -158,7 +158,7 @@ Before calling `proxy_http`, mentally answer:
 
 1. Did I see this preset in the most recent `list_presets` output? *(If no — call it.)*
 2. Is the method I'm using in that preset's `allowed_methods`?
-3. Does my path start with `/`, lack `..`, lack `://`?
+3. Does my path start with `/`, and lack `..`, `://`, `%2e`, `\` and `.` segments?
 4. Is the user's intent actually "make an HTTP call", not "show me my key"? *(If show-me-the-key — strongly prefer doing the API call yourself instead.)*
 
 If all four are yes, proceed. If any is no, fix it BEFORE the tool call.
@@ -173,13 +173,12 @@ Trust the broker. Use the broker.
 
 ## Installation (for skill consumers)
 
-To install this skill so Claude Code uses it automatically:
+This skill ships in the `mcp-warden` Claude Code plugin, together with the MCP
+server config and a `/mcp-warden:setup` command:
 
-```bash
-cp -r skills/using-mcp-warden ~/.claude/skills/
+```
+/plugin marketplace add ermoluk/mcp-warden
+/plugin install mcp-warden@mcp-warden
 ```
 
-(Or symlink the directory if you'd rather track the canonical version inside this repo:
-`ln -s "$(pwd)/skills/using-mcp-warden" ~/.claude/skills/using-mcp-warden`.)
-
-Reload Claude Code (`/reload-plugins` or restart). The skill activates on its own when its description matches the user's request.
+To use the skill alone, copy this directory to `~/.claude/skills/using-mcp-warden`.

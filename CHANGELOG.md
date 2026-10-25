@@ -2,6 +2,20 @@
 
 All notable changes to this project will be documented in this file. The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Added
+
+- **Claude Code plugin** (`plugins/mcp-warden/`), installable from this repo as a marketplace: `/plugin marketplace add ermoluk/mcp-warden`, then `/plugin install mcp-warden@mcp-warden`. Bundles the MCP server config (finds the binary on `PATH` or in `~/.cargo/bin`), the `using-mcp-warden` skill, a guided `/mcp-warden:setup` command that never routes secrets through the chat, and a `SessionStart` hook that flags a missing binary.
+
+### Changed
+
+- The `using-mcp-warden` skill moved from `skills/` into the plugin.
+
+### Fixed
+
+- Docs gave `~/.config/mcp-warden/` as the config location on every platform; on macOS it is `~/Library/Application Support/io.mcp-warden.mcp-warden/`. Docs now point to `mcp-warden doctor`, which prints the real path.
+
 ## [0.4.1]
 
 ### Security
