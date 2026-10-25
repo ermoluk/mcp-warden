@@ -4,6 +4,7 @@ use mcp_warden_core::config::Preset;
 use mcp_warden_core::error::{Result, WardenError};
 use russh::client::{self, Handler};
 use russh::keys::ssh_key;
+use std::path::Path;
 use std::sync::Arc;
 
 #[derive(Debug, serde::Deserialize, rmcp::schemars::JsonSchema)]
@@ -97,6 +98,23 @@ pub fn validate_local_path(_preset: &Preset, path: &str) -> Result<()> {
     } else {
         Err(outside())
     }
+}
+
+/// Open the local side of a transfer. Called after approval — which can take
+/// minutes — right after re-running `validate_local_path`, and with
+/// `O_NOFOLLOW`, so a symlink planted at the path since the first check is
+/// refused rather than followed. New files are created `0600`.
+async fn open_local_nofollow(path: &Path, direction: &SftpDirection) -> Result<tokio::fs::File> {
+    let mut opts = tokio::fs::OpenOptions::new();
+    match direction {
+        SftpDirection::Get => opts.write(true).create(true).truncate(true),
+        SftpDirection::Put => opts.read(true),
+    };
+    #[cfg(unix)]
+    opts.custom_flags(libc::O_NOFOLLOW).mode(0o600);
+    opts.open(path).await.map_err(|e| {
+        WardenError::Validation(format!("cannot open local path '{}': {e}", path.display()))
+    })
 }
 
 struct WardenSftpHandler {
@@ -234,17 +252,15 @@ async fn transfer_inner(
                 .open(remote)
                 .await
                 .map_err(|e| WardenError::Executor(format!("sftp open remote: {e}")))?;
-            let mut local_file = tokio::fs::File::create(local)
-                .await
-                .map_err(WardenError::Io)?;
+            validate_local_path(preset, local)?;
+            let mut local_file = open_local_nofollow(Path::new(local), direction).await?;
             tokio::io::copy(&mut remote_file, &mut local_file)
                 .await
                 .map_err(WardenError::Io)?
         }
         SftpDirection::Put => {
-            let mut local_file = tokio::fs::File::open(local)
-                .await
-                .map_err(WardenError::Io)?;
+            validate_local_path(preset, local)?;
+            let mut local_file = open_local_nofollow(Path::new(local), direction).await?;
             let mut remote_file = sftp
                 .create(remote)
                 .await
@@ -349,6 +365,43 @@ mod tests {
         let file_link = dir.path().join("file-link");
         std::os::unix::fs::symlink("/etc/hosts", &file_link).unwrap();
         assert!(validate_local_path(&p(), file_link.to_str().unwrap()).is_err());
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn local_open_never_follows_a_symlink_planted_after_validation() {
+        let dir = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+        let target = dir.path().join("target.txt");
+        std::fs::write(&target, "original").unwrap();
+        let link = dir.path().join("link.txt");
+        std::os::unix::fs::symlink(&target, &link).unwrap();
+
+        // The raw openers are what run after approval — even if a symlink
+        // appeared after validate_local_path, they must refuse it.
+        assert!(
+            open_local_nofollow(&link, &SftpDirection::Get)
+                .await
+                .is_err()
+        );
+        assert!(
+            open_local_nofollow(&link, &SftpDirection::Put)
+                .await
+                .is_err()
+        );
+        assert_eq!(std::fs::read_to_string(&target).unwrap(), "original");
+
+        assert!(
+            open_local_nofollow(&target, &SftpDirection::Put)
+                .await
+                .is_ok()
+        );
+        let fresh = dir.path().join("fresh.txt");
+        open_local_nofollow(&fresh, &SftpDirection::Get)
+            .await
+            .unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        let mode = std::fs::metadata(&fresh).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600);
     }
 
     #[test]

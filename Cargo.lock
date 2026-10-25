@@ -3340,6 +3340,7 @@ dependencies = [
  "dirs",
  "insta",
  "is-terminal",
+ "libc",
  "mcp-warden-core",
  "mysql_async",
  "notify-rust",
