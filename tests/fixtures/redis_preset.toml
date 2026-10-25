@@ -1,0 +1,19 @@
+[[preset]]
+name = "cache-ops"
+type = "redis"
+description = "Read/write cache keys"
+host = "cache.example.com"
+user = "default"
+port = 6379
+secret = "redis_password"
+approval = "prompt"
+
+  [[preset.queries]]
+  name = "get_key"
+  template = "GET"
+  param_types = ["text"]
+
+  [[preset.queries]]
+  name = "set_key"
+  template = "SET"
+  param_types = ["text", "text"]

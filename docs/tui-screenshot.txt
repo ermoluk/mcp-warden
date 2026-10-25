@@ -1,0 +1,20 @@
+┌─ mcp-warden — approval requested ─────────────┐
+│                                                │
+│  proxy_http  →  github-write                   │
+│  POST /repos/me/foo/issues                     │
+│                                                │
+│  body: {"title": "..."}                        │
+│                                                │
+│  Auto-deny in 47s                              │
+│                                                │
+│  [ A ] / [ Y ] / [ Enter ] Approve             │
+│  [ D ] / [ N ] / [ Esc ] Deny                  │
+└────────────────────────────────────────────────┘
+
+The TUI renders to STDERR (alternate screen + raw mode), so it never
+collides with the MCP JSON-RPC channel on STDOUT. In Claude Code or
+Cursor this appears in the MCP server output panel; running
+`mcp-warden mcp` directly in a terminal also shows the dialog.
+
+Keys: A / Y / Enter approve.  D / N / Esc deny.  No input → Timeout.
+Default timeout 60s; can be overridden per `ApprovalRequest`.

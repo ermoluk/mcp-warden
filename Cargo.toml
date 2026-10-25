@@ -1,0 +1,67 @@
+[workspace]
+members = [".", "core"]
+resolver = "2"
+
+[package]
+name = "mcp-warden"
+version = "0.4.1"
+edition = "2024"
+rust-version = "1.85"
+license = "Apache-2.0"
+description = "Local-first credential broker MCP server for AI coding agents."
+readme = "README.md"
+repository = "https://github.com/ermoluk/mcp-warden"
+keywords = ["mcp", "credentials", "ai-agent", "security", "keychain"]
+categories = ["command-line-utilities", "authentication"]
+
+[dependencies]
+mcp-warden-core = { version = "0.4.1", path = "core" }
+clap = { version = "4.5", features = ["derive"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "process", "signal", "time", "sync", "fs"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+rmcp = { version = "1.6", features = ["server", "macros", "schemars", "transport-io"] }
+schemars = "1"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
+notify-rust = "4"
+thiserror = "1"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+url = "2"
+regex = "1"
+directories = "5"
+dirs = "5"
+chrono = { version = "0.4", features = ["serde"] }
+anyhow = "1"
+async-trait = "0.1"
+is-terminal = "0.4"
+ratatui = "0.30"
+crossterm = "0.29"
+russh = "0.60"
+russh-sftp = "2.1"
+tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4"] }
+mysql_async = { version = "0.34", default-features = false, features = ["minimal-rust"] }
+redis = { version = "0.27", features = ["tokio-comp"] }
+openapiv3 = "2.2"
+serde_yaml = "0.9"
+axum = { version = "0.7", features = ["http1", "tokio"] }
+zeroize = { version = "1", features = ["zeroize_derive"] }
+rusqlite = { version = "0.32", features = ["bundled"] }
+tokio-postgres-rustls = "0.14"
+rustls-native-certs = "0.8"
+webpki-roots = "1"
+rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
+
+[dev-dependencies]
+insta = { version = "1", features = ["yaml", "json"] }
+assert_cmd = "2"
+predicates = "3"
+tempfile = "3"
+wiremock = "0.6"
+
+[profile.release]
+lto = "thin"
+codegen-units = 1
+strip = true
+opt-level = "z"

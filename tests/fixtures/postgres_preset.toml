@@ -1,0 +1,22 @@
+[[preset]]
+name = "analytics-readonly"
+type = "postgres"
+description = "Read-only analytics queries"
+host = "db.example.com"
+user = "analytics_ro"
+port = 5432
+database = "analytics"
+secret = "analytics_pg_password"
+approval = "auto"
+
+  [[preset.queries]]
+  name = "find_user"
+  template = "SELECT id, email FROM users WHERE id = $1"
+  param_types = ["int8"]
+  readonly = true
+
+  [[preset.queries]]
+  name = "signups_today"
+  template = "SELECT count(*) FROM users WHERE created_at >= CURRENT_DATE"
+  param_types = []
+  readonly = true

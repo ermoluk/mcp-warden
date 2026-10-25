@@ -1,0 +1,5 @@
+---
+source: src/mcp/tools.rs
+expression: DB_QUERY_DESCRIPTION
+---
+Run a NAMED QUERY against a database preset (PostgreSQL, MySQL, or Redis). You supply `query_name` (must match one declared in the preset) and `params` (positional). The SQL/command is FIXED at preset definition time — you cannot send arbitrary SQL. Returns rows as JSON. Approval prompt fires per the preset's policy. If the user previously approved a time-boxed window for this preset+action, the call proceeds without a new prompt and is recorded as 'windowed' in the audit log.

@@ -1,0 +1,8 @@
+[[preset]]
+name = "github-read"
+type = "http"
+description = "GitHub API (read-only)"
+base_url = "https://api.github.com"
+auth = { type = "bearer", secret = "gh_pat" }
+allowed_methods = ["GET"]
+approval = "auto"

@@ -1,0 +1,5 @@
+---
+source: src/mcp/tools.rs
+expression: LIST_PRESETS_DESCRIPTION
+---
+List available mcp-warden presets — named, scoped actions you may invoke. Returns name, description, type (http|ssh), and approval policy (auto|prompt|deny). Read-only; never returns secret values. Use `proxy_http` for HTTP actions and `get_secret_for_env` only as a last resort when a child process must read a secret from its environment.

@@ -1,0 +1,45 @@
+name: release
+on:
+  push:
+    tags: ['v*']
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: x86_64-apple-darwin
+            name: mcp-warden-x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+            name: mcp-warden-aarch64-apple-darwin
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            name: mcp-warden-x86_64-unknown-linux-gnu
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: ${{ matrix.target }}
+      - name: Linux deps
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - run: cargo build --release --target ${{ matrix.target }} --locked
+      - name: Package
+        env:
+          ASSET_NAME: ${{ matrix.name }}
+          TARGET: ${{ matrix.target }}
+        shell: bash
+        run: |
+          mkdir -p dist
+          cp "target/$TARGET/release/mcp-warden" dist/
+          cp README.md LICENSE dist/
+          tar -czf "$ASSET_NAME.tar.gz" -C dist .
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: ${{ matrix.name }}.tar.gz
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

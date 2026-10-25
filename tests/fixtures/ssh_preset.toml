@@ -1,0 +1,16 @@
+[[preset]]
+name = "deploy-prod"
+type = "ssh"
+description = "Production deploy host"
+host = "deploy.example.com"
+user = "deploy"
+port = 22
+secret = "prod_ssh_key"
+allowed_commands = [
+  "^docker compose (pull|up -d|ps)$",
+  "^git pull$",
+]
+allow_sftp = true
+sftp_allowed_paths = ["/srv/app/", "/var/log/"]
+approval = "prompt"
+timeout_seconds = 300
