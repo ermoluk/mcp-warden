@@ -2,7 +2,11 @@
 
 All notable changes to this project will be documented in this file. The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.4.2]
+
+### Fixed
+
+- **`proxy_http` broke MCP clients built on the TypeScript SDK.** Its output schema described `body` as the boolean schema `true`; the TS SDK rejects that, so `tools/list` failed in those clients (and in Glama's checks). `body` is now an object schema. A test checks every tool schema for this.
 
 ### Added
 
