@@ -23,6 +23,10 @@ mcp-warden preset add github-read \
   --approval auto --confirm-auto
 ```
 
+With no `allowed_paths`, every path under `base_url` is allowed: with a classic PAT and `approval = "auto"` the agent can read every private repo the token can see, without a prompt, so narrow it (e.g. `allowed_paths = ["/user/repos", "/repos/OWNER/[^/]+"]`) and prefer a fine-grained PAT limited to specific repositories — `mcp-warden doctor` warns about every HTTP preset without `allowed_paths`.
+
+Each `allowed_paths` entry must match the whole path, as an exact string or a regex anchored as `^(?:…)$` — never as a prefix, so `/repos/` allows only `/repos/` itself — and `[^/]+` is safer than `.*` for one path segment, because `.*` also matches `/` and reaches everything below.
+
 ## HTTP — Stripe write (prompt per call)
 
 ```toml
