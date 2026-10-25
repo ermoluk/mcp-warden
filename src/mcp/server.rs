@@ -42,6 +42,10 @@ pub struct ListPresetsResponse {
 #[derive(Debug, Clone, Serialize, rmcp::schemars::JsonSchema)]
 pub struct ProxyHttpResponse {
     pub status: u16,
+    /// Response body parsed as JSON; `null` if the upstream body is not JSON.
+    // The doc comment also matters for compatibility: without it schemars
+    // emits the boolean schema `true` here, which the MCP TypeScript SDK
+    // rejects (see `tool_schemas_use_object_property_schemas`).
     pub body: serde_json::Value,
 }
 
@@ -365,5 +369,43 @@ impl ServerHandler for WardenServer {
                 .into(),
         );
         info
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::Value;
+
+    /// The MCP TypeScript SDK (used by many clients, and by Glama's checks)
+    /// rejects a boolean schema such as `true` as a property value, even
+    /// though JSON Schema allows it. Every property must be a schema object.
+    fn assert_object_properties(schema: &Value, at: &str) {
+        if let Some(props) = schema.get("properties").and_then(Value::as_object) {
+            for (name, prop) in props {
+                let here = format!("{at}.properties.{name}");
+                assert!(prop.is_object(), "{here} is not a schema object: {prop}");
+                assert_object_properties(prop, &here);
+            }
+        }
+        if let Some(defs) = schema.get("$defs").and_then(Value::as_object) {
+            for (name, def) in defs {
+                assert_object_properties(def, &format!("{at}.$defs.{name}"));
+            }
+        }
+    }
+
+    #[test]
+    fn tool_schemas_use_object_property_schemas() {
+        let tools = WardenServer::tool_router().list_all();
+        assert!(!tools.is_empty());
+        for tool in tools {
+            let input = Value::Object((*tool.input_schema).clone());
+            assert_object_properties(&input, &format!("{}.inputSchema", tool.name));
+            if let Some(output) = &tool.output_schema {
+                let output = Value::Object((**output).clone());
+                assert_object_properties(&output, &format!("{}.outputSchema", tool.name));
+            }
+        }
     }
 }
