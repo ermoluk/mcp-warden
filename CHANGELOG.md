@@ -7,6 +7,7 @@ All notable changes to this project will be documented in this file. The format 
 ### Added
 
 - **Claude Code plugin** (`plugins/mcp-warden/`), installable from this repo as a marketplace: `/plugin marketplace add ermoluk/mcp-warden`, then `/plugin install mcp-warden@mcp-warden`. Bundles the MCP server config (finds the binary on `PATH` or in `~/.cargo/bin`), the `using-mcp-warden` skill, a guided `/mcp-warden:setup` command that never routes secrets through the chat, and a `SessionStart` hook that flags a missing binary.
+- **Warnings for HTTP presets without `allowed_paths`.** An empty `allowed_paths` allows every path under `base_url`, and the built-in `github-read` template ships that way with `approval = "auto"`: with a classic PAT the agent can read every private repo the token can see. Behaviour is unchanged so existing configs keep working, but it is now visible: `mcp-warden doctor` prints a warning per such preset (and adds a `warnings` field to each `--deep --format json` probe result), `preset add --type http` without `--allowed-paths` warns on stderr, and `preset scaffold` explains it in `--dry-run` output for `github-read`, `stripe-read` and `gitea-read` (with an example allow-list and token advice) and warns when it writes the config. README and the presets cookbook now say that patterns match the whole path (exact strings or regexes anchored as `^(?:…)$`, never prefixes) and that `[^/]+` is safer than `.*` for one segment.
 
 ### Changed
 

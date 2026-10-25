@@ -1,3 +1,4 @@
+use crate::cli::preset::unrestricted_paths_warning;
 use clap::Args;
 use mcp_warden_core::config::{ApprovalPolicy, Auth, Config, Preset, PresetType};
 use mcp_warden_core::error::Result;
@@ -52,16 +53,24 @@ pub async fn run(args: DoctorArgs, config_dir: &Path, kc: &dyn KeychainStore) ->
 
     let cfg = if let Ok(raw) = std::fs::read_to_string(&cfg_path) {
         match toml::from_str::<Config>(&raw) {
-            Ok(cfg) => match cfg.validate(kc) {
-                Ok(()) => {
-                    println!("validation: OK ({} preset(s))", cfg.preset.len());
-                    Some(cfg)
+            Ok(cfg) => {
+                let valid = match cfg.validate(kc) {
+                    Ok(()) => {
+                        println!("validation: OK ({} preset(s))", cfg.preset.len());
+                        true
+                    }
+                    Err(e) => {
+                        println!("validation: FAIL — {e}");
+                        false
+                    }
+                };
+                // Scope warnings are about the config itself, so they are
+                // shown even when the keychain check fails.
+                for w in cfg.preset.iter().filter_map(unrestricted_paths_warning) {
+                    println!("warning:    {w}");
                 }
-                Err(e) => {
-                    println!("validation: FAIL — {e}");
-                    None
-                }
-            },
+                valid.then_some(cfg)
+            }
             Err(e) => {
                 println!("config parse: FAIL — {e}");
                 None
@@ -100,6 +109,8 @@ pub struct ProbeResult {
     pub kind: &'static str,
     pub status: ProbeStatus,
     pub detail: String,
+    /// Config scope warnings for this preset (e.g. no `allowed_paths`).
+    pub warnings: Vec<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -143,6 +154,7 @@ async fn run_probes(cfg: &Config, kc: &dyn KeychainStore, args: &DoctorArgs) -> 
             PresetType::Mysql => "mysql",
             PresetType::Redis => "redis",
         };
+        let warnings: Vec<String> = unrestricted_paths_warning(p).into_iter().collect();
 
         // Skip prompt-policy presets unless explicitly included.
         if matches!(p.approval, ApprovalPolicy::Prompt) && !args.include_prompt {
@@ -152,6 +164,7 @@ async fn run_probes(cfg: &Config, kc: &dyn KeychainStore, args: &DoctorArgs) -> 
                 status: ProbeStatus::Skipped,
                 detail: "approval=prompt — re-run with --include-prompt for interactive probe"
                     .into(),
+                warnings,
             });
             continue;
         }
@@ -161,6 +174,7 @@ async fn run_probes(cfg: &Config, kc: &dyn KeychainStore, args: &DoctorArgs) -> 
                 kind,
                 status: ProbeStatus::Skipped,
                 detail: "approval=deny".into(),
+                warnings,
             });
             continue;
         }
@@ -173,6 +187,7 @@ async fn run_probes(cfg: &Config, kc: &dyn KeychainStore, args: &DoctorArgs) -> 
                     kind,
                     status,
                     detail,
+                    warnings,
                 });
             }
             PresetType::Ssh | PresetType::Postgres | PresetType::Mysql | PresetType::Redis => {
@@ -181,6 +196,7 @@ async fn run_probes(cfg: &Config, kc: &dyn KeychainStore, args: &DoctorArgs) -> 
                     kind,
                     status: ProbeStatus::Skipped,
                     detail: format!("{kind} probe not implemented in --deep MVP — HTTP only"),
+                    warnings,
                 });
             }
         }
@@ -401,6 +417,53 @@ mod tests {
         assert_eq!(redact("Bearer abc123"), "<redacted>");
         assert_eq!(redact("the api_key is wrong"), "<redacted>");
         assert_eq!(redact("Invalid token"), "<redacted>");
+    }
+
+    #[tokio::test]
+    async fn probe_results_carry_open_paths_warning() {
+        let cfg: Config = toml::from_str(
+            r#"
+[[preset]]
+name = "open"
+type = "http"
+description = ""
+base_url = "https://api.github.com"
+auth = { type = "bearer", secret = "gh_pat" }
+allowed_methods = ["GET"]
+approval = "deny"
+
+[[preset]]
+name = "narrow"
+type = "http"
+description = ""
+base_url = "https://api.github.com"
+auth = { type = "bearer", secret = "gh_pat" }
+allowed_methods = ["GET"]
+allowed_paths = ["/user/repos"]
+approval = "deny"
+"#,
+        )
+        .unwrap();
+        let args = DoctorArgs {
+            deep: true,
+            include_prompt: false,
+            timeout_seconds: 1,
+            format: "json".into(),
+        };
+        let kc = mcp_warden_core::keychain::memory::InMemoryKeychain::new();
+
+        let json = serde_json::to_value(run_probes(&cfg, &kc, &args).await).unwrap();
+
+        let open = json[0]["warnings"].as_array().unwrap();
+        assert_eq!(open.len(), 1, "{json}");
+        assert!(
+            open[0]
+                .as_str()
+                .unwrap()
+                .starts_with("preset 'open' has no allowed_paths"),
+            "{json}"
+        );
+        assert_eq!(json[1]["warnings"], serde_json::json!([]), "{json}");
     }
 
     #[test]

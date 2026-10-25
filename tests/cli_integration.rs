@@ -128,3 +128,121 @@ fn approval_command_clears_window_when_switching_to_deny() {
     assert!(!cfg.contains("approval_window_seconds"), "{cfg}");
     assert!(cfg.contains("approval = \"deny\""), "{cfg}");
 }
+
+const OPEN_PATHS_WARNING: &str =
+    "preset 'github-read' has no allowed_paths: every path under https://api.github.com is allowed";
+
+#[test]
+fn doctor_warns_on_http_preset_without_allowed_paths() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_prompt_preset(tmp.path());
+    // The in-memory keychain is empty, so validation fails; the warning is
+    // about the config itself and must still be printed.
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .arg("doctor")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(OPEN_PATHS_WARNING));
+}
+
+#[test]
+fn doctor_does_not_warn_when_allowed_paths_set() {
+    let tmp = tempfile::tempdir().unwrap();
+    let cfg = r#"
+[[preset]]
+name = "github-read"
+type = "http"
+description = "GitHub API"
+base_url = "https://api.github.com"
+auth = { type = "bearer", secret = "gh_pat" }
+allowed_methods = ["GET"]
+allowed_paths = ["/user/repos"]
+approval = "prompt"
+"#;
+    fs::write(tmp.path().join("config.toml"), cfg).unwrap();
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .arg("doctor")
+        .assert()
+        .success()
+        // Parsed (validation then fails on the empty in-memory keychain), so
+        // the absence of the warning is meaningful.
+        .stdout(predicate::str::contains("validation: FAIL"))
+        .stdout(predicate::str::contains("has no allowed_paths").not());
+}
+
+fn preset_add_github(dir: &Path, extra: &[&str]) -> assert_cmd::assert::Assert {
+    fs::write(dir.join("config.toml"), "").unwrap();
+    let mut args = vec![
+        "preset",
+        "add",
+        "github-read",
+        "--type",
+        "http",
+        "--base-url",
+        "https://api.github.com",
+        "--auth-bearer",
+        "gh_pat",
+        "--allowed-methods",
+        "GET",
+    ];
+    args.extend_from_slice(extra);
+    // Each subprocess gets an empty in-memory keychain, so the command still
+    // fails validation on the missing secret after warning. The success path
+    // (warning does not fail the add) is covered by the unit tests in
+    // src/cli/preset.rs.
+    cmd().env("MCP_WARDEN_CONFIG_DIR", dir).args(&args).assert()
+}
+
+#[test]
+fn preset_add_http_without_allowed_paths_warns() {
+    let tmp = tempfile::tempdir().unwrap();
+    preset_add_github(tmp.path(), &[]).stderr(predicate::str::contains(format!(
+        "warning: {OPEN_PATHS_WARNING}"
+    )));
+}
+
+#[test]
+fn preset_add_http_with_allowed_paths_does_not_warn() {
+    let tmp = tempfile::tempdir().unwrap();
+    preset_add_github(tmp.path(), &["--allowed-paths", "/user/repos"])
+        // Reached validation, i.e. past the point where the warning is printed.
+        .stderr(predicate::str::contains("missing secret"))
+        .stderr(predicate::str::contains("has no allowed_paths").not());
+}
+
+#[test]
+fn scaffold_github_read_dry_run_explains_open_paths() {
+    let out = cmd()
+        .args(["preset", "scaffold", "github-read", "--dry-run"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let out = String::from_utf8(out).unwrap();
+    let note = out
+        .find("#   allowed_paths = [\"/user/repos\", \"/repos/OWNER/[^/]+\"]")
+        .unwrap_or_else(|| panic!("missing allowed_paths example: {out}"));
+    assert!(out.contains("fine-grained"), "missing PAT advice: {out}");
+    let preset = out.find("[[preset]]").unwrap();
+    assert!(note < preset, "note must sit above the preset: {out}");
+    // The comment must not change what the preset does.
+    let parsed: toml::Value = toml::from_str(&out).unwrap();
+    assert!(parsed["preset"][0].get("allowed_paths").is_none(), "{out}");
+}
+
+#[test]
+fn scaffold_github_read_warns_when_writing_config() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(tmp.path().join("config.toml"), "").unwrap();
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["preset", "scaffold", "github-read"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(format!(
+            "warning: {OPEN_PATHS_WARNING}"
+        )));
+}
