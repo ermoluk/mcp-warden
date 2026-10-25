@@ -128,7 +128,9 @@ impl ProbeStatus {
 
 async fn run_probes(cfg: &Config, kc: &dyn KeychainStore, args: &DoctorArgs) -> Vec<ProbeResult> {
     let mut out = Vec::with_capacity(cfg.preset.len());
+    // Never follow redirects with credentials attached — see executor/http.rs.
     let client = reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(args.timeout_seconds))
         .build()
         .ok();

@@ -1,5 +1,5 @@
 use crate::executor::ActionExecutor;
-use crate::executor::db::DbQueryResponse;
+use crate::executor::db::{DbQueryResponse, is_local_host};
 use mcp_warden_core::config::{NamedQuery, Preset};
 use mcp_warden_core::error::{Result, WardenError};
 use serde_json::Value;
@@ -21,7 +21,7 @@ pub async fn run(
     let port = preset.port.unwrap_or(6379);
 
     let info = redis::ConnectionInfo {
-        addr: redis::ConnectionAddr::Tcp(host, port),
+        addr: redis_addr(host, port),
         redis: redis::RedisConnectionInfo {
             db: preset
                 .database
@@ -94,5 +94,40 @@ fn redis_value_to_json(v: &redis::Value) -> Value {
             .map(Value::Number)
             .unwrap_or(Value::Null),
         _ => Value::Null,
+    }
+}
+
+/// Plain TCP only when the connection cannot leave this machine; otherwise
+/// TLS with certificate verification (`insecure: false`).
+fn redis_addr(host: String, port: u16) -> redis::ConnectionAddr {
+    if is_local_host(&host) {
+        redis::ConnectionAddr::Tcp(host, port)
+    } else {
+        redis::ConnectionAddr::TcpTls {
+            host,
+            port,
+            insecure: false,
+            tls_params: None,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_hosts_require_verified_tls() {
+        assert!(matches!(
+            redis_addr("cache.example.com".into(), 6379),
+            redis::ConnectionAddr::TcpTls {
+                insecure: false,
+                ..
+            }
+        ));
+        assert!(matches!(
+            redis_addr("localhost".into(), 6379),
+            redis::ConnectionAddr::Tcp(..)
+        ));
     }
 }

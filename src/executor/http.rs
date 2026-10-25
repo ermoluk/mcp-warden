@@ -132,11 +132,7 @@ pub async fn execute(
         }
     }
 
-    let client = reqwest::Client::builder()
-        .timeout(Duration::from_secs(30))
-        .user_agent(format!("mcp-warden/{}", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| WardenError::Executor(e.to_string()))?;
+    let client = http_client()?;
     let method = method_upper
         .parse::<reqwest::Method>()
         .map_err(|_| WardenError::Validation(format!("bad method {method_upper}")))?;
@@ -164,6 +160,19 @@ pub async fn execute(
     exec.audit
         .record_outcome(event_id, AuditOutcome::Ok { status })?;
     Ok(HttpResponse { status, body })
+}
+
+/// Redirects are never followed: a hop could leave `base_url`'s host —
+/// reqwest strips `Authorization` cross-origin but not custom auth headers
+/// (`Auth::Header`) — or land on a path the allow-list never approved.
+/// The 3xx is returned to the agent as-is.
+fn http_client() -> Result<reqwest::Client> {
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .timeout(Duration::from_secs(30))
+        .user_agent(format!("mcp-warden/{}", env!("CARGO_PKG_VERSION")))
+        .build()
+        .map_err(|e| WardenError::Executor(e.to_string()))
 }
 
 fn inject_auth(
@@ -314,5 +323,36 @@ mod tests {
     fn rejects_absolute_path_with_scheme() {
         let err = validate_request(&p(), "GET", "https://attacker.com/x").unwrap_err();
         assert!(err.to_string().contains("scheme"));
+    }
+
+    #[tokio::test]
+    async fn redirects_are_not_followed_so_credentials_stay_put() {
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+
+        let attacker = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200))
+            .expect(0)
+            .mount(&attacker)
+            .await;
+        let api = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(
+                ResponseTemplate::new(302)
+                    .insert_header("location", format!("{}/steal", attacker.uri())),
+            )
+            .mount(&api)
+            .await;
+
+        let resp = http_client()
+            .unwrap()
+            .get(format!("{}/users", api.uri()))
+            .header("X-Api-Key", "SUPERSECRET")
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(resp.status().as_u16(), 302);
+        // MockServer verifies `.expect(0)` on drop: the key never left `api`.
     }
 }

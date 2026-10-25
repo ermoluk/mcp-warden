@@ -1,5 +1,5 @@
 use crate::executor::ActionExecutor;
-use crate::executor::db::DbQueryResponse;
+use crate::executor::db::{DbQueryResponse, is_local_host};
 use mcp_warden_core::config::{NamedQuery, Preset};
 use mcp_warden_core::error::{Result, WardenError};
 use serde_json::Value;
@@ -77,16 +77,6 @@ pub async fn run(
         rows_affected: json_rows.len() as u64,
         rows: json_rows,
     })
-}
-
-/// True when the connection cannot leave this machine: a Unix-socket
-/// directory, `localhost`, or a loopback IP.
-fn is_local_host(host: &str) -> bool {
-    host.starts_with('/')
-        || host.eq_ignore_ascii_case("localhost")
-        || host
-            .parse::<std::net::IpAddr>()
-            .is_ok_and(|ip| ip.is_loopback())
 }
 
 /// TLS connector that verifies the server certificate against the OS trust
@@ -215,29 +205,6 @@ fn row_to_json(row: &tokio_postgres::Row) -> Value {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn only_loopback_and_unix_sockets_count_as_local() {
-        for local in [
-            "localhost",
-            "LOCALHOST",
-            "127.0.0.1",
-            "127.5.5.5",
-            "::1",
-            "/var/run/postgresql",
-        ] {
-            assert!(is_local_host(local), "{local} should be local");
-        }
-        for remote in [
-            "db.example.com",
-            "10.0.0.5",
-            "192.168.1.10",
-            "localhost.evil.com",
-            "",
-        ] {
-            assert!(!is_local_host(remote), "{remote} should be remote");
-        }
-    }
 
     #[test]
     fn tls_connector_builds() {

@@ -5,6 +5,16 @@ use mcp_warden_core::error::{Result, WardenError};
 use serde::Serialize;
 use serde_json::Value;
 
+/// True when the connection cannot leave this machine: a Unix-socket
+/// directory, `localhost`, or a loopback IP.
+pub(crate) fn is_local_host(host: &str) -> bool {
+    host.starts_with('/')
+        || host.eq_ignore_ascii_case("localhost")
+        || host
+            .parse::<std::net::IpAddr>()
+            .is_ok_and(|ip| ip.is_loopback())
+}
+
 pub mod mysql;
 pub mod postgres;
 pub mod redis;
@@ -89,6 +99,29 @@ fn preset_type_label(t: &mcp_warden_core::config::PresetType) -> &'static str {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_loopback_and_unix_sockets_count_as_local() {
+        for local in [
+            "localhost",
+            "LOCALHOST",
+            "127.0.0.1",
+            "127.5.5.5",
+            "::1",
+            "/var/run/postgresql",
+        ] {
+            assert!(is_local_host(local), "{local} should be local");
+        }
+        for remote in [
+            "db.example.com",
+            "10.0.0.5",
+            "192.168.1.10",
+            "localhost.evil.com",
+            "",
+        ] {
+            assert!(!is_local_host(remote), "{remote} should be remote");
+        }
+    }
     use crate::executor::ActionExecutor;
     use async_trait::async_trait;
     use mcp_warden_core::approval::ApprovalDecision;

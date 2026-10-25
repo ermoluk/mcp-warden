@@ -12,6 +12,9 @@ use clap::Parser;
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {
+    // Several deps enable different rustls crypto backends; with more than one
+    // compiled in, rustls refuses to pick implicitly. Pin ring process-wide.
+    let _ = rustls::crypto::ring::default_provider().install_default();
     let args = cli::Cli::parse();
     let store = cli::keychain_for_env();
     let config_dir = cli::config_dir_for_env();

@@ -10,7 +10,8 @@ All notable changes to this project will be documented in this file. The format 
 - **SFTP local-path traversal.** The local path was checked with a string prefix, so `$HOME/../../etc/passwd` and `$HOME-other/…` passed. Now `..` is rejected, the parent directory is resolved through symlinks, roots are compared by whole components, and the target may not be a symlink. Remote `sftp_allowed_paths` prefixes are also compared by whole components (`/srv/app` no longer allows `/srv/app-secrets`).
 - **HTTP path allow-list bypass via percent-encoded dots.** URL parsers treat `%2e` as `.`, so `/repos/%2e%2e/%2e%2e/admin` passed an allow-list like `/repos/.*` and was then normalised to `/admin`; with an empty `allowed_paths` it could also climb out of `base_url`'s path. `%2e`, `%5c`, `\` and `.` segments are now rejected, and the URL is refused if normalisation would change the validated path in any way. The URL is built before the approval prompt and credential lookup.
 - **Telegram bot token in error messages.** reqwest errors include the request URL, and every Bot API URL embeds the token. Transport errors are now rendered without the URL before they reach logs or the agent (invariants 1 and 2).
-- **PostgreSQL password sent in plaintext.** Remote Postgres connections now require TLS with certificate verification (OS trust store + Mozilla roots). Plaintext is allowed only for `localhost`, loopback IPs and Unix sockets. **Breaking** for remote servers without TLS — use an SSH tunnel to `localhost`. MySQL / Redis TLS is still on the roadmap (see threat model R10).
+- **Database passwords sent in plaintext.** Remote PostgreSQL, MySQL and Redis connections now require TLS with certificate and hostname verification. Plaintext is allowed only for `localhost`, loopback IPs and Unix sockets. **Breaking** for remote servers without TLS — use an SSH tunnel to `localhost` (threat model R10). The rustls crypto provider is pinned to `ring` at startup, since several dependencies compile in more than one.
+- **Credentials could follow HTTP redirects.** `proxy_http` and `doctor --deep` followed redirects; reqwest strips `Authorization` on cross-origin hops but not custom auth headers (`Auth::Header`, e.g. `X-Api-Key`), so a 302 from the API could carry the key to another host — or reach a path outside the allow-list. Redirects are no longer followed; the 3xx is returned to the agent (threat model R11).
 
 ### Fixed
 
@@ -32,7 +33,6 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Roadmap
 
-- TLS for MySQL and Redis presets.
 - `mcp-warden approval telegram-test` CLI helper (moved from 0.4.1).
 
 ## [0.4.0]

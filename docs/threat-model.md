@@ -103,9 +103,13 @@ When the user picks **Approve for window** in the TUI / desktop prompt, the exec
 
 The residual risk: an agent that has the user's attention long enough to coerce *one* Approve-for-window can then issue many calls of the same kind without prompts inside the window. Mitigation: keep windows short (10 minutes is the default cap, 30 minutes is generous), and only enable windowing on presets where this trade-off is acceptable. Production-destructive presets should leave the field unset.
 
-### R10. MySQL / Redis connections are plaintext
+### R10. Database transport security
 
-`db_query` against PostgreSQL uses TLS with certificate verification (OS trust store + Mozilla roots) for every non-loopback host since v0.4.1; plaintext is used only for `localhost`, loopback IPs and Unix sockets. **MySQL and Redis presets do not support TLS yet** — their passwords and query results cross the network unencrypted. Until TLS lands for them, point MySQL / Redis presets only at `localhost` (e.g. through an SSH tunnel: `ssh -L 6379:localhost:6379 host`).
+Since v0.4.1 `db_query` requires TLS with certificate and hostname verification for every non-loopback host — PostgreSQL (OS trust store + Mozilla roots), MySQL and Redis (Mozilla roots). Plaintext is used only for `localhost`, loopback IPs and Unix sockets, where traffic cannot leave the machine. There is no opt-out: a remote server without TLS, or with a certificate from a private CA the roots don't cover, is refused. Reach such servers through an SSH tunnel to `localhost` (e.g. `ssh -L 6379:localhost:6379 host`); for PostgreSQL a private CA can also be added to the OS trust store.
+
+### R11. HTTP redirects are not followed
+
+`proxy_http` and `doctor --deep` never follow redirects: a hop could leave `base_url`'s host carrying a custom auth header (reqwest strips only `Authorization` cross-origin) or land on a path the allow-list never approved. The 3xx response is returned to the agent, which can issue a new — validated — request if the target is allowed.
 
 ## Update policy
 

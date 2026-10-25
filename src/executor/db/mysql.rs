@@ -1,5 +1,5 @@
 use crate::executor::ActionExecutor;
-use crate::executor::db::DbQueryResponse;
+use crate::executor::db::{DbQueryResponse, is_local_host};
 use mcp_warden_core::config::{NamedQuery, Preset};
 use mcp_warden_core::error::{Result, WardenError};
 use mysql_async::prelude::*;
@@ -23,14 +23,7 @@ pub async fn run(
     let port = preset.port.unwrap_or(3306);
     let database = preset.database.as_deref().unwrap_or("");
 
-    // OptsBuilder accepts the password as a separate field — never concatenate
-    // into a URL string.
-    let opts = mysql_async::OptsBuilder::default()
-        .ip_or_hostname(host)
-        .tcp_port(port)
-        .user(Some(user.to_string()))
-        .pass(Some(password.expose().to_string()))
-        .db_name(Some(database.to_string()));
+    let opts = mysql_opts(host, port, user, password.expose(), database);
     drop(password);
 
     let pool = mysql_async::Pool::new(opts);
@@ -58,6 +51,30 @@ pub async fn run(
         rows_affected: json_rows.len() as u64,
         rows: json_rows,
     })
+}
+
+/// OptsBuilder takes the password as a separate field — never concatenated
+/// into a URL string. Any non-loopback host gets TLS with certificate and
+/// hostname verification (Mozilla roots); the driver refuses to connect if
+/// the server does not offer TLS.
+fn mysql_opts(
+    host: &str,
+    port: u16,
+    user: &str,
+    password: &str,
+    database: &str,
+) -> mysql_async::OptsBuilder {
+    let opts = mysql_async::OptsBuilder::default()
+        .ip_or_hostname(host)
+        .tcp_port(port)
+        .user(Some(user.to_string()))
+        .pass(Some(password.to_string()))
+        .db_name(Some(database.to_string()));
+    if is_local_host(host) {
+        opts
+    } else {
+        opts.ssl_opts(Some(mysql_async::SslOpts::default()))
+    }
 }
 
 fn convert_param(v: &Value, type_name: &str) -> Result<mysql_async::Value> {
@@ -110,5 +127,20 @@ fn mysql_value_to_json(v: &mysql_async::Value) -> Value {
             .map(Value::Number)
             .unwrap_or(Value::Null),
         _ => Value::Null,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn remote_hosts_require_verified_tls() {
+        let remote = mysql_async::Opts::from(mysql_opts("db.example.com", 3306, "u", "p", "d"));
+        let ssl = remote.ssl_opts().expect("TLS required for remote host");
+        assert!(!ssl.accept_invalid_certs());
+        assert!(!ssl.skip_domain_validation());
+        let local = mysql_async::Opts::from(mysql_opts("127.0.0.1", 3306, "u", "p", "d"));
+        assert!(local.ssl_opts().is_none());
     }
 }
