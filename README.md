@@ -5,6 +5,7 @@
 The agent calls high-level tools (`proxy_http`); `mcp-warden` injects the secret server-side, executes the action, and returns only the result. Your context window stays clean. A leaked transcript leaks nothing useful.
 
 [![ci](https://github.com/ermoluk/mcp-warden/actions/workflows/ci.yml/badge.svg)](https://github.com/ermoluk/mcp-warden/actions/workflows/ci.yml)
+[![crates.io](https://img.shields.io/crates/v/mcp-warden.svg)](https://crates.io/crates/mcp-warden)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
 ## How it works
@@ -22,12 +23,11 @@ The agent's context window contains zero secrets.
 ## Install
 
 ```bash
-cargo install --path .            # from a clone
-# or, once published:
-cargo install mcp-warden
+cargo install mcp-warden          # from crates.io
+cargo install --path .            # or from a clone
 ```
 
-Pre-built binaries for macOS (x86_64, aarch64) and Linux (x86_64) are attached to each [GitHub release](https://github.com/ermoluk/mcp-warden/releases).
+Pre-built binaries for macOS (x86_64, aarch64) and Linux (x86_64), each with a SHA-256 checksum, are attached to every [GitHub release](https://github.com/ermoluk/mcp-warden/releases).
 
 ## 90-second quickstart
 
