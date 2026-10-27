@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file. The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **`proxy_http` returned a credential the upstream echoed back.** The response body reached the agent unchanged, so an upstream that reflects the request — httpbin-style `/headers` or `/anything`, a debug endpoint, an error such as `{"error": "invalid token …"}` — handed the agent the credential it is never meant to see, and from there it could reach transcripts, logs and anything the agent forwards. A prompt injection could steer the agent to such an endpoint whenever `allowed_paths` permitted one. Every key, string and number of the JSON body is now searched for each form the credential was sent in — raw, `<prefix><value>` for header auth, `base64(username:value)` for Basic auth, and percent-encoded — and each occurrence is replaced with `[redacted by mcp-warden]` before the body is returned; one stderr warning names the preset and the number of replacements, never the value (invariants 1–2). A body without the credential is returned unchanged. A credential the upstream returns truncated, split across fields, hashed or otherwise transformed cannot be detected; `ssh_exec` output and `db_query` rows are not scrubbed.
+
 ## [0.4.3]
 
 ### Security
