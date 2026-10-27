@@ -205,6 +205,8 @@ mod tests {
             database: None,
             queries: vec![],
             expires_at: None,
+            max_response_bytes: None,
+            response_fields: vec![],
         }
     }
 

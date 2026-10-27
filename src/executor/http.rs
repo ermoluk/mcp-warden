@@ -25,6 +25,8 @@ pub struct HttpRequest {
 pub struct HttpResponse {
     pub status: u16,
     pub body: serde_json::Value,
+    /// Why mcp-warden withheld or trimmed the body, if it did.
+    pub notice: Option<String>,
 }
 
 /// Validate method + path against the preset's allow-list.
@@ -204,11 +206,16 @@ pub async fn execute(
         }
     };
     let status = resp.status().as_u16();
-    let mut body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    // At most `max_response_bytes` of it; `null` if it isn't JSON.
+    let (mut body, mut notice) = super::response::read_body(resp, preset).await;
     // An upstream that reflects the request would otherwise hand the agent
     // the credential (invariants 1–2).
     let redacted = CredentialForms::http(&preset.auth, &secret).scrub(&mut body);
     drop(secret);
+    if let Some(selected) = super::response::select_fields(&body, preset) {
+        body = selected;
+        notice = Some("only this preset's response_fields are returned".into());
+    }
     if redacted > 0 {
         tracing::warn!(
             "preset '{}': the upstream response echoed the credential; redacted {redacted} \
@@ -218,7 +225,11 @@ pub async fn execute(
     }
     exec.audit
         .record_outcome(event_id, AuditOutcome::Ok { status })?;
-    Ok(HttpResponse { status, body })
+    Ok(HttpResponse {
+        status,
+        body,
+        notice,
+    })
 }
 
 /// Redirects are never followed: a hop could leave `base_url`'s host —
@@ -281,6 +292,8 @@ mod tests {
             database: None,
             queries: vec![],
             expires_at: None,
+            max_response_bytes: None,
+            response_fields: vec![],
         }
     }
 
@@ -576,6 +589,88 @@ mod tests {
             query: None,
         };
         execute(&exec, &preset, req).await.unwrap()
+    }
+
+    /// `GET path` through `execute` against `server`, with the preset
+    /// adjusted by `tweak`.
+    async fn call_preset(
+        server: &MockServer,
+        path: &str,
+        tweak: impl FnOnce(&mut Preset),
+    ) -> HttpResponse {
+        use crate::approval::always_deny::AlwaysDeny;
+        use mcp_warden_core::audit::sqlite_sink::LocalSqlite;
+        use mcp_warden_core::keychain::KeychainStore;
+        use mcp_warden_core::keychain::memory::InMemoryKeychain;
+        use std::sync::Arc;
+
+        let keychain = InMemoryKeychain::new();
+        keychain.set("k", Secret::new("test-token".into())).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let exec = ActionExecutor::new(
+            Arc::new(keychain),
+            Arc::new(AlwaysDeny),
+            None,
+            Arc::new(LocalSqlite::open(&dir.path().join("audit.db")).unwrap()),
+        );
+        let mut preset = p();
+        preset.base_url = Some(server.uri());
+        preset.auth = Some(Auth::Bearer { secret: "k".into() });
+        preset.allowed_paths = vec![];
+        tweak(&mut preset);
+        let req = HttpRequest {
+            preset_name: preset.name.clone(),
+            path: path.into(),
+            method: "GET".into(),
+            body: None,
+            query: None,
+        };
+        execute(&exec, &preset, req).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn body_over_max_response_bytes_is_withheld_but_status_returned() {
+        let big = json!({ "data": "x".repeat(2_000) });
+        let server = echo_server(move |_| big.clone()).await;
+        let resp = call_preset(&server, "/big", |p| p.max_response_bytes = Some(100)).await;
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, Value::Null);
+        assert!(
+            resp.notice
+                .unwrap()
+                .contains("max_response_bytes (100 bytes)")
+        );
+
+        let resp = call_preset(&server, "/big", |p| p.max_response_bytes = Some(10_000)).await;
+        assert_eq!(resp.body["data"].as_str().unwrap().len(), 2_000);
+        assert_eq!(resp.notice, None);
+    }
+
+    #[tokio::test]
+    async fn only_response_fields_are_returned() {
+        let server = echo_server(
+            |_| json!({ "id": 1, "name": "repo", "owner": { "login": "o", "email": "e" } }),
+        )
+        .await;
+        let resp = call_preset(&server, "/repo", |p| {
+            p.response_fields = vec!["id".into(), "owner.login".into()];
+        })
+        .await;
+        assert_eq!(resp.body, json!({ "id": 1, "owner": { "login": "o" } }));
+        assert!(resp.notice.unwrap().contains("response_fields"));
+    }
+
+    #[tokio::test]
+    async fn fields_are_selected_after_the_credential_is_scrubbed() {
+        let server = echo_server(echo_headers).await;
+        let resp = call_preset(&server, "/headers", |p| {
+            p.response_fields = vec!["headers.authorization".into()];
+        })
+        .await;
+        assert_eq!(
+            resp.body,
+            json!({ "headers": { "authorization": "Bearer [redacted by mcp-warden]" } })
+        );
     }
 
     /// The header value the upstream actually received.

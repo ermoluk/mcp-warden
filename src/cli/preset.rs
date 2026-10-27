@@ -105,6 +105,12 @@ pub struct AddArgs {
     pub allowed_methods: Vec<String>,
     #[arg(long, value_delimiter = ',')]
     pub allowed_paths: Vec<String>,
+    /// HTTP: largest response body returned to the agent, in bytes.
+    #[arg(long, value_name = "BYTES")]
+    pub max_response_bytes: Option<u64>,
+    /// HTTP: return only these JSON fields (`id,owner.login,items[].title`).
+    #[arg(long, value_delimiter = ',')]
+    pub response_fields: Vec<String>,
     // SSH / DB
     #[arg(long)]
     pub host: Option<String>,
@@ -390,6 +396,8 @@ fn add(args: AddArgs, config_path: &Path, kc: &dyn KeychainStore) -> Result<()> 
         database: args.database,
         queries: vec![],
         expires_at: None,
+        max_response_bytes: args.max_response_bytes,
+        response_fields: args.response_fields,
     };
     if let Some(w) = unrestricted_paths_warning(&preset) {
         eprintln!("warning: {w}");

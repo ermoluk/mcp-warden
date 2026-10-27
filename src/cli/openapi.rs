@@ -198,6 +198,8 @@ fn build_preset(api: OpenAPI, opts: FromOpenapiOptions<'_>) -> Result<Bootstrapp
         database: None,
         queries: vec![],
         expires_at: None,
+        max_response_bytes: None,
+        response_fields: vec![],
     };
     Ok(Bootstrapped {
         spec_title: api.info.title,

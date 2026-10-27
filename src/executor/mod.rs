@@ -13,6 +13,7 @@ pub mod http;
 pub mod known_hosts;
 pub mod lock;
 pub mod policy;
+pub mod response;
 pub mod sftp;
 pub mod ssh;
 pub mod summary;
@@ -365,6 +366,8 @@ mod tests {
             database: None,
             queries: vec![],
             expires_at: None,
+            max_response_bytes: None,
+            response_fields: vec![],
         }
     }
 

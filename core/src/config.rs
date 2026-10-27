@@ -124,6 +124,53 @@ pub struct Preset {
     /// Written as an RFC 3339 string.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// HTTP: largest response body `proxy_http` hands the agent, in bytes.
+    /// A larger body is read no further and not returned. `None`: no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_response_bytes: Option<u64>,
+    /// HTTP: the only JSON fields `proxy_http` returns — `id`,
+    /// `owner.login`, `items[].title`, `[].name` (see `parse_field_path`).
+    /// Empty: the whole body.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub response_fields: Vec<String>,
+}
+
+/// One step of a `response_fields` path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldStep {
+    /// An object key.
+    Key(String),
+    /// Every element of an array (`[]`).
+    Each,
+}
+
+/// Parse a `response_fields` entry: keys separated by `.`, each optionally
+/// followed by `[]` for "every element" — `owner.login`, `items[].title`;
+/// a leading `[]` addresses a top-level array (`[].name`).
+pub fn parse_field_path(path: &str) -> Result<Vec<FieldStep>> {
+    let bad = || {
+        WardenError::Validation(format!(
+            "response_fields entry '{path}': expected keys separated by '.', each optionally \
+             followed by '[]' (e.g. `owner.login`, `items[].title`, `[].name`)"
+        ))
+    };
+    let mut steps = Vec::new();
+    for segment in path.split('.') {
+        let mut name = segment;
+        let mut arrays = 0;
+        while let Some(rest) = name.strip_suffix("[]") {
+            name = rest;
+            arrays += 1;
+        }
+        if name.contains(['[', ']']) || (name.is_empty() && arrays == 0) {
+            return Err(bad());
+        }
+        if !name.is_empty() {
+            steps.push(FieldStep::Key(name.to_string()));
+        }
+        steps.extend(std::iter::repeat_n(FieldStep::Each, arrays));
+    }
+    Ok(steps)
 }
 
 /// A named, parameterised query template declared in a preset. The agent
@@ -245,6 +292,16 @@ impl Config {
                 "preset '{}': base_url missing host",
                 p.name
             )));
+        }
+        if p.max_response_bytes == Some(0) {
+            return Err(WardenError::Validation(format!(
+                "preset '{}': max_response_bytes must be at least 1",
+                p.name
+            )));
+        }
+        for field in &p.response_fields {
+            parse_field_path(field)
+                .map_err(|e| WardenError::Validation(format!("preset '{}': {e}", p.name)))?;
         }
         for m in &p.allowed_methods {
             match m.as_str() {
@@ -456,6 +513,48 @@ mod tests {
         let back: Config = toml::from_str(&appended).unwrap();
         assert_eq!(back.preset.len(), 1);
         assert_eq!(back.server.len(), 1);
+    }
+
+    #[test]
+    fn response_limits_are_validated() {
+        let kc = InMemoryKeychain::new();
+        kc.set("k", Secret::new("v".into())).unwrap();
+        let cfg = |extra: &str| -> Config {
+            toml::from_str(&format!(
+                "[[preset]]\nname = \"p\"\ntype = \"http\"\ndescription = \"x\"\n\
+                 base_url = \"https://api.example.com\"\nauth = {{ type = \"bearer\", secret = \"k\" }}\n\
+                 approval = \"prompt\"\n{extra}"
+            ))
+            .unwrap()
+        };
+        cfg("max_response_bytes = 1024\nresponse_fields = [\"id\", \"items[].title\"]")
+            .validate(&kc)
+            .unwrap();
+        assert!(cfg("max_response_bytes = 0").validate(&kc).is_err());
+        assert!(cfg("response_fields = [\"a..b\"]").validate(&kc).is_err());
+    }
+
+    #[test]
+    fn field_paths_parse() {
+        use FieldStep::{Each, Key};
+        let key = |k: &str| Key(k.to_string());
+        assert_eq!(parse_field_path("id").unwrap(), [key("id")]);
+        assert_eq!(
+            parse_field_path("owner.login").unwrap(),
+            [key("owner"), key("login")]
+        );
+        assert_eq!(
+            parse_field_path("items[].title").unwrap(),
+            [key("items"), Each, key("title")]
+        );
+        assert_eq!(parse_field_path("[].name").unwrap(), [Each, key("name")]);
+        assert_eq!(
+            parse_field_path("grid[][]").unwrap(),
+            [key("grid"), Each, Each]
+        );
+        for bad in ["", "a..b", "a.", ".a", "a[b", "a]", "a[0]", "a[]b"] {
+            assert!(parse_field_path(bad).is_err(), "{bad:?}");
+        }
     }
 
     #[test]
@@ -738,6 +837,8 @@ mod tests {
                 database: None,
                 queries: vec![],
                 expires_at: None,
+                max_response_bytes: None,
+                response_fields: vec![],
             }],
         };
         let s = toml::to_string(&cfg).unwrap();
