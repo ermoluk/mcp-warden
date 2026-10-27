@@ -268,10 +268,7 @@ fn write_atomic(path: &Path, doc: &Value) -> Result<()> {
     let perms = std::fs::metadata(path)
         .map_err(WardenError::Io)?
         .permissions();
-    let tmp = path.with_extension("mcp-warden-tmp");
-    std::fs::write(&tmp, body).map_err(WardenError::Io)?;
-    std::fs::set_permissions(&tmp, perms).map_err(WardenError::Io)?;
-    std::fs::rename(&tmp, path).map_err(WardenError::Io)
+    crate::fsutil::replace_atomic(path, body.as_bytes(), Some(perms)).map_err(WardenError::Io)
 }
 
 fn confirm(_plan: &str, yes: bool) -> Result<bool> {

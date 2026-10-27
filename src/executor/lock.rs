@@ -57,18 +57,7 @@ pub fn read(path: &Path) -> Option<LockInfo> {
 /// Write the lock file atomically, readable by the owner only.
 pub fn write(path: &Path, info: &LockInfo) -> Result<()> {
     let json = serde_json::to_string(info).map_err(|e| WardenError::Executor(e.to_string()))?;
-    let tmp = path.with_extension("tmp");
-    let mut opts = std::fs::OpenOptions::new();
-    opts.write(true).create(true).truncate(true);
-    #[cfg(unix)]
-    std::os::unix::fs::OpenOptionsExt::mode(&mut opts, 0o600);
-    {
-        use std::io::Write;
-        let mut f = opts.open(&tmp).map_err(WardenError::Io)?;
-        f.write_all(json.as_bytes()).map_err(WardenError::Io)?;
-        f.sync_all().map_err(WardenError::Io)?;
-    }
-    std::fs::rename(&tmp, path).map_err(WardenError::Io)
+    crate::fsutil::replace_atomic(path, json.as_bytes(), None).map_err(WardenError::Io)
 }
 
 /// The executor's view of the lock: a path to watch and a latch.

@@ -5,6 +5,7 @@
 mod approval;
 mod cli;
 mod executor;
+mod fsutil;
 mod mcp;
 mod scan;
 mod web;
