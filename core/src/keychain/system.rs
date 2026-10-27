@@ -1,7 +1,7 @@
 use crate::error::{Result, WardenError};
 use crate::keychain::KeychainStore;
 use crate::secret::Secret;
-use std::sync::Once;
+use std::sync::{Arc, Once};
 
 const SERVICE: &str = "mcp-warden";
 const INDEX_KEY: &str = "__mcp_warden_index__";
@@ -9,12 +9,39 @@ const SEPARATOR: char = '\u{1f}';
 
 static INIT: Once = Once::new();
 
+// The OS credential store, linked directly rather than through the `keyring`
+// crate: keyring 4.2 moved `use_native_store` behind a feature in a minor
+// release, which broke every `cargo install` without `--locked`. These are the
+// stores keyring 4.0's `use_native_store(false)` picked, with the same default
+// configuration, so entries written by earlier versions stay readable.
+#[cfg(target_os = "macos")]
+fn native_store() -> keyring_core::Result<Arc<keyring_core::CredentialStore>> {
+    Ok(apple_native_keyring_store::keychain::Store::new()?)
+}
+
+#[cfg(target_os = "windows")]
+fn native_store() -> keyring_core::Result<Arc<keyring_core::CredentialStore>> {
+    Ok(windows_native_keyring_store::Store::new()?)
+}
+
+#[cfg(target_os = "linux")]
+fn native_store() -> keyring_core::Result<Arc<keyring_core::CredentialStore>> {
+    Ok(linux_keyutils_keyring_store::Store::new()?)
+}
+
+// keyring fell back to a plaintext sample store here; refuse instead.
+#[cfg(not(any(target_os = "macos", target_os = "windows", target_os = "linux")))]
+fn native_store() -> keyring_core::Result<Arc<keyring_core::CredentialStore>> {
+    Err(keyring_core::Error::NotSupportedByStore(
+        "no OS keychain support on this platform (macOS, Windows and Linux only)".to_string(),
+    ))
+}
+
 fn ensure_store() -> Result<()> {
     let mut init_err: Option<String> = None;
-    INIT.call_once(|| {
-        if let Err(e) = keyring::use_native_store(false) {
-            init_err = Some(e.to_string());
-        }
+    INIT.call_once(|| match native_store() {
+        Ok(store) => keyring_core::set_default_store(store),
+        Err(e) => init_err = Some(e.to_string()),
     });
     if let Some(e) = init_err {
         return Err(WardenError::Keychain(e));
