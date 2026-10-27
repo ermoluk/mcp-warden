@@ -83,6 +83,41 @@ pub const TEMPLATES: &[Template] = &[
         build: cloudflare_dns,
         open_paths_note: &[],
     },
+    Template {
+        name: "gitlab-read",
+        description: "GitLab API read (projects by numeric id, issues, MRs), prompt per call",
+        default_secret_name: "gitlab_token",
+        build: gitlab_read,
+        open_paths_note: &[],
+    },
+    Template {
+        name: "linear",
+        description: "Linear GraphQL API (queries AND mutations), prompt per call",
+        default_secret_name: "linear_api_key",
+        build: linear,
+        open_paths_note: &[],
+    },
+    Template {
+        name: "jira-read",
+        description: "Jira Cloud REST read (issues, search, projects), prompt per call",
+        default_secret_name: "jira_api_token",
+        build: jira_read,
+        open_paths_note: &[],
+    },
+    Template {
+        name: "slack-read",
+        description: "Slack Web API read (channels, history, users), prompt per call",
+        default_secret_name: "slack_bot_token",
+        build: slack_read,
+        open_paths_note: &[],
+    },
+    Template {
+        name: "vercel-read",
+        description: "Vercel API read (projects, deployments), prompt per call",
+        default_secret_name: "vercel_token",
+        build: vercel_read,
+        open_paths_note: &[],
+    },
 ];
 
 pub fn find(name: &str) -> Option<&'static Template> {
@@ -237,9 +272,179 @@ fn cloudflare_dns(name: &str, secret_name: &str) -> Preset {
     )
 }
 
+/// Projects by numeric id only: a namespaced id (`group%2Fproject`) is two
+/// segments once decoded, and a looser pattern would also reach endpoints
+/// such as `/projects/:id/variables` that return CI secrets.
+fn gitlab_read(name: &str, secret_name: &str) -> Preset {
+    http_preset(
+        name,
+        "GitLab API (read-only)",
+        "https://gitlab.com/api/v4",
+        bearer(secret_name),
+        &["GET"],
+        &[
+            "/user",
+            "/projects",
+            "/projects/[0-9]+",
+            "/projects/[0-9]+/(issues|merge_requests)(/[0-9]+)?",
+            "/projects/[0-9]+/repository/(tree|commits)",
+        ],
+        ApprovalPolicy::Prompt,
+    )
+}
+
+/// One GraphQL endpoint carries both queries and mutations, so the path
+/// allow-list cannot make it read-only: every call is a prompt.
+fn linear(name: &str, secret_name: &str) -> Preset {
+    http_preset(
+        name,
+        "Linear GraphQL API (queries and mutations)",
+        "https://api.linear.app",
+        // Personal API keys go in `Authorization` as-is, without `Bearer`.
+        Auth::Header {
+            name: "Authorization".to_string(),
+            secret: secret_name.to_string(),
+            prefix: None,
+        },
+        &["POST"],
+        &["/graphql"],
+        ApprovalPolicy::Prompt,
+    )
+}
+
+/// Jira Cloud uses Basic auth with the account e-mail and an API token; the
+/// site and e-mail come from `MCP_WARDEN_JIRA_BASE_URL` / `MCP_WARDEN_JIRA_EMAIL`
+/// (like `gitea-read`), or edit them in the config afterwards.
+fn jira_read(name: &str, secret_name: &str) -> Preset {
+    let base_url = std::env::var("MCP_WARDEN_JIRA_BASE_URL")
+        .unwrap_or_else(|_| "https://your-site.atlassian.net".to_string());
+    let email =
+        std::env::var("MCP_WARDEN_JIRA_EMAIL").unwrap_or_else(|_| "you@example.com".to_string());
+    http_preset(
+        name,
+        "Jira Cloud REST API (read-only)",
+        &base_url,
+        Auth::Basic {
+            username: email,
+            secret: secret_name.to_string(),
+        },
+        &["GET"],
+        &[
+            "/rest/api/3/myself",
+            "/rest/api/3/search/jql",
+            "/rest/api/3/issue/[A-Z][A-Z0-9_]*-[0-9]+(/comment)?",
+            "/rest/api/3/project(/[A-Z][A-Z0-9_]*)?",
+        ],
+        ApprovalPolicy::Prompt,
+    )
+}
+
+/// Read methods of the Web API only; dots are escaped so `conversations.list`
+/// can't match some other method name.
+fn slack_read(name: &str, secret_name: &str) -> Preset {
+    http_preset(
+        name,
+        "Slack Web API (read-only)",
+        "https://slack.com",
+        bearer(secret_name),
+        &["GET"],
+        &[
+            r"/api/auth\.test",
+            r"/api/conversations\.(list|info|history|replies)",
+            r"/api/users\.(list|info)",
+        ],
+        ApprovalPolicy::Prompt,
+    )
+}
+
+/// Projects and deployments, but not `/v9/projects/:id/env`, which returns
+/// a project's environment variables (its secrets).
+fn vercel_read(name: &str, secret_name: &str) -> Preset {
+    http_preset(
+        name,
+        "Vercel API (read-only)",
+        "https://api.vercel.com",
+        bearer(secret_name),
+        &["GET"],
+        &[
+            "/v2/user",
+            "/v9/projects",
+            "/v9/projects/[^/]+",
+            "/v6/deployments",
+            "/v13/deployments/[^/]+",
+        ],
+        ApprovalPolicy::Prompt,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::executor::policy::{Request, check_request};
+
+    /// Would `GET`/`POST path` through template `name` be allowed?
+    fn allows(name: &str, method: &str, path: &str) -> bool {
+        let t = find(name).unwrap();
+        let p = (t.build)(t.name, t.default_secret_name);
+        check_request(&p, &Request::Http { method, path }).is_ok()
+    }
+
+    #[test]
+    fn new_templates_allow_their_reads_and_nothing_secret() {
+        for (template, method, path, want) in [
+            ("gitlab-read", "GET", "/projects/42/issues/7", true),
+            ("gitlab-read", "GET", "/projects/42/merge_requests", true),
+            ("gitlab-read", "GET", "/projects/42/variables", false),
+            (
+                "gitlab-read",
+                "GET",
+                "/projects/group%2Fproject/variables",
+                false,
+            ),
+            ("gitlab-read", "DELETE", "/projects/42", false),
+            ("linear", "POST", "/graphql", true),
+            ("linear", "GET", "/graphql", false),
+            ("jira-read", "GET", "/rest/api/3/issue/PROJ-123", true),
+            (
+                "jira-read",
+                "GET",
+                "/rest/api/3/issue/PROJ-123/comment",
+                true,
+            ),
+            ("jira-read", "GET", "/rest/api/3/search/jql", true),
+            ("jira-read", "GET", "/rest/api/3/users/search", false),
+            ("slack-read", "GET", "/api/conversations.history", true),
+            ("slack-read", "GET", "/api/conversationsXhistory", false),
+            ("slack-read", "GET", "/api/chat.postMessage", false),
+            ("vercel-read", "GET", "/v9/projects/my-app", true),
+            ("vercel-read", "GET", "/v9/projects/my-app/env", false),
+            ("vercel-read", "GET", "/v13/deployments/dpl_123", true),
+        ] {
+            assert_eq!(
+                allows(template, method, path),
+                want,
+                "{template} {method} {path}"
+            );
+        }
+    }
+
+    #[test]
+    fn linear_sends_the_key_without_a_bearer_prefix() {
+        let p = linear("linear", "linear_api_key");
+        match p.auth.as_ref().unwrap() {
+            Auth::Header { name, prefix, .. } => {
+                assert_eq!(name, "Authorization");
+                assert_eq!(prefix, &None);
+            }
+            other => panic!("expected header auth, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn jira_uses_basic_auth_with_the_account_email() {
+        let p = jira_read("jira-read", "jira_api_token");
+        assert!(matches!(p.auth, Some(Auth::Basic { .. })));
+    }
 
     #[test]
     fn all_templates_build_and_have_unique_names() {
