@@ -227,14 +227,15 @@ mod tests {
     #[test]
     fn sftp_checks_remote_prefix() {
         let p = ssh();
+        let local = crate::executor::sftp::tests::allowed_local("x.log");
         let ok = Request::Sftp {
             remote: "/srv/app/x.log",
-            local: "/tmp/x.log",
+            local: &local,
         };
-        assert!(check_request(&p, &ok).is_ok());
+        check_request(&p, &ok).unwrap();
         let bad = Request::Sftp {
             remote: "/etc/shadow",
-            local: "/tmp/x",
+            local: &local,
         };
         assert!(check_request(&p, &bad).is_err());
     }

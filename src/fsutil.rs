@@ -37,14 +37,17 @@ pub(crate) fn replace_atomic(
         use std::os::unix::fs::OpenOptionsExt;
         opts.mode(0o600).custom_flags(libc::O_NOFOLLOW);
     }
-    let result = opts.open(&tmp).and_then(|mut f| {
-        f.write_all(bytes)?;
-        if let Some(perms) = perms {
-            f.set_permissions(perms)?;
-        }
-        f.sync_all()?;
-        std::fs::rename(&tmp, path)
-    });
+    let result = opts
+        .open(&tmp)
+        .and_then(|mut f| {
+            f.write_all(bytes)?;
+            if let Some(perms) = perms {
+                f.set_permissions(perms)?;
+            }
+            f.sync_all()
+            // `f` closes here: Windows won't rename a file that is still open.
+        })
+        .and_then(|()| std::fs::rename(&tmp, path));
     if result.is_err() {
         let _ = std::fs::remove_file(&tmp);
     }

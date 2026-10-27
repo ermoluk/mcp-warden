@@ -291,7 +291,7 @@ async fn transfer_inner(
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
     use mcp_warden_core::config::{ApprovalPolicy, Preset, PresetType};
 
@@ -343,11 +343,26 @@ mod tests {
         validate_remote_path(&p(), "/srv/app/logs/today.log").unwrap();
         validate_remote_path(&p(), "/var/log/syslog").unwrap();
     }
+    /// A local path the SFTP rules allow on this OS: under /tmp on unix,
+    /// under the temp dir (inside the user's profile) on Windows.
+    pub(crate) fn allowed_local(name: &str) -> String {
+        if cfg!(windows) {
+            std::env::temp_dir().join(name).display().to_string()
+        } else {
+            format!("/tmp/{name}")
+        }
+    }
+
     #[test]
     fn local_path_must_be_in_user_home_or_tmp() {
-        validate_local_path(&p(), "/tmp/x.log").unwrap();
-        let err = validate_local_path(&p(), "/etc/shadow").unwrap_err();
-        assert!(err.to_string().contains("$HOME or /tmp"));
+        validate_local_path(&p(), &allowed_local("x.log")).unwrap();
+        let outside = if cfg!(windows) {
+            r"C:\Windows\System32\drivers\etc\hosts"
+        } else {
+            "/etc/shadow"
+        };
+        let err = validate_local_path(&p(), outside).unwrap_err();
+        assert!(err.to_string().contains("$HOME or /tmp"), "{err}");
     }
 
     #[test]

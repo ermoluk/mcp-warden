@@ -603,6 +603,7 @@ fn fake_github_token() -> String {
     format!("{}{body}", ["gh", "p_"].concat())
 }
 
+#[cfg(unix)]
 fn scan_fixture() -> (tempfile::TempDir, tempfile::TempDir, String) {
     let home = tempfile::tempdir().unwrap();
     let project = tempfile::tempdir().unwrap();
@@ -615,12 +616,17 @@ fn scan_fixture() -> (tempfile::TempDir, tempfile::TempDir, String) {
     (home, project, token)
 }
 
+#[cfg(unix)]
 fn scan_cmd(home: &Path, project: &Path) -> Command {
     let mut c = cmd();
     c.env("HOME", home).current_dir(project).arg("scan");
     c
 }
 
+// `HOME` redirects the home directory only on unix; on Windows `dirs`
+// asks the OS for the profile folder. `scan` itself is covered by
+// portable unit tests that pass the home directory explicitly.
+#[cfg(unix)]
 #[test]
 fn scan_reports_locations_without_values() {
     let (home, project, token) = scan_fixture();
@@ -647,6 +653,10 @@ fn scan_reports_locations_without_values() {
     );
 }
 
+// `HOME` redirects the home directory only on unix; on Windows `dirs`
+// asks the OS for the profile folder. `scan` itself is covered by
+// portable unit tests that pass the home directory explicitly.
+#[cfg(unix)]
 #[test]
 fn scan_json_and_fail_on_findings() {
     let (home, project, token) = scan_fixture();
@@ -675,6 +685,10 @@ fn scan_json_and_fail_on_findings() {
         .stdout(predicate::str::contains("\"files_checked\": 1"));
 }
 
+// `HOME` redirects the home directory only on unix; on Windows `dirs`
+// asks the OS for the profile folder. `scan` itself is covered by
+// portable unit tests that pass the home directory explicitly.
+#[cfg(unix)]
 #[test]
 fn scan_with_nothing_to_find() {
     let home = tempfile::tempdir().unwrap();
