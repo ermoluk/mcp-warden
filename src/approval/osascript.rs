@@ -1,11 +1,9 @@
+use super::dialog::{self, DENY, TITLE};
 use super::window_label;
 use async_trait::async_trait;
-use mcp_warden_core::approval::{
-    ApprovalDecision, ApprovalRequest, ApprovalTransport, sanitise_for_prompt,
-};
-use mcp_warden_core::error::{Result, WardenError};
+use mcp_warden_core::approval::{ApprovalDecision, ApprovalRequest, ApprovalTransport};
+use mcp_warden_core::error::Result;
 use std::path::PathBuf;
-use std::process::Stdio;
 use std::time::Duration;
 
 /// Native approval dialog on macOS, shown with `osascript`'s `display dialog`.
@@ -23,10 +21,6 @@ pub struct OsascriptApproval {
     /// Extra time after the dialog's own give-up before the process is killed.
     grace: Duration,
 }
-
-const TITLE: &str = "mcp-warden — approval requested";
-const DENY: &str = "Deny";
-const APPROVE_ONCE: &str = "Approve once";
 
 /// `argv`: give-up seconds, title, message, the deny button, then every
 /// button left to right. Replies with a button label, `deny` (Esc) or
@@ -70,28 +64,10 @@ impl Default for OsascriptApproval {
 impl ApprovalTransport for OsascriptApproval {
     async fn request(&self, req: ApprovalRequest) -> Result<ApprovalDecision> {
         let window = req.window_seconds.map(window_label);
-        let child = tokio::process::Command::new(&self.program)
-            .args(&self.leading_args)
-            .args(dialog_args(&req, window.as_deref()))
-            .stdin(Stdio::null())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|e| WardenError::Executor(format!("osascript: {e}")))?;
-        // The dialog gives up on its own; this only guards against a hung
-        // osascript. Dropping the future kills the child.
-        let out =
-            match tokio::time::timeout(req.timeout + self.grace, child.wait_with_output()).await {
-                Ok(out) => out.map_err(WardenError::Io)?,
-                Err(_) => return Ok(ApprovalDecision::Timeout),
-            };
-        parse_reply(
-            out.status.success(),
-            &String::from_utf8_lossy(&out.stdout),
-            &String::from_utf8_lossy(&out.stderr),
-            window.as_deref(),
-        )
+        let mut cmd = tokio::process::Command::new(&self.program);
+        cmd.args(&self.leading_args)
+            .args(dialog_args(&req, window.as_deref()));
+        dialog::run(cmd, "osascript", &req, self.grace, window.as_deref()).await
     }
 }
 
@@ -99,47 +75,19 @@ impl ApprovalTransport for OsascriptApproval {
 /// The first `argv` item is all digits, so nothing after the script can be
 /// taken for an `osascript` option.
 fn dialog_args(req: &ApprovalRequest, window: Option<&str>) -> Vec<String> {
-    let secs = req.timeout.as_secs().max(1);
-    let preset = sanitise_for_prompt(&req.preset, 64);
-    let action = sanitise_for_prompt(&req.action, 32);
-    let summary = sanitise_for_prompt(&req.summary, 480);
-    let message = format!("{action} → {preset}\n\n{summary}\n\nNo answer in {secs} s means Deny.");
-
     let mut args = Vec::with_capacity(SCRIPT.len() * 2 + 7);
     for line in SCRIPT {
         args.push("-e".to_string());
         args.push((*line).to_string());
     }
-    args.extend([secs.to_string(), TITLE.into(), message, DENY.into()]);
-    args.extend(window.map(str::to_string));
-    args.extend([APPROVE_ONCE.into(), DENY.into()]);
+    args.extend([
+        dialog::give_up_secs(req).to_string(),
+        TITLE.into(),
+        dialog::message(req),
+        DENY.into(),
+    ]);
+    args.extend(dialog::buttons(window));
     args
-}
-
-/// Map the script's reply to a decision. Anything unexpected is an error,
-/// which the executor records as `failed` — never an approval.
-fn parse_reply(
-    success: bool,
-    stdout: &str,
-    stderr: &str,
-    window: Option<&str>,
-) -> Result<ApprovalDecision> {
-    if !success {
-        return Err(WardenError::Executor(format!(
-            "osascript failed: {}",
-            sanitise_for_prompt(stderr.trim(), 200)
-        )));
-    }
-    match stdout.trim_end_matches(['\r', '\n']) {
-        "timeout" => Ok(ApprovalDecision::Timeout),
-        "deny" | DENY => Ok(ApprovalDecision::Denied),
-        APPROVE_ONCE => Ok(ApprovalDecision::Approved),
-        reply if Some(reply) == window => Ok(ApprovalDecision::ApprovedForWindow),
-        reply => Err(WardenError::Executor(format!(
-            "osascript: unexpected reply {:?}",
-            sanitise_for_prompt(reply, 64)
-        ))),
-    }
 }
 
 #[cfg(all(test, unix))]

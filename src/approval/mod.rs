@@ -6,7 +6,9 @@
 
 pub mod always_deny;
 pub mod desktop;
+mod dialog;
 pub mod osascript;
+pub mod powershell;
 pub mod telegram;
 pub mod tui;
 

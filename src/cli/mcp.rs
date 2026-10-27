@@ -1,6 +1,7 @@
 use crate::approval::{
     desktop::DesktopApproval,
     osascript::OsascriptApproval,
+    powershell::PowerShellApproval,
     telegram::{TelegramApproval, TelegramBot},
     tui::TuiApproval,
 };
@@ -114,7 +115,7 @@ pub(crate) fn build_approval(
     let (primary, fallback) = plan_transports(
         env_choice.as_deref(),
         telegram.is_some(),
-        cfg!(target_os = "macos"),
+        cfg!(any(target_os = "macos", windows)),
         std::io::stderr().is_terminal(),
     );
     let bot = telegram
@@ -151,15 +152,16 @@ pub(crate) fn build_approval(
 /// 3. Default: the native desktop prompt.
 ///
 /// The fallback is asked only when the primary times out, so it must be a
-/// prompt the user can actually see. On macOS that is the native dialog,
-/// behind Telegram. Elsewhere it is the TUI, and only when stderr is a
-/// terminal: an MCP client captures the server's stderr, so a TUI drawn
-/// there is invisible (and on macOS it cannot read keys at all while stdin
-/// is the JSON-RPC pipe). An explicit `tui` choice is honoured as is.
+/// prompt the user can actually see. Where there is a native dialog (macOS,
+/// Windows) that is the dialog, behind Telegram. Elsewhere it is the TUI,
+/// and only when stderr is a terminal: an MCP client captures the server's
+/// stderr, so a TUI drawn there is invisible (and on macOS it cannot read
+/// keys at all while stdin is the JSON-RPC pipe). An explicit `tui` choice
+/// is honoured as is.
 fn plan_transports(
     env_choice: Option<&str>,
     has_telegram: bool,
-    is_macos: bool,
+    has_native_dialog: bool,
     stderr_is_tty: bool,
 ) -> (Kind, Option<Kind>) {
     let primary = match env_choice {
@@ -169,7 +171,7 @@ fn plan_transports(
         None if has_telegram => Kind::Telegram,
         None => Kind::Desktop,
     };
-    let fallback = if is_macos {
+    let fallback = if has_native_dialog {
         (primary == Kind::Telegram).then_some(Kind::Desktop)
     } else {
         stderr_is_tty.then_some(Kind::Tui)
@@ -196,11 +198,14 @@ pub(crate) fn telegram_bot(
     )))
 }
 
-/// The native desktop prompt: a dialog on macOS, where notifications have no
-/// buttons, and a notification with Approve / Deny actions elsewhere.
+/// The native desktop prompt: a dialog on macOS and Windows, where
+/// notifications have no buttons, and a notification with Approve / Deny
+/// actions on Linux.
 fn desktop_transport() -> Arc<dyn ApprovalTransport> {
     if cfg!(target_os = "macos") {
         Arc::new(OsascriptApproval::new())
+    } else if cfg!(windows) {
+        Arc::new(PowerShellApproval::new())
     } else {
         Arc::new(DesktopApproval)
     }
@@ -210,6 +215,7 @@ fn desktop_transport() -> Arc<dyn ApprovalTransport> {
 mod tests {
     use super::*;
 
+    /// macOS or Windows: a native dialog exists.
     const MAC: bool = true;
     const LINUX: bool = false;
     const TTY: bool = true;
@@ -252,9 +258,9 @@ mod tests {
 
     #[test]
     fn explicit_tui_is_honoured_everywhere() {
-        for (is_macos, stderr_is_tty) in [(MAC, PIPE), (LINUX, PIPE), (LINUX, TTY)] {
+        for (native_dialog, stderr_is_tty) in [(MAC, PIPE), (LINUX, PIPE), (LINUX, TTY)] {
             assert_eq!(
-                plan_transports(Some("tui"), true, is_macos, stderr_is_tty),
+                plan_transports(Some("tui"), true, native_dialog, stderr_is_tty),
                 (Kind::Tui, None)
             );
         }
