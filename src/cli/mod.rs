@@ -12,6 +12,7 @@ pub mod openapi;
 pub mod preset;
 pub mod preset_templates;
 pub mod run;
+pub mod scan;
 pub mod secret;
 pub mod server;
 pub mod web;
@@ -57,6 +58,10 @@ pub enum Command {
         /// The `[[server]]` entry to launch.
         name: String,
     },
+    /// Find plaintext secrets in MCP client configs (Claude Code, Claude
+    /// Desktop, Cursor, Windsurf, VS Code, Codex) and `.env` files. Read-only;
+    /// shows where they are and what they look like, never their values.
+    Scan(scan::ScanArgs),
     /// Manage wrapped MCP servers for `mcp-warden run`.
     Server {
         #[command(subcommand)]

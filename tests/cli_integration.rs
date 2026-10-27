@@ -593,3 +593,95 @@ fn run_refuses_missing_secret_unknown_server_and_lock_without_stdout() {
         .success();
     run("gh").stderr(predicate::str::contains("locked"));
 }
+
+/// A token-shaped fake, built at runtime so no token literal sits in the
+/// repository (and secret scanners don't flag the fixture).
+fn fake_github_token() -> String {
+    let body: String = (0..36)
+        .map(|i| b"Zq8Lm3RtW0xKp7Vb2Nc5Hd9Jf1Gs4Ya6Ue"[(i * 7 + 3) % 34] as char)
+        .collect();
+    format!("{}{body}", ["gh", "p_"].concat())
+}
+
+fn scan_fixture() -> (tempfile::TempDir, tempfile::TempDir, String) {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    let token = fake_github_token();
+    let claude = serde_json::json!({ "mcpServers": {
+        "github": { "command": "npx", "env": { "GITHUB_TOKEN": token } }
+    }});
+    fs::write(home.path().join(".claude.json"), claude.to_string()).unwrap();
+    fs::write(project.path().join(".env"), format!("API_TOKEN={token}\n")).unwrap();
+    (home, project, token)
+}
+
+fn scan_cmd(home: &Path, project: &Path) -> Command {
+    let mut c = cmd();
+    c.env("HOME", home).current_dir(project).arg("scan");
+    c
+}
+
+#[test]
+fn scan_reports_locations_without_values() {
+    let (home, project, token) = scan_fixture();
+    let out = scan_cmd(home.path(), project.path())
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("~/.claude.json (Claude Code)"))
+        .stdout(predicate::str::contains(
+            "mcpServers.github.env.GITHUB_TOKEN",
+        ))
+        .stdout(predicate::str::contains("importable"))
+        .stdout(predicate::str::contains("API_TOKEN (line 1)"))
+        .stdout(predicate::str::contains("Found 2 plaintext secrets"))
+        .get_output()
+        .clone();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !all.contains(&token[4..]),
+        "a secret leaked into scan output"
+    );
+}
+
+#[test]
+fn scan_json_and_fail_on_findings() {
+    let (home, project, token) = scan_fixture();
+    let out = scan_cmd(home.path(), project.path())
+        .args(["--format", "json"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let text = String::from_utf8(out).unwrap();
+    assert!(!text.contains(&token[4..]));
+    let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+    assert_eq!(v["findings"].as_array().unwrap().len(), 2);
+    assert_eq!(v["findings"][0]["file"], "~/.claude.json");
+    assert_eq!(v["findings"][0]["import"]["var"], "GITHUB_TOKEN");
+
+    scan_cmd(home.path(), project.path())
+        .arg("--fail-on-findings")
+        .assert()
+        .code(1);
+    scan_cmd(home.path(), project.path())
+        .args(["--no-home", "--format", "json"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("\"files_checked\": 1"));
+}
+
+#[test]
+fn scan_with_nothing_to_find() {
+    let home = tempfile::tempdir().unwrap();
+    let project = tempfile::tempdir().unwrap();
+    scan_cmd(home.path(), project.path())
+        .arg("--fail-on-findings")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("No plaintext secrets found"));
+}

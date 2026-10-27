@@ -6,6 +6,7 @@ mod approval;
 mod cli;
 mod executor;
 mod mcp;
+mod scan;
 mod web;
 
 use clap::Parser;
@@ -41,6 +42,7 @@ async fn main() -> anyhow::Result<()> {
             cli::run::run(&name, &config_dir, store.as_ref(), &audit)?
         }
         cli::Command::Server { cmd } => cli::server::run(cmd, &config_path, store.as_ref())?,
+        cli::Command::Scan(args) => cli::scan::run(args)?,
     }
     Ok(())
 }
