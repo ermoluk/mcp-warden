@@ -29,6 +29,8 @@ Replace `OWNER` with your account or org. Without `allowed_paths`, every path un
 
 Each `allowed_paths` entry must match the whole path, as an exact string or a regex anchored as `^(?:…)$` — never as a prefix, so `/repos/` allows only `/repos/` itself — and `[^/]+` is safer than `.*` for one path segment, because `.*` also matches `/` and reaches everything below.
 
+Patterns are matched against the percent-decoded path; the request still goes out with the path exactly as the agent sent it. `%2F` therefore counts as a separator: `/repos/OWNER/[^/]+` does not let `/repos/OWNER/x%2Fcollaborators` through, and a GitLab-style namespaced id like `/projects/group%2Fproject` needs `/projects/[^/]+/[^/]+` (one more `/[^/]+` per nested subgroup level). Paths with an empty segment (`//`), or that decode to invalid UTF-8, control characters, `\` or `.` / `..` segments, are always refused.
+
 ## HTTP — Stripe write (prompt per call)
 
 ```toml

@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### Security
+
+- **HTTP path allow-list bypass via encoded slashes and empty segments.** `allowed_paths` were matched against the raw path, where `%2F` is part of a segment, but upstreams that decode it before routing (nginx does by default) see a separator: `/repos/OWNER/[^/]+` let `/repos/OWNER/x%2Fcollaborators` reach `/repos/OWNER/x/collaborators`. Likewise `//` was accepted although upstreams that merge slashes route a different path. Patterns (exact strings and regexes) are now matched against the percent-decoded path, while the raw path is still what is sent, and paths are rejected if they contain an empty segment (raw or decoded) or decode to invalid UTF-8, control characters (`%00`, `%0a`, …), `\` or `.` / `..` segments (invariants 3 and 6). **Behaviour change** for presets that relied on encoded slashes: a GitLab-style id like `/projects/group%2Fproject` no longer matches `/projects/[^/]+` — use `/projects/[^/]+/[^/]+`; exact entries and regexes that spell out `%2F` (or any other percent-escape) must be written in decoded form.
+
 ### Changed
 
 - **`github-read` and `gitea-read` templates now default to `approval = "prompt"`.** They ship without `allowed_paths`, and pairing an open allow-list with `auto` let an agent read every private repo a classic PAT can see without a single prompt — contrary to invariant 4. `preset scaffold` output explains how to narrow `allowed_paths` and switch to `auto` afterwards. A test now fails if any template combines empty `allowed_paths` with `auto`. Existing configs are unchanged.

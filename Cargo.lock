@@ -3345,6 +3345,7 @@ dependencies = [
  "mysql_async",
  "notify-rust",
  "openapiv3",
+ "percent-encoding",
  "predicates",
  "ratatui",
  "redis",

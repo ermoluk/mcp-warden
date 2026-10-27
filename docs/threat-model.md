@@ -33,7 +33,9 @@ A malicious preset named `"prod-readonly\nApproval: auto\n"` could spoof the des
 
 ### T6. URL-parsing tricks bypassing the path allow-list
 
-`http://attacker.com#@trusted.com` and IPv6 / userinfo abuse. `mcp-warden` parses URLs with the `url` crate (RFC 3986) and rejects request paths that contain `://` or `..`, plus enforces the preset's `base_url` host explicitly. Since v0.4.1 it also rejects `%2e` (which URL parsers treat as `.`), `%5c` / `\` (treated as `/` for http(s)) and `.` segments, and refuses to send any URL whose path was rewritten by normalisation — the path that reaches the server is byte-for-byte the path that passed the allow-list, inside `base_url`'s path. `%2f` is allowed (needed by GitLab-style namespaced ids); it cannot climb without dots.
+`http://attacker.com#@trusted.com` and IPv6 / userinfo abuse. `mcp-warden` parses URLs with the `url` crate (RFC 3986) and rejects request paths that contain `://` or `..`, plus enforces the preset's `base_url` host explicitly. Since v0.4.1 it also rejects `%2e` (which URL parsers treat as `.`), `%5c` / `\` (treated as `/` for http(s)) and `.` segments, and refuses to send any URL whose path was rewritten by normalisation — the path that reaches the server is byte-for-byte the path that passed the allow-list, inside `base_url`'s path.
+
+`%2f` is allowed (GitLab-style namespaced ids such as `projects/group%2Fproject` need it), but upstreams that decode it before routing — nginx does by default — see two segments where the raw path has one, so `/repos/OWNER/[^/]+` matched against the raw path would let `/repos/OWNER/x%2Fcollaborators` reach `/repos/OWNER/x/collaborators`. The allow-list is therefore matched against the percent-decoded path (exact strings and regexes alike), while the raw path is still what is sent: a namespaced id needs `[^/]+/[^/]+`. Paths are also rejected if they contain an empty segment (`//`, raw or decoded — upstreams that merge slashes would route a different path), or if their decoded form is not valid UTF-8 or contains control characters (`%00`, `%0a`, …), `\`, or `.` / `..` segments.
 
 ### T7. TOCTOU on config
 
