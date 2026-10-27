@@ -128,6 +128,11 @@ See `docs/web-ui.md` for the web UI design notes.
 - Audit log is append-only — the trait surface itself contains no `delete` / `clear` method.
 - Stdout is the MCP protocol channel; all logs go to stderr.
 
+## Links
+
+- crates.io: [`mcp-warden`](https://crates.io/crates/mcp-warden)
+- MCP Registry name: `mcp-name: io.github.ermoluk/mcp-warden`
+
 ## License
 
 Apache-2.0 — permanent commitment for the OSS core. See [LICENSE](LICENSE).

@@ -1,0 +1,22 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ermoluk/mcp-warden",
+  "title": "mcp-warden",
+  "description": "Local credential broker: agents call APIs, SSH and DBs via scoped presets; secrets stay in keychain.",
+  "version": "0.4.3",
+  "repository": {
+    "url": "https://github.com/ermoluk/mcp-warden",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "cargo",
+      "identifier": "mcp-warden",
+      "version": "0.4.3",
+      "transport": { "type": "stdio" },
+      "packageArguments": [
+        { "type": "positional", "value": "mcp" }
+      ]
+    }
+  ]
+}
