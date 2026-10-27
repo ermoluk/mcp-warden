@@ -157,6 +157,7 @@ fn decision_label(d: Option<AuditDecision>) -> &'static str {
         Some(AuditDecision::Timeout) => "timeout",
         Some(AuditDecision::Windowed) => "windowed",
         Some(AuditDecision::Refused) => "refused",
+        Some(AuditDecision::Failed) => "failed",
         None => "—",
     }
 }

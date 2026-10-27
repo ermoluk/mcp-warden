@@ -29,6 +29,10 @@ pub enum AuditDecision {
     /// preset, path / command / query outside the allow-list, …). Nobody was
     /// prompted, no credential was read and the upstream was never called.
     Refused,
+    /// The approval prompt could not be shown (the transport returned an
+    /// error). Nobody approved or denied; the call was refused — errors fail
+    /// closed and never become approvals.
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -127,6 +131,26 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&AuditDecision::Refused).unwrap(),
             "\"refused\""
+        );
+    }
+
+    #[test]
+    fn round_trip_failed_decision() {
+        let dir = tempdir().unwrap();
+        let sink = sqlite_sink::LocalSqlite::open(&dir.path().join("audit.db")).unwrap();
+        let id = sink
+            .record_pending("preset", "proxy_http", "GET /users")
+            .unwrap();
+        sink.record_decision(id, AuditDecision::Failed).unwrap();
+        let recent = sink.recent(10).unwrap();
+        assert_eq!(recent[0].decision, Some(AuditDecision::Failed));
+    }
+
+    #[test]
+    fn failed_serialises_as_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&AuditDecision::Failed).unwrap(),
+            "\"failed\""
         );
     }
 

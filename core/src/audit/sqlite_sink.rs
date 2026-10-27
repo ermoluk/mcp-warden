@@ -65,6 +65,7 @@ impl AuditSink for LocalSqlite {
             AuditDecision::Timeout => "timeout",
             AuditDecision::Windowed => "windowed",
             AuditDecision::Refused => "refused",
+            AuditDecision::Failed => "failed",
         };
         self.conn
             .lock()
@@ -143,6 +144,7 @@ fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<AuditEvent> {
             "auto" => AuditDecision::Auto,
             "windowed" => AuditDecision::Windowed,
             "refused" => AuditDecision::Refused,
+            "failed" => AuditDecision::Failed,
             _ => AuditDecision::Timeout,
         }),
         outcome: match (outcome_kind.as_deref(), outcome_data) {
