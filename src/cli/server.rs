@@ -43,12 +43,12 @@ pub fn run(cmd: ServerCmd, config_path: &Path, kc: &dyn KeychainStore) -> Result
     }
 }
 
-fn load(config_path: &Path) -> Result<Config> {
+pub(crate) fn load(config_path: &Path) -> Result<Config> {
     let raw = fs::read_to_string(config_path).unwrap_or_default();
     toml::from_str(&raw).map_err(|e| WardenError::Config(e.to_string()))
 }
 
-fn save(config_path: &Path, cfg: &Config) -> Result<()> {
+pub(crate) fn save(config_path: &Path, cfg: &Config) -> Result<()> {
     if let Some(dir) = config_path.parent() {
         fs::create_dir_all(dir).map_err(WardenError::Io)?;
     }

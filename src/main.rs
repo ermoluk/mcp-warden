@@ -43,6 +43,7 @@ async fn main() -> anyhow::Result<()> {
         }
         cli::Command::Server { cmd } => cli::server::run(cmd, &config_path, store.as_ref())?,
         cli::Command::Scan(args) => cli::scan::run(args)?,
+        cli::Command::Import(args) => cli::import::run(args, &config_path, store.as_ref())?,
     }
     Ok(())
 }

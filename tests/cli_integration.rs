@@ -685,3 +685,71 @@ fn scan_with_nothing_to_find() {
         .success()
         .stdout(predicate::str::contains("No plaintext secrets found"));
 }
+
+fn import_fixture() -> (tempfile::TempDir, tempfile::TempDir, String) {
+    let project = tempfile::tempdir().unwrap();
+    let warden = tempfile::tempdir().unwrap();
+    let token = fake_github_token();
+    let mcp = serde_json::json!({ "mcpServers": {
+        "github": { "command": "npx", "args": ["-y", "server-github"], "env": { "GITHUB_TOKEN": token } }
+    }});
+    fs::write(project.path().join(".mcp.json"), mcp.to_string()).unwrap();
+    (project, warden, token)
+}
+
+fn import_cmd(project: &Path, warden: &Path) -> Command {
+    let mut c = cmd();
+    c.env("MCP_WARDEN_CONFIG_DIR", warden)
+        .current_dir(project)
+        .args(["import", "--no-home"]);
+    c
+}
+
+#[test]
+fn import_rewrites_the_client_config_without_echoing_the_key() {
+    let (project, warden, token) = import_fixture();
+    let out = import_cmd(project.path(), warden.path())
+        .arg("--yes")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Moved mcpServers.github"))
+        .get_output()
+        .clone();
+    let all = format!(
+        "{}{}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+    assert!(
+        !all.contains(&token[4..]),
+        "the key leaked into import output"
+    );
+    let after = fs::read_to_string(project.path().join(".mcp.json")).unwrap();
+    assert!(!after.contains(&token[4..]));
+    let v: serde_json::Value = serde_json::from_str(&after).unwrap();
+    assert_eq!(
+        v["mcpServers"]["github"]["args"],
+        serde_json::json!(["run", "github"])
+    );
+    let cfg = fs::read_to_string(warden.path().join("config.toml")).unwrap();
+    assert!(cfg.contains("env = [\"GITHUB_TOKEN\"]"), "{cfg}");
+}
+
+#[test]
+fn import_without_a_terminal_needs_yes() {
+    let (project, warden, _token) = import_fixture();
+    let before = fs::read_to_string(project.path().join(".mcp.json")).unwrap();
+    import_cmd(project.path(), warden.path())
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--yes"));
+    import_cmd(project.path(), warden.path())
+        .arg("--dry-run")
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("Nothing changed"));
+    assert_eq!(
+        fs::read_to_string(project.path().join(".mcp.json")).unwrap(),
+        before
+    );
+}

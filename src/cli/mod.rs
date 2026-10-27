@@ -5,6 +5,7 @@ use std::sync::Arc;
 pub mod approval;
 pub mod audit;
 pub mod doctor;
+pub mod import;
 pub mod init;
 pub mod lock;
 pub mod mcp;
@@ -62,6 +63,9 @@ pub enum Command {
     /// Desktop, Cursor, Windsurf, VS Code, Codex) and `.env` files. Read-only;
     /// shows where they are and what they look like, never their values.
     Scan(scan::ScanArgs),
+    /// Move the keys `scan` marks importable (`env` of stdio MCP servers)
+    /// into the keychain, and point each client entry at `mcp-warden run`.
+    Import(import::ImportArgs),
     /// Manage wrapped MCP servers for `mcp-warden run`.
     Server {
         #[command(subcommand)]
