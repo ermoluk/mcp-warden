@@ -7,6 +7,8 @@ use std::sync::Mutex;
 
 pub struct LocalSqlite {
     conn: Mutex<Connection>,
+    /// (session id, client) stamped on events recorded from now on.
+    session: Mutex<(Option<String>, Option<String>)>,
 }
 
 impl LocalSqlite {
@@ -30,11 +32,14 @@ impl LocalSqlite {
                 summary TEXT NOT NULL,
                 decision TEXT,
                 outcome_kind TEXT,
-                outcome_data TEXT
+                outcome_data TEXT,
+                client TEXT,
+                session TEXT
             );
             CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);",
         )
         .map_err(|e| WardenError::Audit(e.to_string()))?;
+        add_missing_columns(&conn)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -42,16 +47,46 @@ impl LocalSqlite {
         }
         Ok(Self {
             conn: Mutex::new(conn),
+            session: Mutex::new((None, None)),
         })
     }
 }
 
+/// Databases created before sessions were recorded lack the `client` and
+/// `session` columns. Adding a column keeps every existing row (the log
+/// stays append-only, invariant 7).
+fn add_missing_columns(conn: &Connection) -> Result<()> {
+    let audit = |e: rusqlite::Error| WardenError::Audit(e.to_string());
+    let mut stmt = conn.prepare("PRAGMA table_info(events)").map_err(audit)?;
+    let columns: Vec<String> = stmt
+        .query_map([], |row| row.get::<_, String>(1))
+        .map_err(audit)?
+        .collect::<std::result::Result<_, _>>()
+        .map_err(audit)?;
+    for column in ["client", "session"] {
+        if !columns.iter().any(|c| c == column) {
+            conn.execute_batch(&format!("ALTER TABLE events ADD COLUMN {column} TEXT"))
+                .map_err(audit)?;
+        }
+    }
+    Ok(())
+}
+
 impl AuditSink for LocalSqlite {
     fn record_pending(&self, preset: &str, action: &str, summary: &str) -> Result<i64> {
+        let (session, client) = self.session.lock().unwrap().clone();
         let conn = self.conn.lock().unwrap();
         conn.execute(
-            "INSERT INTO events (created_at, preset, action, summary) VALUES (?1, ?2, ?3, ?4)",
-            params![Utc::now().to_rfc3339(), preset, action, summary],
+            "INSERT INTO events (created_at, preset, action, summary, client, session) \
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+            params![
+                Utc::now().to_rfc3339(),
+                preset,
+                action,
+                summary,
+                client,
+                session
+            ],
         )
         .map_err(|e| WardenError::Audit(e.to_string()))?;
         Ok(conn.last_insert_rowid())
@@ -65,6 +100,7 @@ impl AuditSink for LocalSqlite {
             AuditDecision::Timeout => "timeout",
             AuditDecision::Windowed => "windowed",
             AuditDecision::Refused => "refused",
+            AuditDecision::Failed => "failed",
         };
         self.conn
             .lock()
@@ -97,8 +133,8 @@ impl AuditSink for LocalSqlite {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT id, created_at, preset, action, summary, decision, outcome_kind, outcome_data \
-                 FROM events ORDER BY id DESC LIMIT ?1",
+                "SELECT id, created_at, preset, action, summary, decision, outcome_kind, outcome_data, \
+                 client, session FROM events ORDER BY id DESC LIMIT ?1",
             )
             .map_err(|e| WardenError::Audit(e.to_string()))?;
         let rows = stmt
@@ -112,8 +148,8 @@ impl AuditSink for LocalSqlite {
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
             .prepare(
-                "SELECT id, created_at, preset, action, summary, decision, outcome_kind, outcome_data \
-                 FROM events WHERE created_at >= ?1 ORDER BY id DESC",
+                "SELECT id, created_at, preset, action, summary, decision, outcome_kind, outcome_data, \
+                 client, session FROM events WHERE created_at >= ?1 ORDER BY id DESC",
             )
             .map_err(|e| WardenError::Audit(e.to_string()))?;
         let rows = stmt
@@ -121,6 +157,14 @@ impl AuditSink for LocalSqlite {
             .map_err(|e| WardenError::Audit(e.to_string()))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| WardenError::Audit(e.to_string()))
+    }
+
+    fn set_session(&self, id: &str) {
+        self.session.lock().unwrap().0 = Some(id.to_string());
+    }
+
+    fn set_client(&self, client: &str) {
+        self.session.lock().unwrap().1 = Some(client.to_string());
     }
 }
 
@@ -143,6 +187,7 @@ fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<AuditEvent> {
             "auto" => AuditDecision::Auto,
             "windowed" => AuditDecision::Windowed,
             "refused" => AuditDecision::Refused,
+            "failed" => AuditDecision::Failed,
             _ => AuditDecision::Timeout,
         }),
         outcome: match (outcome_kind.as_deref(), outcome_data) {
@@ -152,5 +197,7 @@ fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<AuditEvent> {
             (Some("err"), Some(s)) => Some(AuditOutcome::Err { message: s }),
             _ => None,
         },
+        client: row.get(8)?,
+        session: row.get(9)?,
     })
 }

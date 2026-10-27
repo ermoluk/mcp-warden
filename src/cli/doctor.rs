@@ -50,6 +50,13 @@ pub async fn run(args: DoctorArgs, config_dir: &Path, kc: &dyn KeychainStore) ->
     );
     let names = kc.list_names().unwrap_or_default();
     println!("secrets:    {} stored", names.len());
+    match crate::executor::lock::read(&config_dir.join(crate::executor::lock::LOCK_FILE)) {
+        Some(info) => println!(
+            "lock:       LOCKED — {} (`mcp-warden unlock`)",
+            info.describe()
+        ),
+        None => println!("lock:       not locked"),
+    }
 
     let cfg = if let Ok(raw) = std::fs::read_to_string(&cfg_path) {
         match toml::from_str::<Config>(&raw) {
@@ -69,6 +76,9 @@ pub async fn run(args: DoctorArgs, config_dir: &Path, kc: &dyn KeychainStore) ->
                 for w in cfg.preset.iter().filter_map(unrestricted_paths_warning) {
                     println!("warning:    {w}");
                 }
+                for w in access_warnings(&cfg, kc, chrono::Utc::now()) {
+                    println!("warning:    {w}");
+                }
                 valid.then_some(cfg)
             }
             Err(e) => {
@@ -82,7 +92,7 @@ pub async fn run(args: DoctorArgs, config_dir: &Path, kc: &dyn KeychainStore) ->
 
     #[cfg(target_os = "macos")]
     println!(
-        "note (macos): unsigned binaries may degrade desktop notifications; the TUI fallback handles approval prompts."
+        "note (macos): `prompt` presets ask in a native dialog titled \"mcp-warden — approval requested\"."
     );
 
     if args.deep {
@@ -396,8 +406,72 @@ fn print_probe_table(results: &[ProbeResult]) {
     }
 }
 
+/// Presets whose `preset grant` window has ended, and wrapped servers whose
+/// keys are missing from the keychain.
+fn access_warnings(
+    cfg: &Config,
+    kc: &dyn KeychainStore,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for p in &cfg.preset {
+        if crate::executor::policy::check_expiry(p, now).is_err() {
+            out.push(format!(
+                "preset '{}': access has expired (`mcp-warden preset grant {} --for 1h`)",
+                p.name, p.name
+            ));
+        }
+    }
+    for s in &cfg.server {
+        for var in &s.env {
+            let entry = s.secret_name(var);
+            if !matches!(kc.get(&entry), Ok(Some(_))) {
+                out.push(format!(
+                    "server '{}': keychain has no '{entry}', so `mcp-warden run {}` will refuse",
+                    s.name, s.name
+                ));
+            }
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn access_warnings_flag_expired_presets_and_missing_server_keys() {
+        use mcp_warden_core::keychain::memory::InMemoryKeychain;
+        use mcp_warden_core::secret::Secret;
+        let now = chrono::Utc::now();
+        let mut cfg: Config = toml::from_str(
+            r#"
+            [[preset]]
+            name = "gh"
+            type = "http"
+            description = "x"
+            base_url = "https://api.github.com"
+            approval = "prompt"
+
+            [[server]]
+            name = "github"
+            command = "npx"
+            env = ["A", "B"]
+            "#,
+        )
+        .unwrap();
+        cfg.preset[0].expires_at = Some(now - chrono::Duration::minutes(1));
+        let kc = InMemoryKeychain::new();
+        kc.set("server/github/A", Secret::new("v".into())).unwrap();
+        let w = access_warnings(&cfg, &kc, now);
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(w[0].contains("'gh': access has expired"));
+        assert!(w[1].contains("'server/github/B'"));
+
+        cfg.preset[0].expires_at = Some(now + chrono::Duration::hours(1));
+        kc.set("server/github/B", Secret::new("v".into())).unwrap();
+        assert!(access_warnings(&cfg, &kc, now).is_empty());
+    }
+
     use super::*;
 
     #[test]

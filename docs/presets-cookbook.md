@@ -60,7 +60,7 @@ approval = "prompt"
 approval_window_seconds = 600
 ```
 
-When the agent triggers the first call, the TUI / desktop prompt offers a
+When the agent triggers the first call, the approval prompt offers a
 third choice: **Approve for 10 min**. Subsequent `proxy_http` calls on
 `linear-read` inside the window proceed without re-prompting and are
 recorded with `decision = "windowed"` in `mcp-warden audit recent`.
@@ -189,6 +189,40 @@ approval = "prompt"
 ```
 
 The Redis `template` is the command name; `param_types` is the positional arg schema.
+
+## HTTP — limit what the agent sees
+
+A list endpoint can return megabytes, and most of it is noise in the agent's context — or text written by strangers (issue bodies, comments) that can try to steer it. Cap the size and keep only the fields the task needs:
+
+```toml
+[[preset]]
+name = "gh-issues"
+type = "http"
+description = "Issue titles and states for one repo"
+base_url = "https://api.github.com"
+auth = { type = "bearer", secret = "gh_pat" }
+allowed_methods = ["GET"]
+allowed_paths = ["/repos/OWNER/REPO/issues"]
+approval = "auto"
+max_response_bytes = 200000
+response_fields = ["[].number", "[].title", "[].state", "[].user.login"]
+```
+
+- **Too large.** A body larger than `max_response_bytes` is not returned. The agent gets the status, `body: null` and a `notice`.
+- **Field paths.** Keys are separated by `.`, and `[]` means "every element": `items[].title`. A leading `[]` addresses a top-level array.
+- **CLI.** The same flags exist: `preset add … --max-response-bytes 200000 --response-fields '[].number,[].title'`.
+
+## More templates
+
+`mcp-warden preset scaffold --list` shows every built-in template. All of these are `prompt`, with allow-lists that keep secret-bearing endpoints out of reach:
+
+| Template | What it reaches | Notes |
+|---|---|---|
+| `gitlab-read` | user, projects by **numeric** id, issues, MRs, tree, commits | A looser pattern would also reach `/projects/:id/variables` (CI secrets) |
+| `linear` | `POST /graphql` | GraphQL carries mutations too, so every call prompts |
+| `jira-read` | myself, `search/jql`, issues and comments, projects | Basic auth with your account e-mail; set `MCP_WARDEN_JIRA_BASE_URL` / `MCP_WARDEN_JIRA_EMAIL` before scaffolding, or edit afterwards |
+| `slack-read` | `auth.test`, `conversations.*` reads, `users.list` / `users.info` | Bot token (`xoxb-…`) |
+| `vercel-read` | user, projects, deployments | Not `/v9/projects/:id/env`, which returns a project's secrets |
 
 ## Patterns to AVOID
 

@@ -6,10 +6,11 @@ use mcp_warden_core::error::{Result, WardenError};
 
 /// Desktop-notification approval transport.
 ///
-/// Only Linux supports interactive notification actions via DBus; on macOS
-/// and Windows we fire the notification (so the user knows something is
-/// asking) and return `Timeout`, leaving the executor to fall through to
-/// the TUI prompt.
+/// On Linux the notification carries Approve / Deny actions via DBus.
+/// Elsewhere notifications have no actions: the notification fires and the
+/// transport returns `Timeout`. macOS and Windows use their native dialogs
+/// instead (`OsascriptApproval`, `PowerShellApproval`; see
+/// `cli::mcp::desktop_transport`).
 pub struct DesktopApproval;
 
 #[async_trait]
@@ -37,12 +38,7 @@ impl ApprovalTransport for DesktopApproval {
             {
                 n.action("approve", "Approve once");
                 if let Some(secs) = window_seconds {
-                    let label = if secs >= 60 && secs % 60 == 0 {
-                        format!("Approve for {} min", secs / 60)
-                    } else {
-                        format!("Approve for {secs} s")
-                    };
-                    n.action("approve_window", &label);
+                    n.action("approve_window", &super::window_label(secs));
                 }
                 n.action("deny", "Deny");
                 let handle = n.show().map_err(|e| WardenError::Executor(e.to_string()))?;
@@ -62,8 +58,7 @@ impl ApprovalTransport for DesktopApproval {
             #[cfg(not(target_os = "linux"))]
             {
                 // window_seconds is unused on non-Linux because no interactive
-                // notification actions are wired up; the executor falls back
-                // to the TUI which handles the window choice.
+                // notification actions are wired up.
                 let _ = window_seconds;
                 let _ = n.show().map_err(|e| WardenError::Executor(e.to_string()))?;
                 Ok(ApprovalDecision::Timeout)

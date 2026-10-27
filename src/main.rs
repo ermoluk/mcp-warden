@@ -5,7 +5,9 @@
 mod approval;
 mod cli;
 mod executor;
+mod fsutil;
 mod mcp;
+mod scan;
 mod web;
 
 use clap::Parser;
@@ -25,10 +27,27 @@ async fn main() -> anyhow::Result<()> {
         cli::Command::Secret { cmd } => cli::secret::run(cmd, store.as_ref())?,
         cli::Command::Preset { cmd } => cli::preset::run(cmd, &config_path, store.as_ref()).await?,
         cli::Command::Audit(args) => cli::audit::run(args, &audit_db)?,
+        cli::Command::Approval(args) if args.is_telegram_test() => {
+            cli::approval::telegram_test(&config_dir, store).await?
+        }
         cli::Command::Approval(args) => cli::approval::run(args, &config_path)?,
         cli::Command::Mcp => cli::mcp::cmd(&config_dir).await?,
         cli::Command::Doctor(args) => cli::doctor::run(args, &config_dir, store.as_ref()).await?,
         cli::Command::Web { port } => cli::web::run(port, &config_path, &audit_db).await?,
+        cli::Command::Lock { reason } => {
+            std::fs::create_dir_all(&config_dir)?;
+            let audit = mcp_warden_core::audit::sqlite_sink::LocalSqlite::open(&audit_db)?;
+            cli::lock::lock(&config_dir, reason, &audit)?
+        }
+        cli::Command::Unlock => cli::lock::unlock_cmd(&config_dir, store, &audit_db).await?,
+        cli::Command::Run { name } => {
+            std::fs::create_dir_all(&config_dir)?;
+            let audit = mcp_warden_core::audit::sqlite_sink::LocalSqlite::open(&audit_db)?;
+            cli::run::run(&name, &config_dir, store.as_ref(), &audit)?
+        }
+        cli::Command::Server { cmd } => cli::server::run(cmd, &config_path, store.as_ref())?,
+        cli::Command::Scan(args) => cli::scan::run(args)?,
+        cli::Command::Import(args) => cli::import::run(args, &config_path, store.as_ref())?,
     }
     Ok(())
 }

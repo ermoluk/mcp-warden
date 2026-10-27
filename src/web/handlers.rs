@@ -157,6 +157,7 @@ fn decision_label(d: Option<AuditDecision>) -> &'static str {
         Some(AuditDecision::Timeout) => "timeout",
         Some(AuditDecision::Windowed) => "windowed",
         Some(AuditDecision::Refused) => "refused",
+        Some(AuditDecision::Failed) => "failed",
         None => "—",
     }
 }
@@ -424,6 +425,7 @@ pub async fn audit_log(
   <td>{summary}</td>
   <td>{decision}</td>
   <td>{outcome}</td>
+  <td>{client}</td>
 </tr>"#,
             id = e.id,
             ts = esc(&e.created_at.format("%Y-%m-%d %H:%M:%S").to_string()),
@@ -436,6 +438,11 @@ pub async fn audit_log(
             summary = esc(&e.summary),
             decision = esc(decision_label(e.decision)),
             outcome = outcome_cell(&e.outcome),
+            // Client name/version come from the MCP client: escaped too.
+            client = esc(&match (&e.client, &e.session) {
+                (Some(c), Some(s)) => format!("{c} · {s}"),
+                (c, s) => c.clone().or(s.clone()).unwrap_or_default(),
+            }),
         ));
     }
 
@@ -450,7 +457,7 @@ pub async fn audit_log(
   <thead>
     <tr>
       <th>#</th><th>Time (UTC)</th><th>Preset</th><th>Action</th>
-      <th>Summary</th><th>Decision</th><th>Outcome</th>
+      <th>Summary</th><th>Decision</th><th>Outcome</th><th>Client · session</th>
     </tr>
   </thead>
   <tbody>{rows}</tbody>

@@ -1,4 +1,6 @@
 use crate::executor::ActionExecutor;
+use crate::executor::credential_echo::CredentialForms;
+use crate::executor::policy::{Request, check_request};
 use mcp_warden_core::audit::AuditOutcome;
 use mcp_warden_core::config::{Auth, Preset};
 use mcp_warden_core::error::{Result, WardenError};
@@ -23,6 +25,8 @@ pub struct HttpRequest {
 pub struct HttpResponse {
     pub status: u16,
     pub body: serde_json::Value,
+    /// Why mcp-warden withheld or trimmed the body, if it did.
+    pub notice: Option<String>,
 }
 
 /// Validate method + path against the preset's allow-list.
@@ -67,10 +71,10 @@ pub fn validate_request(preset: &Preset, method: &str, path: &str) -> Result<()>
         if pat == &*decoded {
             return Ok(());
         }
-        if let Ok(rx) = mcp_warden_core::config::anchored_regex(pat) {
-            if rx.is_match(&decoded) {
-                return Ok(());
-            }
+        if let Ok(rx) = mcp_warden_core::config::anchored_regex(pat)
+            && rx.is_match(&decoded)
+        {
+            return Ok(());
         }
     }
     Err(WardenError::Validation(format!(
@@ -114,6 +118,15 @@ fn decode_path(path: &str) -> Result<std::borrow::Cow<'_, str>> {
 
 /// Join `base_url` and the agent-supplied path.
 ///
+/// Validate method + path and build the request URL from `base_url`.
+pub(crate) fn validated_url(preset: &Preset, method: &str, path: &str) -> Result<Url> {
+    validate_request(preset, method, path)?;
+    let base = preset.base_url.as_deref().ok_or_else(|| {
+        WardenError::Validation(format!("preset '{}' has no base_url", preset.name))
+    })?;
+    build_url(base, path)
+}
+
 /// Defence in depth for `validate_request`: the URL that gets sent must carry
 /// exactly the path that was validated. If parsing would normalise or
 /// re-encode it in any way (dot segments, `\\`, spaces, `?`…), refuse.
@@ -137,13 +150,12 @@ pub async fn execute(
 ) -> Result<HttpResponse> {
     let method_upper = req.method.to_uppercase();
     let summary = crate::executor::summary::http(&method_upper, &req.path);
-    let mut url = validate_request(preset, &method_upper, &req.path)
-        .and_then(|()| {
-            let base = preset.base_url.as_deref().ok_or_else(|| {
-                WardenError::Validation(format!("preset '{}' has no base_url", preset.name))
-            })?;
-            build_url(base, &req.path)
-        })
+    let request = Request::Http {
+        method: &method_upper,
+        path: &req.path,
+    };
+    let mut url = check_request(preset, &request)
+        .and_then(|()| validated_url(preset, &method_upper, &req.path))
         .inspect_err(|e| exec.record_refused(&preset.name, "proxy_http", &summary, e))?;
     let event_id = exec
         .authorise(preset, "proxy_http", &summary, false)
@@ -179,8 +191,8 @@ pub async fn execute(
     if let Some(body) = req.body {
         builder = builder.json(&body);
     }
-    drop(secret);
 
+    // `secret` stays alive until the body has been scrubbed of it below.
     let resp = match builder.send().await {
         Ok(r) => r,
         Err(e) => {
@@ -194,10 +206,30 @@ pub async fn execute(
         }
     };
     let status = resp.status().as_u16();
-    let body: serde_json::Value = resp.json().await.unwrap_or(serde_json::Value::Null);
+    // At most `max_response_bytes` of it; `null` if it isn't JSON.
+    let (mut body, mut notice) = super::response::read_body(resp, preset).await;
+    // An upstream that reflects the request would otherwise hand the agent
+    // the credential (invariants 1–2).
+    let redacted = CredentialForms::http(&preset.auth, &secret).scrub(&mut body);
+    drop(secret);
+    if let Some(selected) = super::response::select_fields(&body, preset) {
+        body = selected;
+        notice = Some("only this preset's response_fields are returned".into());
+    }
+    if redacted > 0 {
+        tracing::warn!(
+            "preset '{}': the upstream response echoed the credential; redacted {redacted} \
+             occurrence(s) before returning it to the agent",
+            preset.name
+        );
+    }
     exec.audit
         .record_outcome(event_id, AuditOutcome::Ok { status })?;
-    Ok(HttpResponse { status, body })
+    Ok(HttpResponse {
+        status,
+        body,
+        notice,
+    })
 }
 
 /// Redirects are never followed: a hop could leave `base_url`'s host —
@@ -259,6 +291,9 @@ mod tests {
             sftp_allowed_paths: vec![],
             database: None,
             queries: vec![],
+            expires_at: None,
+            max_response_bytes: None,
+            response_fields: vec![],
         }
     }
 
@@ -480,5 +515,357 @@ mod tests {
             .unwrap();
         assert_eq!(resp.status().as_u16(), 302);
         // MockServer verifies `.expect(0)` on drop: the key never left `api`.
+    }
+
+    // Credential echo (invariants 1–2): an upstream that reflects the
+    // request must not hand the injected credential to the agent.
+
+    use serde_json::{Value, json};
+    use wiremock::{Mock, MockServer, ResponseTemplate};
+
+    const REDACTED: &str = "[redacted by mcp-warden]";
+
+    /// An upstream that answers every request with `respond(request)`.
+    async fn echo_server(
+        respond: impl Fn(&wiremock::Request) -> Value + Send + Sync + 'static,
+    ) -> MockServer {
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(move |req: &wiremock::Request| {
+                ResponseTemplate::new(200).set_body_json(respond(req))
+            })
+            .mount(&server)
+            .await;
+        server
+    }
+
+    /// httpbin's `/headers`: every request header, reflected as JSON.
+    fn echo_headers(req: &wiremock::Request) -> Value {
+        let headers: serde_json::Map<String, Value> = req
+            .headers
+            .iter()
+            .map(|(k, v)| (k.to_string(), v.to_str().unwrap().into()))
+            .collect();
+        json!({ "headers": headers, "origin": "203.0.113.7" })
+    }
+
+    fn bearer_of(req: &wiremock::Request) -> String {
+        let value = req.headers["authorization"].to_str().unwrap();
+        value.strip_prefix("Bearer ").unwrap().to_string()
+    }
+
+    /// `GET path` through `execute`, with `auth` bound to `secret`. The
+    /// preset is `auto`, so the approval transport is never asked.
+    async fn call_upstream(
+        server: &MockServer,
+        auth: Auth,
+        secret: &str,
+        path: &str,
+    ) -> HttpResponse {
+        use crate::approval::always_deny::AlwaysDeny;
+        use mcp_warden_core::audit::sqlite_sink::LocalSqlite;
+        use mcp_warden_core::keychain::KeychainStore;
+        use mcp_warden_core::keychain::memory::InMemoryKeychain;
+        use std::sync::Arc;
+
+        let keychain = InMemoryKeychain::new();
+        keychain.set("k", Secret::new(secret.into())).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let exec = ActionExecutor::new(
+            Arc::new(keychain),
+            Arc::new(AlwaysDeny),
+            None,
+            Arc::new(LocalSqlite::open(&dir.path().join("audit.db")).unwrap()),
+        );
+        let mut preset = p();
+        preset.base_url = Some(server.uri());
+        preset.auth = Some(auth);
+        preset.allowed_paths = vec![];
+        let req = HttpRequest {
+            preset_name: preset.name.clone(),
+            path: path.into(),
+            method: "GET".into(),
+            body: None,
+            query: None,
+        };
+        execute(&exec, &preset, req).await.unwrap()
+    }
+
+    /// `GET path` through `execute` against `server`, with the preset
+    /// adjusted by `tweak`.
+    async fn call_preset(
+        server: &MockServer,
+        path: &str,
+        tweak: impl FnOnce(&mut Preset),
+    ) -> HttpResponse {
+        use crate::approval::always_deny::AlwaysDeny;
+        use mcp_warden_core::audit::sqlite_sink::LocalSqlite;
+        use mcp_warden_core::keychain::KeychainStore;
+        use mcp_warden_core::keychain::memory::InMemoryKeychain;
+        use std::sync::Arc;
+
+        let keychain = InMemoryKeychain::new();
+        keychain.set("k", Secret::new("test-token".into())).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let exec = ActionExecutor::new(
+            Arc::new(keychain),
+            Arc::new(AlwaysDeny),
+            None,
+            Arc::new(LocalSqlite::open(&dir.path().join("audit.db")).unwrap()),
+        );
+        let mut preset = p();
+        preset.base_url = Some(server.uri());
+        preset.auth = Some(Auth::Bearer { secret: "k".into() });
+        preset.allowed_paths = vec![];
+        tweak(&mut preset);
+        let req = HttpRequest {
+            preset_name: preset.name.clone(),
+            path: path.into(),
+            method: "GET".into(),
+            body: None,
+            query: None,
+        };
+        execute(&exec, &preset, req).await.unwrap()
+    }
+
+    #[tokio::test]
+    async fn body_over_max_response_bytes_is_withheld_but_status_returned() {
+        let big = json!({ "data": "x".repeat(2_000) });
+        let server = echo_server(move |_| big.clone()).await;
+        let resp = call_preset(&server, "/big", |p| p.max_response_bytes = Some(100)).await;
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, Value::Null);
+        assert!(
+            resp.notice
+                .unwrap()
+                .contains("max_response_bytes (100 bytes)")
+        );
+
+        let resp = call_preset(&server, "/big", |p| p.max_response_bytes = Some(10_000)).await;
+        assert_eq!(resp.body["data"].as_str().unwrap().len(), 2_000);
+        assert_eq!(resp.notice, None);
+    }
+
+    #[tokio::test]
+    async fn only_response_fields_are_returned() {
+        let server = echo_server(
+            |_| json!({ "id": 1, "name": "repo", "owner": { "login": "o", "email": "e" } }),
+        )
+        .await;
+        let resp = call_preset(&server, "/repo", |p| {
+            p.response_fields = vec!["id".into(), "owner.login".into()];
+        })
+        .await;
+        assert_eq!(resp.body, json!({ "id": 1, "owner": { "login": "o" } }));
+        assert!(resp.notice.unwrap().contains("response_fields"));
+    }
+
+    #[tokio::test]
+    async fn fields_are_selected_after_the_credential_is_scrubbed() {
+        let server = echo_server(echo_headers).await;
+        let resp = call_preset(&server, "/headers", |p| {
+            p.response_fields = vec!["headers.authorization".into()];
+        })
+        .await;
+        assert_eq!(
+            resp.body,
+            json!({ "headers": { "authorization": "Bearer [redacted by mcp-warden]" } })
+        );
+    }
+
+    /// The header value the upstream actually received.
+    async fn sent_header(server: &MockServer, name: &str) -> String {
+        let requests = server.received_requests().await.unwrap();
+        requests[0].headers[name].to_str().unwrap().to_string()
+    }
+
+    /// Every key, string and number in `v`: all the text the agent sees.
+    fn texts(v: &Value) -> Vec<String> {
+        match v {
+            Value::String(s) => vec![s.clone()],
+            Value::Number(n) => vec![n.to_string()],
+            Value::Array(items) => items.iter().flat_map(texts).collect(),
+            Value::Object(map) => map
+                .iter()
+                .flat_map(|(k, v)| std::iter::once(k.clone()).chain(texts(v)))
+                .collect(),
+            Value::Null | Value::Bool(_) => vec![],
+        }
+    }
+
+    fn assert_absent(body: &Value, form: &str) {
+        for text in texts(body) {
+            assert!(
+                !text.contains(form),
+                "{form:?} reached the agent in {text:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn bearer_token_echoed_by_upstream_is_redacted() {
+        let token = "test-bearer-token-0123456789";
+        let server = echo_server(echo_headers).await;
+        let resp = call_upstream(
+            &server,
+            Auth::Bearer { secret: "k".into() },
+            token,
+            "/headers",
+        )
+        .await;
+
+        assert_eq!(
+            sent_header(&server, "authorization").await,
+            format!("Bearer {token}")
+        );
+        assert_eq!(resp.status, 200);
+        assert_absent(&resp.body, token);
+        assert_eq!(
+            resp.body["headers"]["authorization"],
+            format!("Bearer {REDACTED}")
+        );
+        assert_eq!(resp.body["origin"], "203.0.113.7");
+        let ua = resp.body["headers"]["user-agent"].as_str().unwrap();
+        assert!(ua.starts_with("mcp-warden/"), "{ua}");
+    }
+
+    #[tokio::test]
+    async fn header_auth_echo_is_redacted_together_with_its_prefix() {
+        let key = "test-header-key-0123456789";
+        let server = echo_server(echo_headers).await;
+        let auth = Auth::Header {
+            name: "X-Api-Key".into(),
+            secret: "k".into(),
+            prefix: Some("Token ".into()),
+        };
+        let resp = call_upstream(&server, auth, key, "/headers").await;
+
+        assert_eq!(
+            sent_header(&server, "x-api-key").await,
+            format!("Token {key}")
+        );
+        assert_absent(&resp.body, key);
+        assert_eq!(resp.body["headers"]["x-api-key"], REDACTED);
+        assert_eq!(resp.body["origin"], "203.0.113.7");
+    }
+
+    #[tokio::test]
+    async fn basic_auth_echo_is_redacted_raw_and_base64() {
+        // `deploy:Basic-Pa55word!` is 22 bytes, so its base64 ends in `==`.
+        let password = "Basic-Pa55word!";
+        let server = echo_server(move |req| {
+            let mut body = echo_headers(req);
+            let header = req.headers["authorization"].to_str().unwrap();
+            let encoded = header.strip_prefix("Basic ").unwrap();
+            // A debug endpoint that also dumps the credentials it decoded.
+            body["credentials"] = json!({ "user": "deploy", "password": password });
+            body["unpadded"] = encoded.trim_end_matches('=').into();
+            body
+        })
+        .await;
+        let auth = Auth::Basic {
+            username: "deploy".into(),
+            secret: "k".into(),
+        };
+        let resp = call_upstream(&server, auth, password, "/anything").await;
+
+        let sent = sent_header(&server, "authorization").await;
+        let encoded = sent.strip_prefix("Basic ").unwrap();
+        assert!(encoded.ends_with("=="), "{encoded}");
+        for form in [password, encoded, encoded.trim_end_matches('=')] {
+            assert_absent(&resp.body, form);
+        }
+        assert_eq!(
+            resp.body["headers"]["authorization"],
+            format!("Basic {REDACTED}")
+        );
+        assert_eq!(resp.body["credentials"]["password"], REDACTED);
+        assert_eq!(resp.body["credentials"]["user"], "deploy");
+        assert_eq!(resp.body["unpadded"], REDACTED);
+    }
+
+    #[tokio::test]
+    async fn percent_encoded_echo_is_redacted_whatever_the_encoder() {
+        use percent_encoding::{NON_ALPHANUMERIC, utf8_percent_encode};
+
+        // Lowercase only, so lowercasing the encoded form changes just the
+        // hex digits.
+        let token = "tok/with+plus=eq and space&amp";
+        let encodings = |token: &str| {
+            let upper = utf8_percent_encode(token, NON_ALPHANUMERIC).to_string();
+            let form: String = url::form_urlencoded::byte_serialize(token.as_bytes()).collect();
+            let partial = token.replace('/', "%2f").replace(' ', "%20");
+            [upper.to_lowercase(), upper, form, partial]
+        };
+        let server = echo_server(move |req| {
+            let [lower, upper, form, partial] = encodings(&bearer_of(req));
+            json!({
+                "upper": format!("https://example.test/cb?t={upper}"),
+                "lower": format!("https://example.test/cb?t={lower}"),
+                "form": format!("t={form}&next=%2Fhome"),
+                "partial": format!("https://example.test/cb?t={partial}"),
+            })
+        })
+        .await;
+        let resp = call_upstream(&server, Auth::Bearer { secret: "k".into() }, token, "/cb").await;
+
+        assert_absent(&resp.body, token);
+        for form in encodings(token) {
+            assert_absent(&resp.body, &form);
+        }
+        let url = format!("https://example.test/cb?t={REDACTED}");
+        assert_eq!(resp.body["upper"], url);
+        assert_eq!(resp.body["lower"], url);
+        assert_eq!(resp.body["partial"], url);
+        assert_eq!(resp.body["form"], format!("t={REDACTED}&next=%2Fhome"));
+    }
+
+    #[tokio::test]
+    async fn credential_is_redacted_in_keys_arrays_and_longer_strings() {
+        let token = "test-shape-token-0123456789";
+        let server = echo_server(|req| {
+            let token = bearer_of(req);
+            json!({
+                "by_token": { token.clone(): { "owner": "ci" } },
+                "seen": ["first", token.clone(), { "deep": [format!("x {token} y")] }],
+                "message": format!("invalid token {token}, try again"),
+                "count": 3,
+            })
+        })
+        .await;
+        let resp = call_upstream(&server, Auth::Bearer { secret: "k".into() }, token, "/me").await;
+
+        assert_absent(&resp.body, token);
+        assert_eq!(
+            resp.body["by_token"],
+            json!({ REDACTED: { "owner": "ci" } })
+        );
+        assert_eq!(
+            resp.body["seen"],
+            json!(["first", REDACTED, { "deep": [format!("x {REDACTED} y")] }])
+        );
+        assert_eq!(
+            resp.body["message"],
+            format!("invalid token {REDACTED}, try again")
+        );
+        assert_eq!(resp.body["count"], 3);
+    }
+
+    #[tokio::test]
+    async fn response_without_the_credential_comes_back_byte_for_byte() {
+        // Canonical JSON (sorted keys, no whitespace), so serialising the
+        // parsed body must reproduce it exactly. Near misses stay as they
+        // are: the token cut short, the scheme word, `%` and `+` that
+        // decode to something else.
+        const RAW: &str = r#"{"a":[1,2.5,-3,null,true,false],"auth":"Bearer","nested":{"empty":{},"list":[]},"pct":"100%25 sure, a+b","prefix":"test-exact-token-012345678","unicode":"привет ✓"}"#;
+        let token = "test-exact-token-0123456789";
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::any())
+            .respond_with(ResponseTemplate::new(200).set_body_raw(RAW, "application/json"))
+            .mount(&server)
+            .await;
+        let resp = call_upstream(&server, Auth::Bearer { secret: "k".into() }, token, "/me").await;
+
+        assert_eq!(serde_json::to_string(&resp.body).unwrap(), RAW);
     }
 }

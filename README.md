@@ -8,7 +8,7 @@ The agent calls high-level tools (`proxy_http`); `mcp-warden` injects the secret
 [![crates.io](https://img.shields.io/crates/v/mcp-warden.svg)](https://crates.io/crates/mcp-warden)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-![mcp-warden demo: the agent calls the GitHub API through a preset without seeing the token, a prompt-injected DELETE is refused before any request is sent, and an SSH deploy runs after approval in Telegram](docs/demo.gif)
+![mcp-warden demo: the agent calls the GitHub API through a preset without seeing the token, a prompt-injected DELETE is refused before any request is sent and lands in the audit log as refused, an SSH deploy runs after approval in Telegram, and `mcp-warden scan` finds a plaintext key in ~/.claude.json that `import` moves into the keychain](docs/demo.gif)
 
 ## How it works
 
@@ -17,8 +17,8 @@ The agent calls high-level tools (`proxy_http`); `mcp-warden` injects the secret
 3. The AI agent connects to `mcp-warden` as an MCP server (stdio).
 4. When the agent wants to act, it calls `proxy_http` with a preset name and a path/method.
 5. `mcp-warden` validates the request against the preset's allow-list, injects the credential, executes, and returns only the response.
-6. Sensitive presets trigger an approval prompt (desktop notification on Linux, TUI prompt on macOS/Windows). Opt in to **time-boxed approvals** per preset so one OK can cover a short burst of follow-up calls without re-prompt spam.
-7. Every action lands in a local SQLite audit log — including a `windowed` decision for calls authorised by an active approval window, and a `refused` decision (with the raw requested path or command) for calls the allow-list turned away.
+6. Sensitive presets trigger an approval prompt: a native dialog on macOS and Windows, a desktop notification with Approve / Deny on Linux, or a Telegram message on any OS — where `/lock` also works as a kill switch from your phone. Opt in to **time-boxed approvals** per preset so one OK can cover a short burst of follow-up calls without re-prompt spam.
+7. Every action lands in a local SQLite audit log — including a `windowed` decision for calls authorised by an active approval window, a `refused` decision (with the raw requested path or command) for calls the allow-list turned away, and a `failed` decision when the approval prompt could not be shown.
 
 The agent's context window contains zero secrets.
 
@@ -55,6 +55,18 @@ In your agent: ask "list my GitHub repos via mcp-warden". Watch the agent call `
 mcp-warden audit --last 5                     # see what the agent did
 ```
 
+## Find and fix plaintext keys
+
+Keys pasted into MCP client configs sit on disk in plaintext, where the agent, a synced dotfile or a screenshot can pick them up. Three commands fix that:
+
+```bash
+mcp-warden scan                     # where are plaintext keys? (shows type + length, never values)
+mcp-warden import                   # move them into the keychain and rewire the client entries
+mcp-warden run github               # what the rewired entry runs: the server, with its key injected
+```
+
+`scan` reads Claude Code, Claude Desktop, Cursor, Windsurf, VS Code and Codex configs plus `.mcp.json` / `.env` files in the current directory (`--path DIR` for more). `import` handles keys in a stdio server's `env`; for keys in arguments, headers, URLs or `.env` files, `scan` says what to do instead. To wrap a server by hand: `mcp-warden server add github --env GITHUB_PERSONAL_ACCESS_TOKEN -- npx -y @modelcontextprotocol/server-github` (the value is read from stdin). Details: [`docs/scan-and-import.md`](docs/scan-and-import.md).
+
 ## CLI reference
 
 | Command                                    | Description                                              |
@@ -66,10 +78,20 @@ mcp-warden audit --last 5                     # see what the agent did
 | `mcp-warden preset add <name> ...`         | Define a preset (`--confirm-auto` required for `auto`)   |
 | `mcp-warden preset list`                   | Show all presets                                         |
 | `mcp-warden preset test <name>`            | Validate a preset against the current keychain           |
+| `mcp-warden preset test <name> GET /path`  | Policy simulator: would this call be allowed, and why? Sends nothing (`--command`, `--get`/`--put`, `--query` for other tools) |
+| `mcp-warden preset grant <name> --for 1h`  | Time-limited access: calls are refused after the window (`--permanent` clears it) |
+| `mcp-warden preset revoke <name>`          | End access to a preset now (next server start; `lock` for immediately) |
+| `mcp-warden lock [--reason …]`             | Kill switch: every MCP server refuses every call from its next one on (or send `/lock` to the Telegram bot) |
+| `mcp-warden approval telegram-test`        | Check the Telegram setup: token, chat, a test prompt you answer |
+| `mcp-warden unlock`                        | Remove the lock after a human approves it in the dialog / Telegram |
+| `mcp-warden scan`                          | Find plaintext keys in MCP client configs and `.env` files (never prints values) |
+| `mcp-warden import`                        | Move the keys `scan` found into the keychain and point the client at `mcp-warden run` |
+| `mcp-warden server add <name> --env VAR -- <cmd…>` | Wrap another MCP server; its key is read from stdin into the keychain |
+| `mcp-warden run <name>`                    | Launch a wrapped MCP server with its keys injected (use as the client's command) |
 | `mcp-warden preset scaffold <template>` *(v0.3.0)* | Generate a preset from a built-in template (`--list` to discover) |
 | `mcp-warden preset from-openapi <src>` *(v0.3.0)* | Bootstrap a preset from an OpenAPI 3.x spec (URL or file) |
 | `mcp-warden approval <preset> <policy> [--window N]` | Set approval policy; `--window N` (sec) enables time-boxed approvals for `prompt` |
-| `mcp-warden audit [--last N \| --since T]` | Read-only view of the audit log (append-only by design), with what the agent asked for — including refused calls |
+| `mcp-warden audit [--last N \| --since T]` | Read-only view of the audit log (append-only by design), with what the agent asked for — including refused calls — and which MCP client and session made each call |
 | `mcp-warden doctor [--deep]` *(v0.3.0 for `--deep`)* | Diagnostic summary; `--deep` runs safe read-only HTTP probes per preset |
 | `mcp-warden web [--port N]` *(v0.3.0)*     | Local read-only web UI (binds 127.0.0.1 only)            |
 | `mcp-warden mcp`                           | Run the MCP server over stdio (consumed by the AI agent) |
@@ -106,7 +128,7 @@ Other MCP clients: see [`docs/claude-code-setup.md`](docs/claude-code-setup.md) 
   chat_id = 123456789                  # your numeric Telegram chat id
   timeout_seconds = 120                # optional
   ```
-  then `mcp-warden secret add tg_bot_token` (pastes the bot token into the keychain). `prompt`-policy presets now send Approve / Deny inline-button messages to that chat; TUI is the fallback if the Telegram prompt times out (see [`docs/approval-transports.md`](docs/approval-transports.md)). Override at runtime with `MCP_WARDEN_APPROVAL_TRANSPORT={telegram|desktop|tui}`.
+  then `mcp-warden secret add tg_bot_token` (pastes the bot token into the keychain). `prompt`-policy presets now send Approve / Deny inline-button messages to that chat; if the Telegram prompt times out, macOS asks again in the native dialog (see [`docs/approval-transports.md`](docs/approval-transports.md)). Override at runtime with `MCP_WARDEN_APPROVAL_TRANSPORT={telegram|desktop|tui}`.
 
 ## What's new in v0.3.0
 
@@ -114,7 +136,7 @@ Other MCP clients: see [`docs/claude-code-setup.md`](docs/claude-code-setup.md) 
 - **`preset from-openapi <url-or-file>`** — point it at an OpenAPI 3.0/3.1 JSON or YAML spec and it derives `base_url`, `allowed_paths`, `allowed_methods`, and the auth scheme (Bearer or APIKey-Header). Filter by HTTP method or tag.
 - **`doctor --deep`** — for each HTTP preset, runs a safe read-only probe (GET against base URL or first literal allowed path), reports ok / auth_failed / auth_ok_404 / network_error / tls_error / skipped, with elapsed time and a redacted body snippet. Skips `prompt`-policy presets unless `--include-prompt` is passed.
 - **`web`** — a small local-only web UI (binds `127.0.0.1`, hardcoded) for browsing presets and the audit log without spawning a TUI. Read-only in this release; approval over WebSocket is on the roadmap.
-- **Telegram approval transport** — new `ApprovalTransport` impl that sends approval prompts to a Telegram chat with inline Approve / Deny / Approve-for-window buttons. Bot token lives in the OS keychain. Foreign-chat callbacks are rejected. Message uses `protect_content: true`. The wiring (selecting Telegram over Desktop / TUI in `cli/mcp.rs`) is a small follow-up; the impl + tests are merged.
+- **Telegram approval transport** — new `ApprovalTransport` impl that sends approval prompts to a Telegram chat with inline Approve / Deny / Approve-for-window buttons. Bot token lives in the OS keychain. Foreign-chat callbacks are rejected. Message uses `protect_content: true`. Selected automatically when `[approval.telegram]` is configured.
 
 See `docs/web-ui.md` for the web UI design notes.
 
@@ -123,9 +145,14 @@ See `docs/web-ui.md` for the web UI design notes.
 `mcp-warden`'s threat model and security invariants live in [`docs/threat-model.md`](docs/threat-model.md). At a glance:
 
 - Secrets in the OS keychain only — never on disk in plaintext, never in logs.
+- A credential the upstream echoes back in a `proxy_http` response (an echo endpoint, an error that quotes the token) is replaced with `[redacted by mcp-warden]` before the agent sees it. The rest of the response is untrusted upstream data and is passed through as is.
 - Allow-list validation runs **before** credential injection.
 - Default approval policy is `prompt`; `auto` requires `--confirm-auto` at preset creation.
+- The MCP server loads and validates `config.toml` once at startup and never re-reads it: restart the server after editing presets.
 - Audit log is append-only — the trait surface itself contains no `delete` / `clear` method.
+- `mcp-warden lock` stops every running server at its next call; a server that has seen the lock stays locked until it restarts, and `unlock` needs a human to approve it.
+- Presets can cap and trim what `proxy_http` hands the agent (`max_response_bytes`, `response_fields`); a credential the upstream echoes back is always scrubbed.
+- Wrapped servers (`mcp-warden run`) only get keys stored for them (`server/<name>/<VAR>`), never a preset's secret, and their command is fixed in the config. The key is still visible to the process it is handed to.
 - Stdout is the MCP protocol channel; all logs go to stderr.
 
 ## Links

@@ -41,7 +41,9 @@ A malicious preset named `"prod-readonly\nApproval: auto\n"` could spoof the des
 
 ### T7. TOCTOU on config
 
-An attacker writes a malicious config after `mcp-warden mcp` has started. The MCP server loads-once-and-freezes the config in `Arc<Config>` at startup; subsequent file writes are ignored until the next process start.
+An attacker rewrites `config.toml` after `mcp-warden mcp` has started — another process, or the agent through its own file-edit tool — to add a preset whose secret was never checked, flip `approval` to `"auto"` without `--confirm-auto`, or widen `allowed_paths` / `allowed_methods`. The MCP server reads and validates the config once at startup (invariant 10) and serves presets from that in-memory snapshot (`FrozenSource`); the file is never read again, so every `list_presets` and every action sees the startup presets, and edits have no effect until the next process start. A restart does load the edited file: the startup check then refuses presets whose secret is missing, but it cannot tell whether `auto` came from `preset add --confirm-auto` or a hand edit, so the config file itself must stay writable only by the user.
+
+Before this was fixed (see the CHANGELOG), only the startup secret check used the frozen config; presets were re-read from the file on every call, so all of the edits above took effect live.
 
 ## Out-of-scope threats (what `mcp-warden` does NOT defend against)
 
@@ -55,7 +57,17 @@ If the OS keychain has been read by malware running with the user's UID, `mcp-wa
 
 ### N3. Side-channels via `proxy_http` responses
 
-If a preset allows `GET /me`, the response body might contain the user's email or other PII. `mcp-warden` does not redact response bodies — that's the upstream service's contract.
+Response bodies are upstream data and stay untrusted: apart from the credential (below), they reach the agent as the service sent them, and text in them can still try to steer the agent. `mcp-warden` does not redact PII — if a preset allows `GET /me`, the body might contain the user's email; that's the upstream service's contract. The `proxy_http` tool description tells the agent the body is untrusted data, never instructions.
+
+A preset can limit what reaches the agent's context:
+- `max_response_bytes` reads no more than N bytes of the decoded body. A larger body is not returned: the agent gets the status, `body: null` and a `notice` explaining why.
+- `response_fields` returns only the listed JSON fields (`id`, `owner.login`, `items[].title`), picked after the credential scrub below.
+
+Both are opt-in. Neither is a sanitiser: whatever they let through is still untrusted.
+
+The credential itself is the exception. An upstream that reflects the request — httpbin-style `/headers` or `/anything`, a debug or echo endpoint, an error payload such as `{"error": "invalid token …"}` — would hand the agent the secret it never saw, and a prompt injection could steer the agent to such an endpoint whenever `allowed_paths` permits one. So before the body is returned, every key, string and number in it is searched for each form the credential was sent in — the raw value, `<prefix><value>` for header auth, `base64(username:value)` (padded or not) for Basic auth, and any percent-encoding of these, `+` for a space included — and each occurrence is replaced with `[redacted by mcp-warden]` (invariants 1–2). One stderr warning names the preset and the number of replacements, never the value. A body without the credential is returned unchanged. Non-JSON bodies are returned as `null` and response headers not at all, so neither can carry it.
+
+Known limits: a credential that comes back truncated, split across fields, hashed, embedded in a larger encoded blob or otherwise transformed cannot be detected. Only `proxy_http` bodies are scrubbed — `ssh_exec` output and `db_query` rows come back as is, so a named query that reads the password back (Redis `CONFIG GET requirepass`) returns it. Keep echo endpoints out of `allowed_paths`.
 
 ### N4. Insider threat (the user themselves)
 
@@ -63,13 +75,17 @@ If a preset allows `GET /me`, the response body might contain the user's email o
 
 ## Residual risks (known, accepted in MVP)
 
-### R1. macOS / Windows desktop-notification approval is degraded
+### R1. Local approval prompts trust the local screen
 
-`notify-rust` exposes interactive notification actions (Approve / Deny buttons) only on Linux/DBus. On macOS and Windows the notification fires for awareness, but actual approval happens in the TUI prompt printed to the MCP server's stderr (visible in Claude Code / Cursor's MCP output panel). Documented in `src/approval/desktop.rs`.
+On macOS approval is a native dialog shown with `osascript` (`src/approval/osascript.rs`). Deny is the default and the cancel button, so Return and Esc deny and approving takes a click; the dialog gives up after the request timeout (`timeout`). Request text reaches the fixed AppleScript as arguments, never as script source, and is sanitised as in T5. On Windows it is a Windows Forms window shown by the system Windows PowerShell (`src/approval/powershell.rs`) under the same rules; its script is a fixed `-EncodedCommand` and the request text reaches it only through environment variables. On Linux `notify-rust` shows a notification with Approve / Deny actions over DBus.
 
-### R2. TUI approval is rendered to stderr only
+A local prompt is only as trustworthy as the screen it is on: an agent that can drive the desktop (computer-use tools) could click Approve. Users who give an agent screen control should approve through Telegram, which is out of band.
 
-The full-screen ratatui dialog (v0.2.0) renders via `CrosstermBackend::new(std::io::stderr())` so it never touches stdout (the JSON-RPC channel). Visible in Claude Code / Cursor's MCP output panel. It restores the terminal state on exit (alt-screen + raw mode), but a process kill mid-dialog can leave the terminal in raw mode — the panic hook should reset.
+Up to v0.4.3 macOS had no working prompt under an MCP client: the notification had no buttons and the TUI fallback could not run, so every `prompt` call was refused (fail closed).
+
+### R2. TUI approval works only in a terminal you can see
+
+The full-screen ratatui dialog renders via `CrosstermBackend::new(std::io::stderr())` so it never touches stdout (the JSON-RPC channel). Under an MCP client stderr is captured and stdin is the JSON-RPC pipe, so the dialog cannot be seen (and on macOS cannot read keys). It is therefore a fallback only on Linux / Windows when stderr is a terminal, or chosen explicitly with `MCP_WARDEN_APPROVAL_TRANSPORT=tui`. Whenever a transport fails to show its prompt, the call is refused and audited as `failed` — never approved. The TUI restores the terminal state on exit (alt-screen + raw mode), but a process kill mid-dialog can leave the terminal in raw mode — the panic hook should reset.
 
 ### R3. Audit log integrity is policy, not crypto
 
@@ -97,11 +113,11 @@ The SQLite file is `0600`-permissioned and rejects symlinks at open time, but ro
 
 ### R9. Time-boxed approvals are convenience, not deeper trust
 
-When the user picks **Approve for window** in the TUI / desktop prompt, the executor caches `(preset, action) → expires_at` in process memory and skips re-prompting for that pair until the window expires. Properties:
+When the user picks **Approve for window** in the approval prompt (dialog, notification, Telegram or TUI), the executor caches `(preset, action) → expires_at` in process memory and skips re-prompting for that pair until the window expires. Properties:
 
 - **In-process only.** The cache is a `tokio::sync::Mutex<HashMap<…, Instant>>` inside `ActionExecutor`. Restarting `mcp-warden mcp` clears every window — by design. There is no file or socket through which a different process can inject or read windows.
 - **Per `(preset, action)` keyed.** A window for `proxy_http` on `github-read` does **not** cover `ssh_exec` on the same preset. Each tool class requires its own approval.
-- **Capped by the preset.** `approval_window_seconds = N` in the preset is the maximum window length; the TUI cannot exceed it. Presets that omit the field disable the window option entirely — the TUI shows only Approve once / Deny.
+- **Capped by the preset.** `approval_window_seconds = N` in the preset is the maximum window length; no prompt can exceed it. Presets that omit the field disable the window option entirely — prompts show only Approve once / Deny.
 - **`get_secret_for_env` is never windowed.** Spec §6 mandates a fresh prompt every time a raw secret is revealed; the executor's `force_prompt = true` path bypasses the cache and never registers a window.
 - **Audited.** Calls that proceed via an active window are recorded with `decision = "windowed"` in `audit.db`. Reviewing recent activity makes it visible that the user did not see a fresh prompt; the initial approve-for-window decision is still recorded as `approved`.
 
@@ -114,6 +130,47 @@ Since v0.4.1 `db_query` requires TLS with certificate and hostname verification 
 ### R11. HTTP redirects are not followed
 
 `proxy_http` and `doctor --deep` never follow redirects: a hop could leave `base_url`'s host carrying a custom auth header (reqwest strips only `Authorization` cross-origin) or land on a path the allow-list never approved. The 3xx response is returned to the agent, which can issue a new — validated — request if the target is allowed.
+
+### R12. A wrapped server's key is visible to whatever runs as that server
+
+`mcp-warden run <name>` takes keys out of client configs (no plaintext at rest), but it still hands them to the wrapped server through its environment, and from there:
+- any process running as the same user can read that environment (`ps eww`, `/proc/<pid>/environ`);
+- whoever launches `mcp-warden run` controls the rest of the environment and the working directory (`PATH`, `NODE_OPTIONS`, a local `node_modules`, …) and can get code into the server.
+
+So `run` protects against keys being read off disk, synced, committed or pasted into a transcript. It does not protect against an agent that already runs arbitrary code as the user (see N2).
+
+What it does guarantee:
+- A wrapped server gets only the keys stored for it: `server/<name>/<VAR>`. The config lists variable names, not keychain entries, so no edit to it — and no `server add` — can bind a **preset's** secret to a command. Without this, `server add evil --env X=github_pat -- sh -c 'echo $X'` would have exfiltrated it.
+- Values are read from stdin, or by `import` from the client config. They are never taken as command-line arguments, where they would land in shell history and `ps`.
+
+### R13. The kill switch latches per process
+
+`mcp-warden lock` writes `<config dir>/lock`.
+- **Running servers.** Every running server refuses every call from its next one on, drops its approval windows, and latches: once it has seen the lock it stays locked until it restarts, even if the file is deleted.
+- **`unlock`** removes the file only after a human approves it through the approval transport, so an agent can't talk its way past it with the CLI.
+- **Deleting the file by hand** cannot reopen a server that saw the lock. A server *started after* the deletion does start unlocked, though. Restarting MCP servers is the client's job, not the agent's, but users who want the lock to survive tampering should also revoke the upstream credentials.
+- **Screen control.** As in R1, an agent that can click on the user's screen could approve the unlock dialog. Use Telegram if the agent has screen control.
+- **Telegram `/lock`** from the configured chat writes the same lock file, from whichever server is polling at that moment. It works only while at least one MCP server with `[approval.telegram]` runs. Telegram cannot unlock.
+- **The Telegram inbox.** Servers hand button presses to each other through `telegram/inbox/<button token>` files. Each button carries its own random 128-bit token, and only the asking server knows which token means Approve. Someone who can write the inbox can delete an answer, which makes the prompt time out (fail closed). They cannot forge an answer or flip one.
+
+### R14. `preset grant` windows and frozen presets
+
+- **Expiry is enforced on every call.** It is checked against the wall clock, so a running server stops serving a preset on time.
+- **New grants and revokes need a restart.** Presets are frozen at startup (T7), so `preset grant` and `preset revoke` take effect when the server restarts. For an immediate stop, use `mcp-warden lock`.
+- **`get_secret_for_env` is outside the window.** It is not tied to a preset, and it always asks for approval.
+
+### R15. `scan` and `import` handle plaintext they did not create
+
+**`scan`:**
+- It is read-only and sends nothing.
+- In `~/.claude.json` it reads only `mcpServers` and `projects.*.mcpServers`.
+- Its output never contains secret material: at most a token type's public prefix (`ghp_`) and the length. That keeps it safe for an agent to run.
+- Detection is heuristic. Tokens in unknown formats under innocuous names are missed.
+
+**`import`:**
+- It stores each key and verifies it before it rewrites anything, and it keeps no backup, because a backup would hold the plaintext.
+- Claude Code and Claude Desktop rewrite their own config files. If they are running during an import, they may put the old entry back, plaintext included, so `import` asks the user to quit them and to re-run `scan` afterwards.
+- A key that has been sitting in a config file should be considered exposed. Rotate it.
 
 ## Update policy
 

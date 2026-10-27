@@ -15,13 +15,43 @@ pub fn anchored_regex(pattern: &str) -> std::result::Result<regex::Regex, regex:
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Config {
-    #[serde(default)]
+    // Skipped when empty: `preset = []` at the top of a written config makes
+    // every `[[preset]]` table added below it a TOML error.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preset: Vec<Preset>,
     /// Optional approval-transport configuration. When `approval.telegram`
     /// is set and a `[approval.telegram]` block is present, the binary
-    /// selects the Telegram transport over the default Desktop+TUI pair.
+    /// selects the Telegram transport over the default desktop prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<ApprovalConfig>,
+    /// Other MCP servers that `mcp-warden run <name>` launches with their
+    /// keys injected from the keychain instead of written in a client config.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub server: Vec<WrappedServer>,
+}
+
+/// An MCP server `mcp-warden run <name>` launches.
+///
+/// Its keys live in keychain entries of their own, `server/<name>/<VAR>`
+/// (see `secret_name`): the config only lists variable names, so no edit to
+/// it can point a server — or a command of someone's choosing — at a
+/// preset's secret.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WrappedServer {
+    pub name: String,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Environment variables `run` sets from this server's keychain entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+}
+
+impl WrappedServer {
+    /// The keychain entry that holds `var` for this server.
+    pub fn secret_name(&self, var: &str) -> String {
+        format!("server/{}/{var}", self.name)
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -59,7 +89,7 @@ pub struct Preset {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_methods: Vec<String>,
     pub approval: ApprovalPolicy,
-    /// Cap (in seconds) for an approve-for-window option in TUI / desktop
+    /// Cap (in seconds) for an approve-for-window option in approval
     /// prompts. `None` (the default) means windowing is disabled for this
     /// preset — every call requires a fresh prompt. Only meaningful when
     /// `approval = "prompt"`; ignored for `auto` and `deny`.
@@ -89,6 +119,58 @@ pub struct Preset {
     pub database: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queries: Vec<NamedQuery>,
+    /// When access through this preset ends (`mcp-warden preset grant`).
+    /// Calls after this instant are refused; `None` means no time limit.
+    /// Written as an RFC 3339 string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
+    /// HTTP: largest response body `proxy_http` hands the agent, in bytes.
+    /// A larger body is read no further and not returned. `None`: no limit.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_response_bytes: Option<u64>,
+    /// HTTP: the only JSON fields `proxy_http` returns — `id`,
+    /// `owner.login`, `items[].title`, `[].name` (see `parse_field_path`).
+    /// Empty: the whole body.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub response_fields: Vec<String>,
+}
+
+/// One step of a `response_fields` path.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FieldStep {
+    /// An object key.
+    Key(String),
+    /// Every element of an array (`[]`).
+    Each,
+}
+
+/// Parse a `response_fields` entry: keys separated by `.`, each optionally
+/// followed by `[]` for "every element" — `owner.login`, `items[].title`;
+/// a leading `[]` addresses a top-level array (`[].name`).
+pub fn parse_field_path(path: &str) -> Result<Vec<FieldStep>> {
+    let bad = || {
+        WardenError::Validation(format!(
+            "response_fields entry '{path}': expected keys separated by '.', each optionally \
+             followed by '[]' (e.g. `owner.login`, `items[].title`, `[].name`)"
+        ))
+    };
+    let mut steps = Vec::new();
+    for segment in path.split('.') {
+        let mut name = segment;
+        let mut arrays = 0;
+        while let Some(rest) = name.strip_suffix("[]") {
+            name = rest;
+            arrays += 1;
+        }
+        if name.contains(['[', ']']) || (name.is_empty() && arrays == 0) {
+            return Err(bad());
+        }
+        if !name.is_empty() {
+            steps.push(FieldStep::Key(name.to_string()));
+        }
+        steps.extend(std::iter::repeat_n(FieldStep::Each, arrays));
+    }
+    Ok(steps)
 }
 
 /// A named, parameterised query template declared in a preset. The agent
@@ -150,6 +232,7 @@ impl Config {
     }
 
     pub fn validate(&self, kc: &dyn KeychainStore) -> Result<()> {
+        self.validate_servers()?;
         for p in &self.preset {
             if p.name.is_empty() {
                 return Err(WardenError::Validation("preset name empty".into()));
@@ -209,6 +292,16 @@ impl Config {
                 "preset '{}': base_url missing host",
                 p.name
             )));
+        }
+        if p.max_response_bytes == Some(0) {
+            return Err(WardenError::Validation(format!(
+                "preset '{}': max_response_bytes must be at least 1",
+                p.name
+            )));
+        }
+        for field in &p.response_fields {
+            parse_field_path(field)
+                .map_err(|e| WardenError::Validation(format!("preset '{}': {e}", p.name)))?;
         }
         for m in &p.allowed_methods {
             match m.as_str() {
@@ -338,6 +431,61 @@ impl Config {
     pub fn find(&self, name: &str) -> Option<&Preset> {
         self.preset.iter().find(|p| p.name == name)
     }
+
+    /// Check the shape of every `[[server]]` entry. Their secrets are not
+    /// looked up here: they belong to `mcp-warden run`, which checks them
+    /// when it launches the server.
+    pub fn validate_servers(&self) -> Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        for s in &self.server {
+            if s.command.is_empty() {
+                return Err(WardenError::Validation(
+                    "every [[server]] needs a name and a command".into(),
+                ));
+            }
+            let name_ok = !s.name.is_empty()
+                && s.name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+            if !name_ok {
+                return Err(WardenError::Validation(format!(
+                    "server name '{}': use letters, digits, '_', '-' or '.'",
+                    s.name
+                )));
+            }
+            if !seen.insert(s.name.as_str()) {
+                return Err(WardenError::Validation(format!(
+                    "two [[server]] entries are named '{}'",
+                    s.name
+                )));
+            }
+            let mut vars = std::collections::HashSet::new();
+            for var in &s.env {
+                if !vars.insert(var.as_str()) {
+                    return Err(WardenError::Validation(format!(
+                        "server '{}' lists {var} twice",
+                        s.name
+                    )));
+                }
+                let mut chars = var.chars();
+                let valid = chars
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+                if !valid {
+                    return Err(WardenError::Validation(format!(
+                        "server '{}': '{var}' is not a valid environment variable name",
+                        s.name
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn find_server(&self, name: &str) -> Option<&WrappedServer> {
+        self.server.iter().find(|s| s.name == name)
+    }
 }
 
 pub fn config_path() -> PathBuf {
@@ -348,6 +496,113 @@ pub fn config_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+
+    fn servers(toml: &str) -> Result<()> {
+        let cfg: Config = toml::from_str(toml).unwrap();
+        cfg.validate_servers()
+    }
+
+    #[test]
+    fn a_written_config_without_presets_takes_preset_tables_later() {
+        let cfg: Config = toml::from_str("[[server]]\nname = \"a\"\ncommand = \"x\"\n").unwrap();
+        let written = toml::to_string_pretty(&cfg).unwrap();
+        assert!(!written.contains("preset"), "{written}");
+        let appended = format!(
+            "{written}\n[[preset]]\nname = \"p\"\ntype = \"http\"\ndescription = \"x\"\napproval = \"prompt\"\n"
+        );
+        let back: Config = toml::from_str(&appended).unwrap();
+        assert_eq!(back.preset.len(), 1);
+        assert_eq!(back.server.len(), 1);
+    }
+
+    #[test]
+    fn response_limits_are_validated() {
+        let kc = InMemoryKeychain::new();
+        kc.set("k", Secret::new("v".into())).unwrap();
+        let cfg = |extra: &str| -> Config {
+            toml::from_str(&format!(
+                "[[preset]]\nname = \"p\"\ntype = \"http\"\ndescription = \"x\"\n\
+                 base_url = \"https://api.example.com\"\nauth = {{ type = \"bearer\", secret = \"k\" }}\n\
+                 approval = \"prompt\"\n{extra}"
+            ))
+            .unwrap()
+        };
+        cfg("max_response_bytes = 1024\nresponse_fields = [\"id\", \"items[].title\"]")
+            .validate(&kc)
+            .unwrap();
+        assert!(cfg("max_response_bytes = 0").validate(&kc).is_err());
+        assert!(cfg("response_fields = [\"a..b\"]").validate(&kc).is_err());
+    }
+
+    #[test]
+    fn field_paths_parse() {
+        use FieldStep::{Each, Key};
+        let key = |k: &str| Key(k.to_string());
+        assert_eq!(parse_field_path("id").unwrap(), [key("id")]);
+        assert_eq!(
+            parse_field_path("owner.login").unwrap(),
+            [key("owner"), key("login")]
+        );
+        assert_eq!(
+            parse_field_path("items[].title").unwrap(),
+            [key("items"), Each, key("title")]
+        );
+        assert_eq!(parse_field_path("[].name").unwrap(), [Each, key("name")]);
+        assert_eq!(
+            parse_field_path("grid[][]").unwrap(),
+            [key("grid"), Each, Each]
+        );
+        for bad in ["", "a..b", "a.", ".a", "a[b", "a]", "a[0]", "a[]b"] {
+            assert!(parse_field_path(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn server_entries_parse_and_validate() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [[server]]
+            name = "github"
+            command = "npx"
+            args = ["-y", "@modelcontextprotocol/server-github"]
+            env = ["GITHUB_PERSONAL_ACCESS_TOKEN"]
+            "#,
+        )
+        .unwrap();
+        cfg.validate_servers().unwrap();
+        let s = cfg.find_server("github").unwrap();
+        assert_eq!(s.args.len(), 2);
+        assert_eq!(
+            s.secret_name("GITHUB_PERSONAL_ACCESS_TOKEN"),
+            "server/github/GITHUB_PERSONAL_ACCESS_TOKEN"
+        );
+    }
+
+    #[test]
+    fn server_entries_reject_bad_shapes() {
+        let dup = r#"
+            [[server]]
+            name = "a"
+            command = "x"
+            [[server]]
+            name = "a"
+            command = "y"
+        "#;
+        assert!(servers(dup).is_err());
+        assert!(servers("[[server]]\nname = \"a\"\ncommand = \"\"").is_err());
+        for var in ["1ABC", "A-B", "A B", ""] {
+            let t = format!("[[server]]\nname = \"a\"\ncommand = \"x\"\nenv = [\"{var}\"]");
+            assert!(servers(&t).is_err(), "{var:?}");
+        }
+        assert!(
+            servers("[[server]]\nname = \"a\"\ncommand = \"x\"\nenv = [\"A\", \"A\"]").is_err()
+        );
+        for name in ["", "a/b", "../x", "a b"] {
+            let t = format!("[[server]]\nname = \"{name}\"\ncommand = \"x\"");
+            assert!(servers(&t).is_err(), "{name:?}");
+        }
+    }
+
     use super::*;
     use crate::keychain::KeychainStore;
     use crate::keychain::memory::InMemoryKeychain;
@@ -559,6 +814,7 @@ mod tests {
     fn approval_window_seconds_round_trips_through_toml() {
         let cfg = Config {
             approval: None,
+            server: vec![],
             preset: vec![Preset {
                 name: "p".into(),
                 preset_type: PresetType::Http,
@@ -580,6 +836,9 @@ mod tests {
                 sftp_allowed_paths: vec![],
                 database: None,
                 queries: vec![],
+                expires_at: None,
+                max_response_bytes: None,
+                response_fields: vec![],
             }],
         };
         let s = toml::to_string(&cfg).unwrap();

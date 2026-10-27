@@ -6,5 +6,18 @@
 
 pub mod always_deny;
 pub mod desktop;
+mod dialog;
+pub mod osascript;
+pub mod powershell;
 pub mod telegram;
 pub mod tui;
+
+/// Button text for the approve-for-window choice: whole minutes when the
+/// window is a multiple of 60 s, seconds otherwise.
+pub fn window_label(seconds: u64) -> String {
+    if seconds >= 60 && seconds.is_multiple_of(60) {
+        format!("Approve for {} min", seconds / 60)
+    } else {
+        format!("Approve for {seconds} s")
+    }
+}

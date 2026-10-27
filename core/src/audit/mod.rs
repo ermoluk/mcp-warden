@@ -13,6 +13,13 @@ pub struct AuditEvent {
     pub summary: String,
     pub decision: Option<AuditDecision>,
     pub outcome: Option<AuditOutcome>,
+    /// The MCP client that made the call (`name version`), when known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub client: Option<String>,
+    /// Id of the `mcp-warden mcp` process (one per client connection) that
+    /// recorded the event, so calls from one agent session group together.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub session: Option<String>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -29,6 +36,10 @@ pub enum AuditDecision {
     /// preset, path / command / query outside the allow-list, …). Nobody was
     /// prompted, no credential was read and the upstream was never called.
     Refused,
+    /// The approval prompt could not be shown (the transport returned an
+    /// error). Nobody approved or denied; the call was refused — errors fail
+    /// closed and never become approvals.
+    Failed,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -47,6 +58,12 @@ pub trait AuditSink: Send + Sync {
     fn record_outcome(&self, event_id: i64, outcome: AuditOutcome) -> Result<()>;
     fn recent(&self, limit: usize) -> Result<Vec<AuditEvent>>;
     fn since(&self, ts: DateTime<Utc>) -> Result<Vec<AuditEvent>>;
+    /// Tag events recorded from now on with this session id. Sinks that
+    /// don't store sessions may ignore it.
+    fn set_session(&self, _id: &str) {}
+    /// Tag events recorded from now on with the MCP client (`name version`)
+    /// once it has introduced itself. Sinks may ignore it.
+    fn set_client(&self, _client: &str) {}
 }
 
 /// Cap `input` at `max_chars` characters, replacing the tail with `…` when
@@ -127,6 +144,88 @@ mod tests {
         assert_eq!(
             serde_json::to_string(&AuditDecision::Refused).unwrap(),
             "\"refused\""
+        );
+    }
+
+    #[test]
+    fn events_carry_the_session_and_client() {
+        let dir = tempdir().unwrap();
+        let sink = sqlite_sink::LocalSqlite::open(&dir.path().join("audit.db")).unwrap();
+        sink.record_pending("p", "proxy_http", "before").unwrap();
+        sink.set_session("a1b2c3");
+        sink.record_pending("p", "proxy_http", "no client yet")
+            .unwrap();
+        sink.set_client("claude-code 2.1.0");
+        sink.record_pending("p", "proxy_http", "with client")
+            .unwrap();
+        let got: Vec<(Option<String>, Option<String>)> = sink
+            .recent(10)
+            .unwrap()
+            .into_iter()
+            .rev()
+            .map(|e| (e.session, e.client))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                (None, None),
+                (Some("a1b2c3".into()), None),
+                (Some("a1b2c3".into()), Some("claude-code 2.1.0".into())),
+            ]
+        );
+    }
+
+    #[test]
+    fn databases_from_before_sessions_are_migrated() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    preset TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    decision TEXT,
+                    outcome_kind TEXT,
+                    outcome_data TEXT
+                );
+                INSERT INTO events (created_at, preset, action, summary, decision)
+                VALUES ('2026-10-01T00:00:00Z', 'old', 'proxy_http', 'GET /x', 'approved');",
+            )
+            .unwrap();
+        }
+        let sink = sqlite_sink::LocalSqlite::open(&path).unwrap();
+        sink.set_session("s1");
+        sink.record_pending("new", "proxy_http", "GET /y").unwrap();
+        let events = sink.recent(10).unwrap();
+        assert_eq!(events.len(), 2, "old rows are kept");
+        assert_eq!(events[1].preset, "old");
+        assert_eq!(events[1].session, None);
+        assert_eq!(events[0].session.as_deref(), Some("s1"));
+        // Opening again is a no-op.
+        sqlite_sink::LocalSqlite::open(&path).unwrap();
+    }
+
+    #[test]
+    fn round_trip_failed_decision() {
+        let dir = tempdir().unwrap();
+        let sink = sqlite_sink::LocalSqlite::open(&dir.path().join("audit.db")).unwrap();
+        let id = sink
+            .record_pending("preset", "proxy_http", "GET /users")
+            .unwrap();
+        sink.record_decision(id, AuditDecision::Failed).unwrap();
+        let recent = sink.recent(10).unwrap();
+        assert_eq!(recent[0].decision, Some(AuditDecision::Failed));
+    }
+
+    #[test]
+    fn failed_serialises_as_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&AuditDecision::Failed).unwrap(),
+            "\"failed\""
         );
     }
 

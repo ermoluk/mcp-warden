@@ -7,9 +7,13 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+pub mod credential_echo;
 pub mod db;
 pub mod http;
 pub mod known_hosts;
+pub mod lock;
+pub mod policy;
+pub mod response;
 pub mod sftp;
 pub mod ssh;
 pub mod summary;
@@ -24,6 +28,10 @@ pub const MAX_REFUSED_TEXT: usize = 1024;
 /// without sleeping.
 pub trait Clock: Send + Sync {
     fn now(&self) -> Instant;
+    /// Wall-clock time, for preset access windows (`preset grant`).
+    fn now_utc(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now()
+    }
 }
 
 pub struct SystemClock;
@@ -51,6 +59,8 @@ pub struct ActionExecutor {
     pub audit: Arc<dyn AuditSink>,
     pub clock: Arc<dyn Clock>,
     approval_windows: tokio::sync::Mutex<HashMap<(String, String), Instant>>,
+    /// The kill switch (`mcp-warden lock`), checked before every call.
+    lock: lock::LockState,
 }
 
 impl ActionExecutor {
@@ -83,6 +93,7 @@ impl ActionExecutor {
             audit,
             clock,
             approval_windows: tokio::sync::Mutex::new(HashMap::new()),
+            lock: lock::LockState::none(),
         }
     }
 }
@@ -122,25 +133,30 @@ impl ActionExecutor {
 
         let decision = if force_prompt {
             self.prompt(preset, action, summary, /* offer_window = */ false)
-                .await?
+                .await
         } else {
             match preset.approval {
-                ApprovalPolicy::Auto => ApprovalDecision::Approved,
-                ApprovalPolicy::Deny => ApprovalDecision::Denied,
+                ApprovalPolicy::Auto => Ok(ApprovalDecision::Approved),
+                ApprovalPolicy::Deny => Ok(ApprovalDecision::Denied),
                 ApprovalPolicy::Prompt => {
                     let offer_window = preset.approval_window_seconds.is_some_and(|n| n > 0);
-                    self.prompt(preset, action, summary, offer_window).await?
+                    self.prompt(preset, action, summary, offer_window).await
                 }
             }
+        };
+        let decision = match decision {
+            Ok(d) => d,
+            Err(e) => return Err(self.prompt_failed(event_id, e)?),
         };
 
         // If the user approved for the window, register it BEFORE recording
         // audit so a race that observed audit decided=approved can already
         // see the window. force_prompt callers never register a window.
-        if !force_prompt && matches!(decision, ApprovalDecision::ApprovedForWindow) {
-            if let Some(cap) = preset.approval_window_seconds.filter(|n| *n > 0) {
-                self.register_window(&preset.name, action, cap).await;
-            }
+        if !force_prompt
+            && matches!(decision, ApprovalDecision::ApprovedForWindow)
+            && let Some(cap) = preset.approval_window_seconds.filter(|n| *n > 0)
+        {
+            self.register_window(&preset.name, action, cap).await;
         }
 
         let audit_label = if !force_prompt && preset.approval == ApprovalPolicy::Auto {
@@ -181,6 +197,44 @@ impl ActionExecutor {
                 Err(WardenError::ApprovalTimeout)
             }
         }
+    }
+
+    /// Watch this lock file (`<config dir>/lock`) for the kill switch.
+    pub fn with_lock(mut self, path: std::path::PathBuf) -> Self {
+        self.lock = lock::LockState::at(path);
+        self
+    }
+
+    /// Refuse every call while mcp-warden is locked, and audit the refusal.
+    /// The first locked call also drops every approval window, so nothing
+    /// approved before the lock outlives it.
+    pub async fn check_lock(&self, preset: &str, action: &str, summary: &str) -> Result<()> {
+        if !self.lock.is_locked() {
+            return Ok(());
+        }
+        self.approval_windows.lock().await.clear();
+        let err = WardenError::Locked;
+        self.record_refused(preset, action, summary, &err);
+        Err(err)
+    }
+
+    /// Record a prompt the transport could not show and build the error the
+    /// agent gets. Nobody approved, so the call is refused: errors fail closed
+    /// and never become approvals. The transport error holds no secret —
+    /// credentials are only read after authorisation (invariant 1).
+    fn prompt_failed(&self, event_id: i64, err: WardenError) -> Result<WardenError> {
+        let message = clip(&err.to_string(), MAX_REFUSED_TEXT);
+        self.audit
+            .record_decision(event_id, AuditDecision::Failed)?;
+        self.audit.record_outcome(
+            event_id,
+            AuditOutcome::Err {
+                message: message.clone(),
+            },
+        )?;
+        Ok(WardenError::Executor(format!(
+            "approval prompt could not be shown ({message}); the action did not run"
+        )))
     }
 
     /// Record a request refused before `authorise` — it failed validation,
@@ -312,6 +366,9 @@ mod tests {
             sftp_allowed_paths: vec![],
             database: None,
             queries: vec![],
+            expires_at: None,
+            max_response_bytes: None,
+            response_fields: vec![],
         }
     }
 
@@ -800,5 +857,132 @@ mod tests {
             2,
             "no window must be cached when the preset disables windowing"
         );
+    }
+
+    #[tokio::test]
+    async fn lock_refuses_audits_and_drops_approval_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join(lock::LOCK_FILE);
+        let counter = Arc::new(DecidingApproval {
+            decision: ApprovalDecision::ApprovedForWindow,
+            calls: AtomicUsize::new(0),
+        });
+        let (exec, _audit_dir) = exec_with(counter.clone(), None);
+        let exec = exec.with_lock(lock_path.clone());
+        let p = preset_with_window(Some(600));
+        exec.authorise(&p, "proxy_http", "x", false).await.unwrap();
+        assert!(exec.window_is_active(&p.name, "proxy_http").await);
+
+        exec.check_lock(&p.name, "proxy_http", "GET /x")
+            .await
+            .unwrap();
+        lock::write(
+            &lock_path,
+            &lock::LockInfo {
+                since: chrono::Utc::now(),
+                reason: None,
+            },
+        )
+        .unwrap();
+        let err = exec
+            .check_lock(&p.name, "proxy_http", "GET /x")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WardenError::Locked));
+        assert!(!exec.window_is_active(&p.name, "proxy_http").await);
+        let e = &exec.audit.recent(1).unwrap()[0];
+        assert_eq!(e.decision, Some(AuditDecision::Refused));
+        assert_eq!(e.summary, "GET /x");
+
+        std::fs::remove_file(&lock_path).unwrap();
+        assert!(
+            exec.check_lock(&p.name, "proxy_http", "GET /x")
+                .await
+                .is_err()
+        );
+    }
+
+    /// A transport that cannot show its prompt at all (no display, no tty, …).
+    struct FailingApproval;
+
+    #[async_trait]
+    impl ApprovalTransport for FailingApproval {
+        async fn request(
+            &self,
+            _r: ApprovalRequest,
+        ) -> mcp_warden_core::error::Result<ApprovalDecision> {
+            Err(WardenError::Io(std::io::Error::other(
+                "Device not configured",
+            )))
+        }
+    }
+
+    /// The newest audit event must be a `failed` record whose outcome names
+    /// the transport error, and the agent must get an error that says the
+    /// action did not run.
+    fn assert_failed(exec: &ActionExecutor, err: &WardenError) {
+        let msg = err.to_string();
+        assert!(matches!(err, WardenError::Executor(_)), "{err:?}");
+        assert!(msg.contains("approval prompt could not be shown"), "{msg}");
+        assert!(msg.contains("Device not configured"), "{msg}");
+        let recent = exec.audit.recent(10).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].decision, Some(AuditDecision::Failed));
+        match &recent[0].outcome {
+            Some(AuditOutcome::Err { message }) => {
+                assert!(message.contains("Device not configured"), "{message}")
+            }
+            other => panic!("expected an Err outcome, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_error_is_audited_as_failed() {
+        let (exec, _dir) = exec_with(Arc::new(FailingApproval), None);
+        let err = exec
+            .authorise(
+                &preset(ApprovalPolicy::Prompt),
+                "proxy_http",
+                "GET /users",
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert_failed(&exec, &err);
+    }
+
+    #[tokio::test]
+    async fn fallback_error_after_primary_timeout_is_audited_as_failed() {
+        let primary = Arc::new(CountingApproval {
+            decision: ApprovalDecision::Timeout,
+            calls: AtomicUsize::new(0),
+        });
+        let (exec, _dir) = exec_with(primary.clone(), Some(Arc::new(FailingApproval)));
+        let err = exec
+            .authorise(
+                &preset(ApprovalPolicy::Prompt),
+                "proxy_http",
+                "GET /users",
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(primary.calls.load(Ordering::SeqCst), 1);
+        assert_failed(&exec, &err);
+    }
+
+    #[tokio::test]
+    async fn forced_prompt_transport_error_is_audited_as_failed() {
+        let (exec, _dir) = exec_with(Arc::new(FailingApproval), None);
+        let err = exec
+            .authorise(
+                &preset(ApprovalPolicy::Auto),
+                "get_secret_for_env",
+                "reveal k",
+                true,
+            )
+            .await
+            .unwrap_err();
+        assert_failed(&exec, &err);
     }
 }

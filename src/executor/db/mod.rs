@@ -38,7 +38,12 @@ pub async fn run(
         &query_name,
         params.len(),
     );
-    let nq = find_query(preset, &query_name, params.len())
+    let request = super::policy::Request::Db {
+        query: &query_name,
+        params: params.len(),
+    };
+    let nq = super::policy::check_request(preset, &request)
+        .and_then(|()| find_query(preset, &query_name, params.len()))
         .inspect_err(|e| actx.record_refused(&preset.name, "db_query", &summary, e))?;
     let event_id = actx.authorise(preset, "db_query", &summary, false).await?;
 
@@ -71,7 +76,7 @@ pub async fn run(
 
 /// The named query the agent asked for, if the preset declares it and the
 /// parameter count matches.
-fn find_query(preset: &Preset, query_name: &str, params: usize) -> Result<NamedQuery> {
+pub(crate) fn find_query(preset: &Preset, query_name: &str, params: usize) -> Result<NamedQuery> {
     let nq = preset
         .queries
         .iter()
@@ -176,6 +181,9 @@ mod tests {
                 param_types: types,
                 readonly: true,
             }],
+            expires_at: None,
+            max_response_bytes: None,
+            response_fields: vec![],
         }
     }
 

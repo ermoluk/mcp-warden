@@ -38,4 +38,4 @@ In a Cursor chat, ask the agent to list mcp-warden presets. The MCP server outpu
 
 ## Troubleshooting
 
-The same caveats as Claude Code apply — see that guide's troubleshooting table. Cursor surfaces MCP server stderr in its output panel; that's where the TUI approval prompt also appears.
+The same caveats as Claude Code apply — see that guide's troubleshooting table. Approval prompts appear as a native dialog (macOS), a desktop notification (Linux) or a Telegram message — not in Cursor's MCP output panel.
