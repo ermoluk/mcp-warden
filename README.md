@@ -55,6 +55,18 @@ In your agent: ask "list my GitHub repos via mcp-warden". Watch the agent call `
 mcp-warden audit --last 5                     # see what the agent did
 ```
 
+## Find and fix plaintext keys
+
+Keys pasted into MCP client configs sit on disk in plaintext, where the agent, a synced dotfile or a screenshot can pick them up. Three commands fix that:
+
+```bash
+mcp-warden scan                     # where are plaintext keys? (shows type + length, never values)
+mcp-warden import                   # move them into the keychain and rewire the client entries
+mcp-warden run github               # what the rewired entry runs: the server, with its key injected
+```
+
+`scan` reads Claude Code, Claude Desktop, Cursor, Windsurf, VS Code and Codex configs plus `.mcp.json` / `.env` files in the current directory (`--path DIR` for more). `import` handles keys in a stdio server's `env`; for keys in arguments, headers, URLs or `.env` files, `scan` says what to do instead. To wrap a server by hand: `mcp-warden server add github --env GITHUB_PERSONAL_ACCESS_TOKEN -- npx -y @modelcontextprotocol/server-github` (the value is read from stdin). Details: [`docs/scan-and-import.md`](docs/scan-and-import.md).
+
 ## CLI reference
 
 | Command                                    | Description                                              |
@@ -66,6 +78,15 @@ mcp-warden audit --last 5                     # see what the agent did
 | `mcp-warden preset add <name> ...`         | Define a preset (`--confirm-auto` required for `auto`)   |
 | `mcp-warden preset list`                   | Show all presets                                         |
 | `mcp-warden preset test <name>`            | Validate a preset against the current keychain           |
+| `mcp-warden preset test <name> GET /path`  | Policy simulator: would this call be allowed, and why? Sends nothing (`--command`, `--get`/`--put`, `--query` for other tools) |
+| `mcp-warden preset grant <name> --for 1h`  | Time-limited access: calls are refused after the window (`--permanent` clears it) |
+| `mcp-warden preset revoke <name>`          | End access to a preset now (next server start; `lock` for immediately) |
+| `mcp-warden lock [--reason …]`             | Kill switch: every MCP server refuses every call from its next one on |
+| `mcp-warden unlock`                        | Remove the lock after a human approves it in the dialog / Telegram |
+| `mcp-warden scan`                          | Find plaintext keys in MCP client configs and `.env` files (never prints values) |
+| `mcp-warden import`                        | Move the keys `scan` found into the keychain and point the client at `mcp-warden run` |
+| `mcp-warden server add <name> --env VAR -- <cmd…>` | Wrap another MCP server; its key is read from stdin into the keychain |
+| `mcp-warden run <name>`                    | Launch a wrapped MCP server with its keys injected (use as the client's command) |
 | `mcp-warden preset scaffold <template>` *(v0.3.0)* | Generate a preset from a built-in template (`--list` to discover) |
 | `mcp-warden preset from-openapi <src>` *(v0.3.0)* | Bootstrap a preset from an OpenAPI 3.x spec (URL or file) |
 | `mcp-warden approval <preset> <policy> [--window N]` | Set approval policy; `--window N` (sec) enables time-boxed approvals for `prompt` |
@@ -127,6 +148,8 @@ See `docs/web-ui.md` for the web UI design notes.
 - Default approval policy is `prompt`; `auto` requires `--confirm-auto` at preset creation.
 - The MCP server loads and validates `config.toml` once at startup and never re-reads it: restart the server after editing presets.
 - Audit log is append-only — the trait surface itself contains no `delete` / `clear` method.
+- `mcp-warden lock` stops every running server at its next call; a server that has seen the lock stays locked until it restarts, and `unlock` needs a human to approve it.
+- Wrapped servers (`mcp-warden run`) only get keys stored for them (`server/<name>/<VAR>`), never a preset's secret, and their command is fixed in the config. The key is still visible to the process it is handed to.
 - Stdout is the MCP protocol channel; all logs go to stderr.
 
 ## Links

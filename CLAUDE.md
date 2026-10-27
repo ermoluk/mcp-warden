@@ -122,7 +122,11 @@ abstraction is the product.
 - Do **not** depend on Docker, Postgres, Redis, or any external service.
 - Do **not** make the binary larger than ~20 MB.
 - Do **not** add a "store anything" mode. Only secrets that map to presets
-  get stored.
+  or to wrapped servers (`server/<name>/<VAR>`) get stored.
+- Do **not** let a config entry name the keychain entry a wrapped server
+  (`mcp-warden run`) receives, or take secret values as CLI arguments.
+  Otherwise anyone who can edit the config or run the CLI — the agent
+  included — can bind a preset's secret to a command of their choosing.
 - Do **not** cripple the OSS version to drive paid upgrades. Paid features
   must be additive (hosted infrastructure, team coordination), never gates
   on local single-user functionality.
@@ -138,9 +142,14 @@ abstraction is the product.
 - `src/audit/` — append-only event log.
 - `src/approval/` — approval transports + sanitisation helpers.
 - `src/presets/` — preset source abstraction.
-- `src/executor/` — composition root for action execution.
+- `src/executor/` — composition root for action execution;
+  `policy.rs` decides "would this call be allowed" for the tools and the
+  `preset test` simulator alike, `lock.rs` is the kill switch.
+- `src/scan/` — `mcp-warden scan` (read-only plaintext-key finder; output
+  never carries secret material).
 - `src/mcp/` — `rmcp` server wiring + tool definitions.
-- `src/cli/` — `clap` subcommands.
+- `src/cli/` — `clap` subcommands (`import`, `run` / `server` for wrapped
+  MCP servers, `lock` / `unlock`, …).
 - `tests/` — CLI integration (`assert_cmd`) + MCP integration (raw stdio
   framing).
 

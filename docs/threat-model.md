@@ -121,6 +121,45 @@ Since v0.4.1 `db_query` requires TLS with certificate and hostname verification 
 
 `proxy_http` and `doctor --deep` never follow redirects: a hop could leave `base_url`'s host carrying a custom auth header (reqwest strips only `Authorization` cross-origin) or land on a path the allow-list never approved. The 3xx response is returned to the agent, which can issue a new — validated — request if the target is allowed.
 
+### R12. A wrapped server's key is visible to whatever runs as that server
+
+`mcp-warden run <name>` takes keys out of client configs (no plaintext at rest), but it still hands them to the wrapped server through its environment, and from there:
+- any process running as the same user can read that environment (`ps eww`, `/proc/<pid>/environ`);
+- whoever launches `mcp-warden run` controls the rest of the environment and the working directory (`PATH`, `NODE_OPTIONS`, a local `node_modules`, …) and can get code into the server.
+
+So `run` protects against keys being read off disk, synced, committed or pasted into a transcript. It does not protect against an agent that already runs arbitrary code as the user (see N2).
+
+What it does guarantee:
+- A wrapped server gets only the keys stored for it: `server/<name>/<VAR>`. The config lists variable names, not keychain entries, so no edit to it — and no `server add` — can bind a **preset's** secret to a command. Without this, `server add evil --env X=github_pat -- sh -c 'echo $X'` would have exfiltrated it.
+- Values are read from stdin, or by `import` from the client config. They are never taken as command-line arguments, where they would land in shell history and `ps`.
+
+### R13. The kill switch latches per process
+
+`mcp-warden lock` writes `<config dir>/lock`.
+- **Running servers.** Every running server refuses every call from its next one on, drops its approval windows, and latches: once it has seen the lock it stays locked until it restarts, even if the file is deleted.
+- **`unlock`** removes the file only after a human approves it through the approval transport, so an agent can't talk its way past it with the CLI.
+- **Deleting the file by hand** cannot reopen a server that saw the lock. A server *started after* the deletion does start unlocked, though. Restarting MCP servers is the client's job, not the agent's, but users who want the lock to survive tampering should also revoke the upstream credentials.
+- **Screen control.** As in R1, an agent that can click on the user's screen could approve the unlock dialog. Use Telegram if the agent has screen control.
+
+### R14. `preset grant` windows and frozen presets
+
+- **Expiry is enforced on every call.** It is checked against the wall clock, so a running server stops serving a preset on time.
+- **New grants and revokes need a restart.** Presets are frozen at startup (T7), so `preset grant` and `preset revoke` take effect when the server restarts. For an immediate stop, use `mcp-warden lock`.
+- **`get_secret_for_env` is outside the window.** It is not tied to a preset, and it always asks for approval.
+
+### R15. `scan` and `import` handle plaintext they did not create
+
+**`scan`:**
+- It is read-only and sends nothing.
+- In `~/.claude.json` it reads only `mcpServers` and `projects.*.mcpServers`.
+- Its output never contains secret material: at most a token type's public prefix (`ghp_`) and the length. That keeps it safe for an agent to run.
+- Detection is heuristic. Tokens in unknown formats under innocuous names are missed.
+
+**`import`:**
+- It stores each key and verifies it before it rewrites anything, and it keeps no backup, because a backup would hold the plaintext.
+- Claude Code and Claude Desktop rewrite their own config files. If they are running during an import, they may put the old entry back, plaintext included, so `import` asks the user to quit them and to re-run `scan` afterwards.
+- A key that has been sitting in a config file should be considered exposed. Rotate it.
+
 ## Update policy
 
 This document updates with every release. Material changes are noted in `CHANGELOG.md` under a `### Security` heading.
