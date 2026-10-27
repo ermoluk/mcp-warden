@@ -6,6 +6,7 @@ pub mod approval;
 pub mod audit;
 pub mod doctor;
 pub mod init;
+pub mod lock;
 pub mod mcp;
 pub mod openapi;
 pub mod preset;
@@ -47,6 +48,15 @@ pub enum Command {
     /// Print a diagnostic summary of the current configuration. Pass
     /// `--deep` to additionally run safe read-only probes for each preset.
     Doctor(doctor::DoctorArgs),
+    /// Kill switch: every MCP server refuses every call from its next one on.
+    Lock {
+        /// Why — shown by `unlock` and recorded in the audit log.
+        #[arg(long)]
+        reason: Option<String>,
+    },
+    /// Remove the lock after a human approves it (dialog / notification /
+    /// Telegram). Servers that saw the lock stay locked until they restart.
+    Unlock,
     /// Start a local read-only web UI (binds 127.0.0.1 only).
     Web {
         /// TCP port to listen on (default 7077).

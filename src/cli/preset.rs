@@ -685,7 +685,15 @@ fn test_preset(args: TestArgs, config_path: &Path, kc: &dyn KeychainStore) -> Re
     let p = cfg
         .find(&args.name)
         .ok_or_else(|| WardenError::PresetNotFound(args.name.clone()))?;
-    let verdict = simulate(p, &request, chrono::Utc::now());
+    let lock_path = config_path
+        .parent()
+        .unwrap_or(Path::new("."))
+        .join(crate::executor::lock::LOCK_FILE);
+    let verdict = if crate::executor::lock::is_present(&lock_path) {
+        Verdict::Refused(WardenError::Locked.to_string())
+    } else {
+        simulate(p, &request, chrono::Utc::now())
+    };
     let allowed = matches!(verdict, Verdict::Allowed { .. });
     if args.format == "json" {
         println!("{}", verdict_json(p, &request, &verdict));

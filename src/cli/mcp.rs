@@ -42,12 +42,10 @@ pub async fn cmd(config_dir: &Path) -> Result<()> {
     let (approval, approval_fallback) = build_approval(&cfg, keychain.as_ref())?;
     let audit: Arc<dyn AuditSink> = Arc::new(LocalSqlite::open(&audit_path)?);
 
-    let executor = Arc::new(ActionExecutor::new(
-        keychain,
-        approval,
-        approval_fallback,
-        audit,
-    ));
+    let executor = Arc::new(
+        ActionExecutor::new(keychain, approval, approval_fallback, audit)
+            .with_lock(config_dir.join(crate::executor::lock::LOCK_FILE)),
+    );
     let server = WardenServer::new(presets, executor);
 
     let running = server
@@ -62,7 +60,7 @@ pub async fn cmd(config_dir: &Path) -> Result<()> {
 }
 
 /// Primary approval transport plus an optional fallback.
-type ApprovalTransports = (
+pub(crate) type ApprovalTransports = (
     Arc<dyn ApprovalTransport>,
     Option<Arc<dyn ApprovalTransport>>,
 );
@@ -78,7 +76,7 @@ enum Kind {
 
 /// Construct the active approval transport + optional fallback. See
 /// `plan_transports` for how they are chosen.
-fn build_approval(cfg: &Config, kc: &dyn KeychainStore) -> Result<ApprovalTransports> {
+pub(crate) fn build_approval(cfg: &Config, kc: &dyn KeychainStore) -> Result<ApprovalTransports> {
     let env_choice = std::env::var("MCP_WARDEN_APPROVAL_TRANSPORT").ok();
     let env_choice = env_choice.as_deref().map(str::trim).map(str::to_lowercase);
     let telegram = cfg.approval.as_ref().and_then(|a| a.telegram.as_ref());

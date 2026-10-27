@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 pub mod db;
 pub mod http;
 pub mod known_hosts;
+pub mod lock;
 pub mod policy;
 pub mod sftp;
 pub mod ssh;
@@ -56,6 +57,8 @@ pub struct ActionExecutor {
     pub audit: Arc<dyn AuditSink>,
     pub clock: Arc<dyn Clock>,
     approval_windows: tokio::sync::Mutex<HashMap<(String, String), Instant>>,
+    /// The kill switch (`mcp-warden lock`), checked before every call.
+    lock: lock::LockState,
 }
 
 impl ActionExecutor {
@@ -88,6 +91,7 @@ impl ActionExecutor {
             audit,
             clock,
             approval_windows: tokio::sync::Mutex::new(HashMap::new()),
+            lock: lock::LockState::none(),
         }
     }
 }
@@ -190,6 +194,25 @@ impl ActionExecutor {
                 Err(WardenError::ApprovalTimeout)
             }
         }
+    }
+
+    /// Watch this lock file (`<config dir>/lock`) for the kill switch.
+    pub fn with_lock(mut self, path: std::path::PathBuf) -> Self {
+        self.lock = lock::LockState::at(path);
+        self
+    }
+
+    /// Refuse every call while mcp-warden is locked, and audit the refusal.
+    /// The first locked call also drops every approval window, so nothing
+    /// approved before the lock outlives it.
+    pub async fn check_lock(&self, preset: &str, action: &str, summary: &str) -> Result<()> {
+        if !self.lock.is_locked() {
+            return Ok(());
+        }
+        self.approval_windows.lock().await.clear();
+        let err = WardenError::Locked;
+        self.record_refused(preset, action, summary, &err);
+        Err(err)
     }
 
     /// Record a prompt the transport could not show and build the error the
@@ -828,6 +851,49 @@ mod tests {
             counter.calls.load(Ordering::SeqCst),
             2,
             "no window must be cached when the preset disables windowing"
+        );
+    }
+
+    #[tokio::test]
+    async fn lock_refuses_audits_and_drops_approval_windows() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join(lock::LOCK_FILE);
+        let counter = Arc::new(DecidingApproval {
+            decision: ApprovalDecision::ApprovedForWindow,
+            calls: AtomicUsize::new(0),
+        });
+        let (exec, _audit_dir) = exec_with(counter.clone(), None);
+        let exec = exec.with_lock(lock_path.clone());
+        let p = preset_with_window(Some(600));
+        exec.authorise(&p, "proxy_http", "x", false).await.unwrap();
+        assert!(exec.window_is_active(&p.name, "proxy_http").await);
+
+        exec.check_lock(&p.name, "proxy_http", "GET /x")
+            .await
+            .unwrap();
+        lock::write(
+            &lock_path,
+            &lock::LockInfo {
+                since: chrono::Utc::now(),
+                reason: None,
+            },
+        )
+        .unwrap();
+        let err = exec
+            .check_lock(&p.name, "proxy_http", "GET /x")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WardenError::Locked));
+        assert!(!exec.window_is_active(&p.name, "proxy_http").await);
+        let e = &exec.audit.recent(1).unwrap()[0];
+        assert_eq!(e.decision, Some(AuditDecision::Refused));
+        assert_eq!(e.summary, "GET /x");
+
+        std::fs::remove_file(&lock_path).unwrap();
+        assert!(
+            exec.check_lock(&p.name, "proxy_http", "GET /x")
+                .await
+                .is_err()
         );
     }
 

@@ -16,6 +16,11 @@ pub enum WardenError {
     ApprovalDenied,
     #[error("approval timeout")]
     ApprovalTimeout,
+    #[error(
+        "mcp-warden is locked: every call is refused until the user runs `mcp-warden unlock` \
+         and restarts the MCP server"
+    )]
+    Locked,
     #[error("io: {0}")]
     Io(#[from] std::io::Error),
     #[error("ssh: {0}")]

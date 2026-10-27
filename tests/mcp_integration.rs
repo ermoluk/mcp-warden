@@ -257,3 +257,43 @@ fn config_is_not_reread_after_startup() {
         "list_presets must not re-read config.toml: {listed}"
     );
 }
+
+/// `mcp-warden lock` stops a running server at its next call, and the
+/// server stays locked even if the lock file is deleted by hand.
+#[test]
+fn lock_refuses_every_call_and_latches() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut server = McpSession::start(tmp.path());
+    let listed = server.call_tool(2, "list_presets", json!({}));
+    assert!(
+        listed["error"].is_null(),
+        "unlocked server answers: {listed}"
+    );
+
+    let status = Command::new(cargo_bin("mcp-warden"))
+        .args(["lock", "--reason", "integration test"])
+        .env("MCP_WARDEN_BACKEND", "memory")
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .status()
+        .expect("run mcp-warden lock");
+    assert!(status.success());
+
+    let locked = server.call_tool(3, "list_presets", json!({}));
+    let message = locked["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("locked"),
+        "locked server refuses: {locked}"
+    );
+
+    std::fs::remove_file(tmp.path().join("lock")).expect("remove lock file");
+    let still = server.call_tool(
+        4,
+        "proxy_http",
+        json!({ "preset_name": "any", "path": "/", "method": "GET" }),
+    );
+    let message = still["error"]["message"].as_str().unwrap_or_default();
+    assert!(
+        message.contains("locked"),
+        "deleting the file must not unlock a running server: {still}"
+    );
+}

@@ -98,6 +98,10 @@ impl WardenServer {
     /// environment.
     #[tool]
     pub async fn list_presets(&self) -> Result<Json<ListPresetsResponse>, McpError> {
+        self.executor
+            .check_lock("*", "list_presets", "list presets")
+            .await
+            .map_err(map_warden_err)?;
         let presets = self
             .presets
             .list()
@@ -145,11 +149,13 @@ impl WardenServer {
         &self,
         Parameters(args): Parameters<ProxyHttpArgs>,
     ) -> Result<Json<ProxyHttpResponse>, McpError> {
-        let preset = self.find_preset(
-            &args.preset_name,
-            "proxy_http",
-            &summary::http(&args.method, &args.path),
-        )?;
+        let preset = self
+            .find_preset(
+                &args.preset_name,
+                "proxy_http",
+                &summary::http(&args.method, &args.path),
+            )
+            .await?;
         let req = HttpRequest {
             preset_name: args.preset_name,
             path: args.path,
@@ -213,6 +219,10 @@ impl WardenServer {
         };
         let summary = format!("Reveal secret '{}' to agent", args.name);
         self.executor
+            .check_lock(&virtual_preset.name, "get_secret_for_env", &summary)
+            .await
+            .map_err(map_warden_err)?;
+        self.executor
             .authorise(
                 &virtual_preset,
                 "get_secret_for_env",
@@ -254,11 +264,13 @@ impl WardenServer {
         &self,
         Parameters(args): Parameters<SshExecArgs>,
     ) -> Result<Json<crate::executor::ssh::SshExecResponse>, McpError> {
-        let preset = self.find_preset(
-            &args.preset_name,
-            "ssh_exec",
-            &summary::ssh("?", &args.command),
-        )?;
+        let preset = self
+            .find_preset(
+                &args.preset_name,
+                "ssh_exec",
+                &summary::ssh("?", &args.command),
+            )
+            .await?;
         let resp = crate::executor::ssh::run(&self.executor, &preset, args.command)
             .await
             .map_err(map_warden_err)?;
@@ -292,11 +304,13 @@ impl WardenServer {
                 return Err(McpError::invalid_params(msg, None));
             }
         };
-        let preset = self.find_preset(
-            &args.preset_name,
-            "sftp_transfer",
-            &summary::sftp(&args.direction, &args.remote, &args.local),
-        )?;
+        let preset = self
+            .find_preset(
+                &args.preset_name,
+                "sftp_transfer",
+                &summary::sftp(&args.direction, &args.remote, &args.local),
+            )
+            .await?;
         let resp =
             crate::executor::sftp::run(&self.executor, &preset, direction, args.remote, args.local)
                 .await
@@ -317,11 +331,13 @@ impl WardenServer {
         &self,
         Parameters(args): Parameters<DbQueryArgs>,
     ) -> Result<Json<crate::executor::db::DbQueryResponse>, McpError> {
-        let preset = self.find_preset(
-            &args.preset_name,
-            "db_query",
-            &summary::db("?", &args.query_name, args.params.len()),
-        )?;
+        let preset = self
+            .find_preset(
+                &args.preset_name,
+                "db_query",
+                &summary::db("?", &args.query_name, args.params.len()),
+            )
+            .await?;
         let resp = crate::executor::db::run(&self.executor, &preset, args.query_name, args.params)
             .await
             .map_err(map_warden_err)?;
@@ -334,7 +350,16 @@ impl WardenServer {
     /// whose access window (`preset grant`) has ended, is refused and
     /// audited like any other refusal, so the log shows what the agent
     /// tried even when it named no usable preset.
-    fn find_preset(&self, name: &str, action: &str, summary: &str) -> Result<Preset, McpError> {
+    async fn find_preset(
+        &self,
+        name: &str,
+        action: &str,
+        summary: &str,
+    ) -> Result<Preset, McpError> {
+        self.executor
+            .check_lock(name, action, summary)
+            .await
+            .map_err(map_warden_err)?;
         let preset = self
             .presets
             .find(name)
@@ -384,6 +409,7 @@ fn map_warden_err(e: mcp_warden_core::error::WardenError) -> McpError {
     match e {
         WardenError::ApprovalDenied => McpError::invalid_request("approval denied", None),
         WardenError::ApprovalTimeout => McpError::invalid_request("approval timeout", None),
+        WardenError::Locked => McpError::invalid_request(e.to_string(), None),
         WardenError::Validation(msg) => McpError::invalid_params(msg, None),
         WardenError::PresetNotFound(_) => McpError::invalid_params(e.to_string(), None),
         other => McpError::internal_error(other.to_string(), None),
