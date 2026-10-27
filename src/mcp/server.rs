@@ -6,7 +6,10 @@ use mcp_warden_core::presets::PresetSource;
 use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::wrapper::{Json, Parameters},
-    model::{Implementation, ServerCapabilities, ServerInfo},
+    model::{
+        Implementation, InitializeRequestParams, InitializeResult, ServerCapabilities, ServerInfo,
+    },
+    service::{RequestContext, RoleServer},
     tool, tool_handler, tool_router,
 };
 use serde::{Deserialize, Serialize};
@@ -418,6 +421,24 @@ fn map_warden_err(e: mcp_warden_core::error::WardenError) -> McpError {
 
 #[tool_handler]
 impl ServerHandler for WardenServer {
+    /// Record which client connected, so every audit event of this session
+    /// names it. The name and version come from the client: sanitised and
+    /// capped like any other text shown to the user.
+    async fn initialize(
+        &self,
+        request: InitializeRequestParams,
+        context: RequestContext<RoleServer>,
+    ) -> Result<InitializeResult, McpError> {
+        self.executor.audit.set_client(&client_label(
+            &request.client_info.name,
+            &request.client_info.version,
+        ));
+        if context.peer.peer_info().is_none() {
+            context.peer.set_peer_info(request);
+        }
+        Ok(self.get_info())
+    }
+
     fn get_info(&self) -> ServerInfo {
         let mut info = ServerInfo::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
@@ -429,6 +450,18 @@ impl ServerHandler for WardenServer {
         );
         info
     }
+}
+
+/// `name version` of an MCP client, as the audit log shows it.
+fn client_label(name: &str, version: &str) -> String {
+    use mcp_warden_core::approval::sanitise_for_prompt;
+    format!(
+        "{} {}",
+        sanitise_for_prompt(name, 64),
+        sanitise_for_prompt(version, 32)
+    )
+    .trim()
+    .to_string()
 }
 
 #[cfg(test)]
@@ -627,6 +660,14 @@ mod tests {
         let e = &audit.recent(1).unwrap()[0];
         assert_eq!(e.preset, "old");
         assert_eq!(e.decision, Some(AuditDecision::Refused));
+    }
+
+    #[test]
+    fn client_label_is_sanitised_and_capped() {
+        assert_eq!(client_label("claude-code", "2.1.0"), "claude-code 2.1.0");
+        let evil = client_label("x\u{1b}[31m\nspoof", &"9".repeat(100));
+        assert!(!evil.contains('\u{1b}') && !evil.contains('\n'), "{evil}");
+        assert!(evil.chars().count() <= 64 + 1 + 32);
     }
 
     #[test]

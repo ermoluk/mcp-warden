@@ -6,6 +6,8 @@ use std::path::Path;
 
 const PRESET_WIDTH: usize = 40;
 const SUMMARY_WIDTH: usize = 80;
+/// Client names come from the MCP client; keep them short.
+const CLIENT_WIDTH: usize = 40;
 const MESSAGE_WIDTH: usize = 120;
 
 #[derive(Debug, Args)]
@@ -43,8 +45,14 @@ pub fn run(args: AuditArgs, db_path: &Path) -> Result<()> {
             },
             ok => ok,
         });
+        let who = match (&e.client, &e.session) {
+            (Some(c), Some(s)) => format!("  ({}, session {s})", for_terminal(c, CLIENT_WIDTH)),
+            (None, Some(s)) => format!("  (session {s})"),
+            (Some(c), None) => format!("  ({})", for_terminal(c, CLIENT_WIDTH)),
+            (None, None) => String::new(),
+        };
         println!(
-            "{} [{}] {:24} {} {} → {:?} {:?}",
+            "{} [{}] {:24} {} {} → {:?} {:?}{who}",
             e.created_at.to_rfc3339(),
             e.id,
             for_terminal(&e.preset, PRESET_WIDTH),

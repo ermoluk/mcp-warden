@@ -41,6 +41,10 @@ pub async fn cmd(config_dir: &Path) -> Result<()> {
         Arc::new(FrozenSource::new(cfg.preset.clone()));
     let (approval, approval_fallback) = build_approval(&cfg, keychain.as_ref())?;
     let audit: Arc<dyn AuditSink> = Arc::new(LocalSqlite::open(&audit_path)?);
+    // One id per server process — one per client connection — so a
+    // session's calls group together in the log; the client's name and
+    // version are added once it introduces itself (`initialize`).
+    audit.set_session(&session_id());
 
     let executor = Arc::new(
         ActionExecutor::new(keychain, approval, approval_fallback, audit)
@@ -57,6 +61,20 @@ pub async fn cmd(config_dir: &Path) -> Result<()> {
         .await
         .map_err(|e| WardenError::Executor(format!("waiting: {e}")))?;
     Ok(())
+}
+
+/// A short random id for this server process (not a secret).
+fn session_id() -> String {
+    use std::hash::{BuildHasher, Hasher};
+    let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+    h.write_u128(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or_default(),
+    );
+    h.write_u32(std::process::id());
+    format!("{:012x}", h.finish() & 0xffff_ffff_ffff)
 }
 
 /// Primary approval transport plus an optional fallback.

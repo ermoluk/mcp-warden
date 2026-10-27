@@ -297,3 +297,40 @@ fn lock_refuses_every_call_and_latches() {
         "deleting the file must not unlock a running server: {still}"
     );
 }
+
+/// Every audit event names the MCP client (from `initialize`) and the
+/// server process's session id.
+#[test]
+fn audit_events_name_the_client_and_session() {
+    use mcp_warden_core::audit::AuditSink;
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut server = McpSession::start(tmp.path());
+    server.call_tool(
+        2,
+        "proxy_http",
+        json!({ "preset_name": "nope", "path": "/", "method": "GET" }),
+    );
+    server.call_tool(
+        3,
+        "proxy_http",
+        json!({ "preset_name": "nope", "path": "/x", "method": "GET" }),
+    );
+    drop(server);
+
+    let sink = mcp_warden_core::audit::sqlite_sink::LocalSqlite::open(&tmp.path().join("audit.db"))
+        .expect("open audit db");
+    let events = sink.recent(10).expect("read audit");
+    assert_eq!(events.len(), 2);
+    for e in &events {
+        assert_eq!(e.client.as_deref(), Some("warden-frozen-test 0.0.0"));
+        assert!(
+            e.session.as_deref().is_some_and(|s| s.len() == 12),
+            "{:?}",
+            e.session
+        );
+    }
+    assert_eq!(
+        events[0].session, events[1].session,
+        "one session per server process"
+    );
+}
