@@ -118,6 +118,22 @@ Restart Claude Code and run `/mcp-warden:setup`. If you previously added the ser
 
 Other MCP clients: see [`docs/claude-code-setup.md`](docs/claude-code-setup.md) and [`docs/cursor-setup.md`](docs/cursor-setup.md) for manual setup.
 
+## What's new in v0.5.0
+
+- **Approvals work on every desktop.** `prompt` presets now ask in a native dialog on macOS and Windows: Deny by default, Return / Esc deny, and it auto-denies after 60 s. In 0.4.x a `prompt` preset on macOS could not be approved at all under an MCP client unless Telegram was set up. A prompt that can't be shown is refused and audited as `failed`.
+- **Kill switch.** `mcp-warden lock` makes every running MCP server refuse every call from its next one on. A server that has seen the lock stays locked until it restarts. `mcp-warden unlock` needs your approval in the dialog or Telegram. With Telegram configured, `/lock` from your phone does the same.
+- **Find and fix plaintext keys.** `mcp-warden scan` finds API keys pasted into MCP client configs and `.env` files; it never prints a value. `mcp-warden import` moves them into the keychain, and `mcp-warden run <name>` launches the server with its key injected (see [Find and fix plaintext keys](#find-and-fix-plaintext-keys)).
+- **Time-limited access and a policy simulator.** `preset grant <name> --for 1h` and `preset revoke <name>` limit how long a preset works. `preset test <name> GET /path` tells you whether a call would be allowed, and why, without sending anything.
+- **Tighter responses.** A credential the upstream echoes back is scrubbed before the agent sees it. Per preset, `max_response_bytes` caps a response body and `response_fields` returns only the fields you list.
+- **Better audit trail.** Every event names the MCP client and session that made it.
+- **Telegram for several sessions.** Several Claude sessions share one bot: they take turns polling it, so button presses no longer get lost. `mcp-warden approval telegram-test` checks the setup end to end.
+- **Five more templates:** `gitlab-read`, `linear`, `jira-read`, `slack-read`, `vercel-read`.
+- **Behaviour changes:**
+  - the MCP server reads `config.toml` once at startup, so restart it after editing presets;
+  - the minimum Rust version is now 1.89.
+
+Full list: [CHANGELOG.md](CHANGELOG.md#050).
+
 ## What's new in v0.4.0
 
 - **Workspace split.** The project is now two crates: `mcp-warden-core` (library — trait surfaces + shared types) and `mcp-warden` (binary — CLI, MCP server, executor, web UI, concrete approval transports). Alternate implementations of `KeychainStore`, `ApprovalTransport`, `AuditSink`, or `PresetSource` now depend only on `mcp-warden-core` and don't drag the binary's GUI/runtime stack.
