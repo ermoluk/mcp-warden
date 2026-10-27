@@ -25,6 +25,10 @@ pub enum AuditDecision {
     /// Authorised by an active time-boxed approval window — the user did
     /// not see a fresh prompt for this call (spec: time-boxed approvals).
     Windowed,
+    /// Refused before authorisation: the request failed validation (unknown
+    /// preset, path / command / query outside the allow-list, …). Nobody was
+    /// prompted, no credential was read and the upstream was never called.
+    Refused,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -43,6 +47,19 @@ pub trait AuditSink: Send + Sync {
     fn record_outcome(&self, event_id: i64, outcome: AuditOutcome) -> Result<()>;
     fn recent(&self, limit: usize) -> Result<Vec<AuditEvent>>;
     fn since(&self, ts: DateTime<Utc>) -> Result<Vec<AuditEvent>>;
+}
+
+/// Cap `input` at `max_chars` characters, replacing the tail with `…` when
+/// it is cut (the `…` counts toward the cap). Counts characters, not bytes.
+pub fn clip(input: &str, max_chars: usize) -> String {
+    if input.chars().count() <= max_chars {
+        return input.to_string();
+    }
+    let mut out: String = input.chars().take(max_chars.saturating_sub(1)).collect();
+    if max_chars > 0 {
+        out.push('…');
+    }
+    out
 }
 
 /// Replace any of `secrets` that appear in `input` with `***`.
@@ -91,6 +108,36 @@ mod tests {
         sink.record_decision(id, AuditDecision::Windowed).unwrap();
         let recent = sink.recent(10).unwrap();
         assert_eq!(recent[0].decision, Some(AuditDecision::Windowed));
+    }
+
+    #[test]
+    fn round_trip_refused_decision() {
+        let dir = tempdir().unwrap();
+        let sink = sqlite_sink::LocalSqlite::open(&dir.path().join("audit.db")).unwrap();
+        let id = sink
+            .record_pending("preset", "proxy_http", "DELETE /admin")
+            .unwrap();
+        sink.record_decision(id, AuditDecision::Refused).unwrap();
+        let recent = sink.recent(10).unwrap();
+        assert_eq!(recent[0].decision, Some(AuditDecision::Refused));
+    }
+
+    #[test]
+    fn refused_serialises_as_lowercase() {
+        assert_eq!(
+            serde_json::to_string(&AuditDecision::Refused).unwrap(),
+            "\"refused\""
+        );
+    }
+
+    #[test]
+    fn clip_keeps_short_text_and_marks_cuts() {
+        assert_eq!(clip("GET /users", 20), "GET /users");
+        assert_eq!(clip("abcdef", 6), "abcdef");
+        assert_eq!(clip("abcdefg", 6), "abcde…");
+        // Counts characters, not bytes, so multi-byte text is never split.
+        assert_eq!(clip("ééééé", 3), "éé…");
+        assert_eq!(clip("abc", 0), "");
     }
 
     #[test]

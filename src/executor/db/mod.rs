@@ -1,6 +1,6 @@
 use crate::executor::ActionExecutor;
 use mcp_warden_core::audit::AuditOutcome;
-use mcp_warden_core::config::Preset;
+use mcp_warden_core::config::{NamedQuery, Preset};
 use mcp_warden_core::error::{Result, WardenError};
 use serde::Serialize;
 use serde_json::Value;
@@ -33,31 +33,13 @@ pub async fn run(
     query_name: String,
     params: Vec<Value>,
 ) -> Result<DbQueryResponse> {
-    let nq = preset
-        .queries
-        .iter()
-        .find(|q| q.name == query_name)
-        .cloned()
-        .ok_or_else(|| {
-            WardenError::Validation(format!(
-                "preset '{}': named query '{query_name}' not in allow-list",
-                preset.name
-            ))
-        })?;
-    if params.len() != nq.param_types.len() {
-        return Err(WardenError::Validation(format!(
-            "named query '{}' expects {} params, got {}",
-            nq.name,
-            nq.param_types.len(),
-            params.len()
-        )));
-    }
-    let summary = format!(
-        "db {} → {} ({} param)",
+    let summary = super::summary::db(
         preset_type_label(&preset.preset_type),
-        nq.name,
-        params.len()
+        &query_name,
+        params.len(),
     );
+    let nq = find_query(preset, &query_name, params.len())
+        .inspect_err(|e| actx.record_refused(&preset.name, "db_query", &summary, e))?;
     let event_id = actx.authorise(preset, "db_query", &summary, false).await?;
 
     let result = match preset.preset_type {
@@ -85,6 +67,31 @@ pub async fn run(
         }
     };
     result
+}
+
+/// The named query the agent asked for, if the preset declares it and the
+/// parameter count matches.
+fn find_query(preset: &Preset, query_name: &str, params: usize) -> Result<NamedQuery> {
+    let nq = preset
+        .queries
+        .iter()
+        .find(|q| q.name == query_name)
+        .cloned()
+        .ok_or_else(|| {
+            WardenError::Validation(format!(
+                "preset '{}': named query '{query_name}' not in allow-list",
+                preset.name
+            ))
+        })?;
+    if params != nq.param_types.len() {
+        return Err(WardenError::Validation(format!(
+            "named query '{}' expects {} params, got {}",
+            nq.name,
+            nq.param_types.len(),
+            params
+        )));
+    }
+    Ok(nq)
 }
 
 fn preset_type_label(t: &mcp_warden_core::config::PresetType) -> &'static str {

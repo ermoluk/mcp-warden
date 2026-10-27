@@ -1,5 +1,5 @@
 use mcp_warden_core::approval::{ApprovalDecision, ApprovalRequest, ApprovalTransport};
-use mcp_warden_core::audit::{AuditDecision, AuditOutcome, AuditSink};
+use mcp_warden_core::audit::{AuditDecision, AuditOutcome, AuditSink, clip};
 use mcp_warden_core::config::{ApprovalPolicy, Preset};
 use mcp_warden_core::error::{Result, WardenError};
 use mcp_warden_core::keychain::KeychainStore;
@@ -12,6 +12,12 @@ pub mod http;
 pub mod known_hosts;
 pub mod sftp;
 pub mod ssh;
+pub mod summary;
+
+/// Longest agent-supplied text (preset name, summary, error) kept in a
+/// `refused` audit event. Refusals are recorded without a human in the
+/// loop, so this bounds how much a single call can write to the log.
+pub const MAX_REFUSED_TEXT: usize = 1024;
 
 /// Source of "now" for time-boxed approval windows. Production uses
 /// `Instant::now`; tests substitute a controllable clock to advance time
@@ -174,6 +180,38 @@ impl ActionExecutor {
                 )?;
                 Err(WardenError::ApprovalTimeout)
             }
+        }
+    }
+
+    /// Record a request refused before `authorise` — it failed validation,
+    /// so nobody was prompted, no credential was read and the upstream was
+    /// never called. `preset` is the name the agent asked for (it may not
+    /// exist), `summary` what it asked for, `err` why it was refused. None of
+    /// them can hold a secret value: credentials are only read after
+    /// authorisation (invariant 1).
+    ///
+    /// Best effort: the request is refused either way, so an audit write
+    /// failure is logged to stderr rather than replacing the validation
+    /// error the agent needs to see.
+    pub fn record_refused(&self, preset: &str, action: &str, summary: &str, err: &WardenError) {
+        let recorded = self
+            .audit
+            .record_pending(
+                &clip(preset, MAX_REFUSED_TEXT),
+                action,
+                &clip(summary, MAX_REFUSED_TEXT),
+            )
+            .and_then(|id| {
+                self.audit.record_decision(id, AuditDecision::Refused)?;
+                self.audit.record_outcome(
+                    id,
+                    AuditOutcome::Err {
+                        message: clip(&err.to_string(), MAX_REFUSED_TEXT),
+                    },
+                )
+            });
+        if let Err(e) = recorded {
+            tracing::warn!("could not audit refused {action} call: {e}");
         }
     }
 
@@ -592,6 +630,155 @@ mod tests {
                 .all(|e| e.decision == Some(AuditDecision::Auto)),
             "auto-policy calls must audit as Auto, never Windowed"
         );
+    }
+
+    // -------- refused requests --------
+
+    fn never_called() -> Arc<CountingApproval> {
+        Arc::new(CountingApproval {
+            decision: ApprovalDecision::Approved,
+            calls: AtomicUsize::new(0),
+        })
+    }
+
+    /// The newest audit event must be a `refused` record of exactly what the
+    /// agent asked for, with the validation error as its outcome.
+    fn assert_refused(
+        exec: &ActionExecutor,
+        preset: &str,
+        action: &str,
+        summary: &str,
+        err: &WardenError,
+    ) {
+        let recent = exec.audit.recent(10).unwrap();
+        assert_eq!(recent.len(), 1, "exactly one event per refused call");
+        let e = &recent[0];
+        assert_eq!(e.preset, preset);
+        assert_eq!(e.action, action);
+        assert_eq!(e.summary, summary);
+        assert_eq!(e.decision, Some(AuditDecision::Refused));
+        assert_eq!(
+            e.outcome,
+            Some(AuditOutcome::Err {
+                message: err.to_string()
+            })
+        );
+    }
+
+    fn ssh_preset() -> Preset {
+        Preset {
+            name: "deploy".into(),
+            preset_type: PresetType::Ssh,
+            host: Some("h".into()),
+            user: Some("u".into()),
+            port: Some(22),
+            secret: Some("k".into()),
+            allowed_commands: vec!["^git pull$".into()],
+            allow_sftp: true,
+            sftp_allowed_paths: vec!["/srv/app".into()],
+            base_url: None,
+            auth: None,
+            allowed_paths: vec![],
+            allowed_methods: vec![],
+            ..preset(ApprovalPolicy::Prompt)
+        }
+    }
+
+    #[tokio::test]
+    async fn refused_http_call_is_audited_with_raw_path() {
+        let approval = never_called();
+        let (exec, _dir) = exec_with(approval.clone(), None);
+        let req = http::HttpRequest {
+            preset_name: "p".into(),
+            path: "/admin/keys".into(),
+            method: "get".into(),
+            body: None,
+            query: None,
+        };
+        let err = http::execute(&exec, &preset(ApprovalPolicy::Prompt), req)
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WardenError::Validation(_)));
+        assert_eq!(approval.calls.load(Ordering::SeqCst), 0);
+        assert_refused(&exec, "p", "proxy_http", "GET /admin/keys", &err);
+    }
+
+    #[tokio::test]
+    async fn refused_ssh_call_is_audited_with_raw_command() {
+        let approval = never_called();
+        let (exec, _dir) = exec_with(approval.clone(), None);
+        let err = ssh::run(&exec, &ssh_preset(), "rm -rf /".into())
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WardenError::Validation(_)));
+        assert_eq!(approval.calls.load(Ordering::SeqCst), 0);
+        assert_refused(&exec, "deploy", "ssh_exec", "ssh h -- rm -rf /", &err);
+    }
+
+    #[tokio::test]
+    async fn refused_sftp_call_is_audited_with_raw_paths() {
+        let approval = never_called();
+        let (exec, _dir) = exec_with(approval.clone(), None);
+        let err = sftp::run(
+            &exec,
+            &ssh_preset(),
+            sftp::SftpDirection::Get,
+            "/etc/passwd".into(),
+            "/tmp/passwd".into(),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, WardenError::Validation(_)));
+        assert_eq!(approval.calls.load(Ordering::SeqCst), 0);
+        assert_refused(
+            &exec,
+            "deploy",
+            "sftp_transfer",
+            "sftp get /etc/passwd ↔ /tmp/passwd",
+            &err,
+        );
+    }
+
+    #[tokio::test]
+    async fn refused_db_query_is_audited_with_requested_query_name() {
+        let approval = never_called();
+        let (exec, _dir) = exec_with(approval.clone(), None);
+        let pg = Preset {
+            name: "pg".into(),
+            preset_type: PresetType::Postgres,
+            ..preset(ApprovalPolicy::Prompt)
+        };
+        let err = db::run(&exec, &pg, "drop_users".into(), vec![])
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WardenError::Validation(_)));
+        assert_eq!(approval.calls.load(Ordering::SeqCst), 0);
+        assert_refused(
+            &exec,
+            "pg",
+            "db_query",
+            "db postgres → drop_users (0 param)",
+            &err,
+        );
+    }
+
+    #[tokio::test]
+    async fn refused_record_caps_agent_supplied_text() {
+        // Refusals are written without any human in the loop, so a single
+        // call must not be able to grow the audit log without bound.
+        let (exec, _dir) = exec_with(never_called(), None);
+        let long = format!("/{}", "a".repeat(10_000));
+        let err = WardenError::Validation(format!("path '{long}' not allowed"));
+        exec.record_refused(&long, "proxy_http", &long, &err);
+        let e = &exec.audit.recent(1).unwrap()[0];
+        for field in [&e.preset, &e.summary] {
+            assert!(field.chars().count() <= MAX_REFUSED_TEXT);
+            assert!(field.ends_with('…'));
+        }
+        let Some(AuditOutcome::Err { message }) = &e.outcome else {
+            panic!("refused event must carry the validation error");
+        };
+        assert!(message.chars().count() <= MAX_REFUSED_TEXT);
     }
 
     #[tokio::test]

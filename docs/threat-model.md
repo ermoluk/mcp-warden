@@ -27,6 +27,8 @@ Without scoping, a GitHub PAT lets the agent do everything. Presets restrict by 
 
 Every call lands in `audit.db` next to the config file (`mcp-warden doctor` prints the path). The user can review what the agent did. Append-only by trait-surface design (no `delete` / `clear` method).
 
+The log also shows what the agent *tried*. Calls refused before authorisation — unknown preset, method / path / command / remote or local path / named query outside the allow-list, `allow_sftp` off, bad `direction` — are recorded with `decision = "refused"`, the preset name the agent sent (even if no such preset exists), the raw request summary (`GET /raw/path`, `ssh host -- command`, `sftp get remote ↔ local`, `db postgres → query (N param)`) and the validation error as the outcome. `mcp-warden audit` prints each event's summary. Refused events never carry a secret: the summary is built from the agent's own request fields (never headers, the `query` map or the body), and validation runs before any credential is read (invariants 1 and 3). Because refusals are written without a human in the loop, the agent-supplied text of each refused event (preset name, summary, error) is capped at 1024 characters, and the `audit` CLI strips control characters from it and truncates it for display so it cannot drive the terminal; the web UI HTML-escapes it. An agent can still fill the log with many refused calls — the log grows, but nothing is executed.
+
 ### T5. Approval-prompt phishing via crafted preset names
 
 A malicious preset named `"prod-readonly\nApproval: auto\n"` could spoof the desktop notification body. `mcp-warden` sanitises preset names and summaries before rendering — strips control characters and truncates. See `src/approval/mod.rs::sanitise_for_prompt`.

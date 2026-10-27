@@ -18,7 +18,7 @@ The agent calls high-level tools (`proxy_http`); `mcp-warden` injects the secret
 4. When the agent wants to act, it calls `proxy_http` with a preset name and a path/method.
 5. `mcp-warden` validates the request against the preset's allow-list, injects the credential, executes, and returns only the response.
 6. Sensitive presets trigger an approval prompt (desktop notification on Linux, TUI prompt on macOS/Windows). Opt in to **time-boxed approvals** per preset so one OK can cover a short burst of follow-up calls without re-prompt spam.
-7. Every action lands in a local SQLite audit log — including a `windowed` decision for calls authorised by an active approval window.
+7. Every action lands in a local SQLite audit log — including a `windowed` decision for calls authorised by an active approval window, and a `refused` decision (with the raw requested path or command) for calls the allow-list turned away.
 
 The agent's context window contains zero secrets.
 
@@ -69,7 +69,7 @@ mcp-warden audit --last 5                     # see what the agent did
 | `mcp-warden preset scaffold <template>` *(v0.3.0)* | Generate a preset from a built-in template (`--list` to discover) |
 | `mcp-warden preset from-openapi <src>` *(v0.3.0)* | Bootstrap a preset from an OpenAPI 3.x spec (URL or file) |
 | `mcp-warden approval <preset> <policy> [--window N]` | Set approval policy; `--window N` (sec) enables time-boxed approvals for `prompt` |
-| `mcp-warden audit [--last N \| --since T]` | Read-only view of the audit log (append-only by design)  |
+| `mcp-warden audit [--last N \| --since T]` | Read-only view of the audit log (append-only by design), with what the agent asked for — including refused calls |
 | `mcp-warden doctor [--deep]` *(v0.3.0 for `--deep`)* | Diagnostic summary; `--deep` runs safe read-only HTTP probes per preset |
 | `mcp-warden web [--port N]` *(v0.3.0)*     | Local read-only web UI (binds 127.0.0.1 only)            |
 | `mcp-warden mcp`                           | Run the MCP server over stdio (consumed by the AI agent) |

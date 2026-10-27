@@ -156,6 +156,7 @@ fn decision_label(d: Option<AuditDecision>) -> &'static str {
         Some(AuditDecision::Auto) => "auto",
         Some(AuditDecision::Timeout) => "timeout",
         Some(AuditDecision::Windowed) => "windowed",
+        Some(AuditDecision::Refused) => "refused",
         None => "—",
     }
 }
@@ -428,8 +429,10 @@ pub async fn audit_log(
             ts = esc(&e.created_at.format("%Y-%m-%d %H:%M:%S").to_string()),
             preset = esc(&e.preset),
             action = esc(&e.action),
-            // SECURITY: The summary field is already redacted by the audit
-            // recording path (audit::redact). We additionally HTML-escape it here.
+            // SECURITY: Summaries (and, for refused calls, preset names) are
+            // agent-supplied text recorded verbatim. They never hold secret
+            // values — credentials are read only after authorisation — but
+            // they are untrusted, so they are HTML-escaped like everything else.
             summary = esc(&e.summary),
             decision = esc(decision_label(e.decision)),
             outcome = outcome_cell(&e.outcome),
