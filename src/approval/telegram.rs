@@ -110,7 +110,7 @@ impl TelegramBot {
     }
 
     #[cfg(test)]
-    fn with_api_base(mut self, base: &str, poll_timeout_secs: u64) -> Self {
+    pub(crate) fn with_api_base(mut self, base: &str, poll_timeout_secs: u64) -> Self {
         self.api_base = base.trim_end_matches('/').to_string();
         self.poll_timeout_secs = poll_timeout_secs;
         self
@@ -213,7 +213,7 @@ impl TelegramBot {
     }
 
     /// Handle one update, whichever process it was meant for.
-    async fn dispatch(&self, update: Update) {
+    pub(crate) async fn dispatch(&self, update: Update) {
         if let Some(msg) = update.message {
             if msg.chat.id != self.chat_id {
                 tracing::warn!("telegram message from chat {} ignored", msg.chat.id);
@@ -410,6 +410,23 @@ impl TelegramBot {
         // captured; answer_callback is a UX nicety to dismiss the spinner.
         Ok(())
     }
+
+    /// `getMe`: the bot's @username, which also proves the token works.
+    pub async fn username(&self) -> std::result::Result<String, String> {
+        let resp = self
+            .client
+            .post(self.api("getMe"))
+            .send()
+            .await
+            .map_err(redact)?;
+        let body: TgResult<BotUser> = resp.json().await.map_err(redact)?;
+        if !body.ok {
+            return Err(body
+                .description
+                .unwrap_or_else(|| "telegram getMe failed".into()));
+        }
+        Ok(body.result.and_then(|u| u.username).unwrap_or_default())
+    }
 }
 
 /// The approval transport: one prompt per request, answered through the
@@ -437,7 +454,6 @@ impl TelegramApproval {
         self
     }
 
-    #[cfg(test)]
     pub fn timeout(&self) -> Duration {
         self.prompt_timeout
     }
@@ -471,7 +487,13 @@ struct SentMessage {
 }
 
 #[derive(Debug, Deserialize)]
-struct Update {
+struct BotUser {
+    #[serde(default)]
+    username: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub(crate) struct Update {
     update_id: u64,
     #[serde(default)]
     message: Option<Message>,
@@ -622,7 +644,7 @@ fn redact(e: reqwest::Error) -> String {
 /// The token of a waiting button that means `decision` (for tests).
 #[cfg(test)]
 impl TelegramBot {
-    fn pending_token(&self, decision: ApprovalDecision) -> Option<String> {
+    pub(crate) fn pending_token(&self, decision: ApprovalDecision) -> Option<String> {
         self.pending
             .lock()
             .unwrap()
