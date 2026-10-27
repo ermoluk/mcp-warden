@@ -101,12 +101,15 @@ pub async fn execute(
     req: HttpRequest,
 ) -> Result<HttpResponse> {
     let method_upper = req.method.to_uppercase();
-    validate_request(preset, &method_upper, &req.path)?;
-    let base = preset.base_url.as_deref().ok_or_else(|| {
-        WardenError::Validation(format!("preset '{}' has no base_url", preset.name))
-    })?;
-    let mut url = build_url(base, &req.path)?;
-    let summary = format!("{method_upper} {}", req.path);
+    let summary = crate::executor::summary::http(&method_upper, &req.path);
+    let mut url = validate_request(preset, &method_upper, &req.path)
+        .and_then(|()| {
+            let base = preset.base_url.as_deref().ok_or_else(|| {
+                WardenError::Validation(format!("preset '{}' has no base_url", preset.name))
+            })?;
+            build_url(base, &req.path)
+        })
+        .inspect_err(|e| exec.record_refused(&preset.name, "proxy_http", &summary, e))?;
     let event_id = exec
         .authorise(preset, "proxy_http", &summary, false)
         .await?;

@@ -1,5 +1,6 @@
 use crate::executor::ActionExecutor;
 use crate::executor::http::HttpRequest;
+use crate::executor::summary;
 use mcp_warden_core::config::{ApprovalPolicy, Preset, PresetType};
 use mcp_warden_core::presets::PresetSource;
 use rmcp::{
@@ -134,13 +135,11 @@ impl WardenServer {
         &self,
         Parameters(args): Parameters<ProxyHttpArgs>,
     ) -> Result<Json<ProxyHttpResponse>, McpError> {
-        let preset = self
-            .presets
-            .find(&args.preset_name)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?
-            .ok_or_else(|| {
-                McpError::invalid_params(format!("preset '{}' not found", args.preset_name), None)
-            })?;
+        let preset = self.find_preset(
+            &args.preset_name,
+            "proxy_http",
+            &summary::http(&args.method, &args.path),
+        )?;
         let req = HttpRequest {
             preset_name: args.preset_name,
             path: args.path,
@@ -244,13 +243,11 @@ impl WardenServer {
         &self,
         Parameters(args): Parameters<SshExecArgs>,
     ) -> Result<Json<crate::executor::ssh::SshExecResponse>, McpError> {
-        let preset = self
-            .presets
-            .find(&args.preset_name)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?
-            .ok_or_else(|| {
-                McpError::invalid_params(format!("preset '{}' not found", args.preset_name), None)
-            })?;
+        let preset = self.find_preset(
+            &args.preset_name,
+            "ssh_exec",
+            &summary::ssh("?", &args.command),
+        )?;
         let resp = crate::executor::ssh::run(&self.executor, &preset, args.command)
             .await
             .map_err(map_warden_err)?;
@@ -274,19 +271,21 @@ impl WardenServer {
             "get" => crate::executor::sftp::SftpDirection::Get,
             "put" => crate::executor::sftp::SftpDirection::Put,
             other => {
-                return Err(McpError::invalid_params(
-                    format!("direction must be 'get' or 'put', got '{other}'"),
-                    None,
-                ));
+                let msg = format!("direction must be 'get' or 'put', got '{other}'");
+                self.executor.record_refused(
+                    &args.preset_name,
+                    "sftp_transfer",
+                    &summary::sftp(&args.direction, &args.remote, &args.local),
+                    &mcp_warden_core::error::WardenError::Validation(msg.clone()),
+                );
+                return Err(McpError::invalid_params(msg, None));
             }
         };
-        let preset = self
-            .presets
-            .find(&args.preset_name)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?
-            .ok_or_else(|| {
-                McpError::invalid_params(format!("preset '{}' not found", args.preset_name), None)
-            })?;
+        let preset = self.find_preset(
+            &args.preset_name,
+            "sftp_transfer",
+            &summary::sftp(&args.direction, &args.remote, &args.local),
+        )?;
         let resp =
             crate::executor::sftp::run(&self.executor, &preset, direction, args.remote, args.local)
                 .await
@@ -307,17 +306,31 @@ impl WardenServer {
         &self,
         Parameters(args): Parameters<DbQueryArgs>,
     ) -> Result<Json<crate::executor::db::DbQueryResponse>, McpError> {
-        let preset = self
-            .presets
-            .find(&args.preset_name)
-            .map_err(|e| McpError::internal_error(e.to_string(), None))?
-            .ok_or_else(|| {
-                McpError::invalid_params(format!("preset '{}' not found", args.preset_name), None)
-            })?;
+        let preset = self.find_preset(
+            &args.preset_name,
+            "db_query",
+            &summary::db("?", &args.query_name, args.params.len()),
+        )?;
         let resp = crate::executor::db::run(&self.executor, &preset, args.query_name, args.params)
             .await
             .map_err(map_warden_err)?;
         Ok(Json(resp))
+    }
+}
+
+impl WardenServer {
+    /// Look up the preset the agent named. An unknown name is refused and
+    /// audited like any other refusal, so the log shows what the agent
+    /// tried even when it named no real preset.
+    fn find_preset(&self, name: &str, action: &str, summary: &str) -> Result<Preset, McpError> {
+        self.presets
+            .find(name)
+            .map_err(|e| McpError::internal_error(e.to_string(), None))?
+            .ok_or_else(|| {
+                let err = mcp_warden_core::error::WardenError::PresetNotFound(name.into());
+                self.executor.record_refused(name, action, summary, &err);
+                McpError::invalid_params(format!("preset '{name}' not found"), None)
+            })
     }
 }
 
@@ -375,6 +388,9 @@ impl ServerHandler for WardenServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mcp_warden_core::audit::sqlite_sink::LocalSqlite;
+    use mcp_warden_core::audit::{AuditDecision, AuditOutcome, AuditSink};
+    use mcp_warden_core::error::WardenError;
     use serde_json::Value;
 
     /// The MCP TypeScript SDK (used by many clients, and by Glama's checks)
@@ -393,6 +409,124 @@ mod tests {
                 assert_object_properties(def, &format!("{at}.$defs.{name}"));
             }
         }
+    }
+
+    struct NoPresets;
+    impl PresetSource for NoPresets {
+        fn list(&self) -> mcp_warden_core::error::Result<Vec<Preset>> {
+            Ok(vec![])
+        }
+        fn find(&self, _name: &str) -> mcp_warden_core::error::Result<Option<Preset>> {
+            Ok(None)
+        }
+    }
+
+    fn server_without_presets() -> (WardenServer, Arc<LocalSqlite>, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let audit = Arc::new(LocalSqlite::open(&dir.path().join("audit.db")).unwrap());
+        let executor = Arc::new(ActionExecutor::new(
+            Arc::new(mcp_warden_core::keychain::memory::InMemoryKeychain::new()),
+            Arc::new(crate::approval::always_deny::AlwaysDeny),
+            None,
+            audit.clone(),
+        ));
+        (WardenServer::new(Arc::new(NoPresets), executor), audit, dir)
+    }
+
+    #[tokio::test]
+    async fn calls_to_unknown_presets_are_audited_as_refused() {
+        let (server, audit, _dir) = server_without_presets();
+
+        assert!(
+            server
+                .proxy_http(Parameters(ProxyHttpArgs {
+                    preset_name: "nope".into(),
+                    path: "/admin".into(),
+                    method: "delete".into(),
+                    body: None,
+                    query: None,
+                }))
+                .await
+                .is_err()
+        );
+        assert!(
+            server
+                .ssh_exec(Parameters(SshExecArgs {
+                    preset_name: "nope".into(),
+                    command: "rm -rf /".into(),
+                }))
+                .await
+                .is_err()
+        );
+        assert!(
+            server
+                .sftp_transfer(Parameters(SftpTransferArgs {
+                    preset_name: "nope".into(),
+                    direction: "get".into(),
+                    remote: "/etc/passwd".into(),
+                    local: "/tmp/passwd".into(),
+                }))
+                .await
+                .is_err()
+        );
+        assert!(
+            server
+                .db_query(Parameters(DbQueryArgs {
+                    preset_name: "nope".into(),
+                    query_name: "drop_users".into(),
+                    params: vec![],
+                }))
+                .await
+                .is_err()
+        );
+
+        // Newest first.
+        let events = audit.recent(10).unwrap();
+        let got: Vec<(&str, &str)> = events
+            .iter()
+            .map(|e| (e.action.as_str(), e.summary.as_str()))
+            .collect();
+        assert_eq!(
+            got,
+            [
+                ("db_query", "db ? → drop_users (0 param)"),
+                ("sftp_transfer", "sftp get /etc/passwd ↔ /tmp/passwd"),
+                ("ssh_exec", "ssh ? -- rm -rf /"),
+                ("proxy_http", "DELETE /admin"),
+            ]
+        );
+        for e in &events {
+            assert_eq!(e.preset, "nope");
+            assert_eq!(e.decision, Some(AuditDecision::Refused));
+            assert_eq!(
+                e.outcome,
+                Some(AuditOutcome::Err {
+                    message: WardenError::PresetNotFound("nope".into()).to_string()
+                })
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn sftp_with_unknown_direction_is_audited_as_refused() {
+        let (server, audit, _dir) = server_without_presets();
+        let err = server
+            .sftp_transfer(Parameters(SftpTransferArgs {
+                preset_name: "deploy".into(),
+                direction: "steal".into(),
+                remote: "/etc/shadow".into(),
+                local: "/tmp/shadow".into(),
+            }))
+            .await
+            .err()
+            .expect("unknown direction must be refused");
+        assert!(err.message.contains("direction"));
+
+        let e = &audit.recent(1).unwrap()[0];
+        assert_eq!(e.preset, "deploy");
+        assert_eq!(e.action, "sftp_transfer");
+        assert_eq!(e.summary, "sftp steal /etc/shadow ↔ /tmp/shadow");
+        assert_eq!(e.decision, Some(AuditDecision::Refused));
     }
 
     #[test]

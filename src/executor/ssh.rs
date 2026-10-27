@@ -64,12 +64,9 @@ pub async fn run(
     preset: &Preset,
     command: String,
 ) -> Result<SshExecResponse> {
-    validate_command(preset, &command)?;
-    let summary = format!(
-        "ssh {} -- {}",
-        preset.host.as_deref().unwrap_or(""),
-        command
-    );
+    let summary = super::summary::ssh(preset.host.as_deref().unwrap_or(""), &command);
+    validate_command(preset, &command)
+        .inspect_err(|e| actx.record_refused(&preset.name, "ssh_exec", &summary, e))?;
     let event_id = actx.authorise(preset, "ssh_exec", &summary, false).await?;
 
     let key_secret = actx
