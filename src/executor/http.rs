@@ -116,9 +116,6 @@ fn decode_path(path: &str) -> Result<std::borrow::Cow<'_, str>> {
 
 /// Join `base_url` and the agent-supplied path.
 ///
-/// Defence in depth for `validate_request`: the URL that gets sent must carry
-/// exactly the path that was validated. If parsing would normalise or
-/// re-encode it in any way (dot segments, `\\`, spaces, `?`…), refuse.
 /// Validate method + path and build the request URL from `base_url`.
 pub(crate) fn validated_url(preset: &Preset, method: &str, path: &str) -> Result<Url> {
     validate_request(preset, method, path)?;
@@ -128,6 +125,9 @@ pub(crate) fn validated_url(preset: &Preset, method: &str, path: &str) -> Result
     build_url(base, path)
 }
 
+/// Defence in depth for `validate_request`: the URL that gets sent must carry
+/// exactly the path that was validated. If parsing would normalise or
+/// re-encode it in any way (dot segments, `\\`, spaces, `?`…), refuse.
 pub fn build_url(base: &str, path: &str) -> Result<Url> {
     let mut url = Url::parse(base).map_err(|e| WardenError::Validation(e.to_string()))?;
     let new_path = format!("{}{}", url.path().trim_end_matches('/'), path);
