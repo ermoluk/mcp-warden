@@ -31,6 +31,8 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 percent-encoding = "2.3"
+base64 = "0.22"
+memchr = "2"
 regex = "1"
 directories = "5"
 dirs = "5"
