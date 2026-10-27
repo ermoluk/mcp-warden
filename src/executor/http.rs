@@ -1,4 +1,5 @@
 use crate::executor::ActionExecutor;
+use crate::executor::policy::{Request, check_request};
 use mcp_warden_core::audit::AuditOutcome;
 use mcp_warden_core::config::{Auth, Preset};
 use mcp_warden_core::error::{Result, WardenError};
@@ -117,6 +118,15 @@ fn decode_path(path: &str) -> Result<std::borrow::Cow<'_, str>> {
 /// Defence in depth for `validate_request`: the URL that gets sent must carry
 /// exactly the path that was validated. If parsing would normalise or
 /// re-encode it in any way (dot segments, `\\`, spaces, `?`…), refuse.
+/// Validate method + path and build the request URL from `base_url`.
+pub(crate) fn validated_url(preset: &Preset, method: &str, path: &str) -> Result<Url> {
+    validate_request(preset, method, path)?;
+    let base = preset.base_url.as_deref().ok_or_else(|| {
+        WardenError::Validation(format!("preset '{}' has no base_url", preset.name))
+    })?;
+    build_url(base, path)
+}
+
 pub fn build_url(base: &str, path: &str) -> Result<Url> {
     let mut url = Url::parse(base).map_err(|e| WardenError::Validation(e.to_string()))?;
     let new_path = format!("{}{}", url.path().trim_end_matches('/'), path);
@@ -137,13 +147,12 @@ pub async fn execute(
 ) -> Result<HttpResponse> {
     let method_upper = req.method.to_uppercase();
     let summary = crate::executor::summary::http(&method_upper, &req.path);
-    let mut url = validate_request(preset, &method_upper, &req.path)
-        .and_then(|()| {
-            let base = preset.base_url.as_deref().ok_or_else(|| {
-                WardenError::Validation(format!("preset '{}' has no base_url", preset.name))
-            })?;
-            build_url(base, &req.path)
-        })
+    let request = Request::Http {
+        method: &method_upper,
+        path: &req.path,
+    };
+    let mut url = check_request(preset, &request)
+        .and_then(|()| validated_url(preset, &method_upper, &req.path))
         .inspect_err(|e| exec.record_refused(&preset.name, "proxy_http", &summary, e))?;
     let event_id = exec
         .authorise(preset, "proxy_http", &summary, false)

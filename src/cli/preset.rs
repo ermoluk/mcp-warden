@@ -1,3 +1,4 @@
+use crate::executor::policy::{Request, Verdict, simulate};
 use clap::{Args, Subcommand};
 use mcp_warden_core::config::{ApprovalPolicy, Auth, Config, NamedQuery, Preset, PresetType};
 use mcp_warden_core::error::{Result, WardenError};
@@ -13,8 +14,10 @@ pub enum PresetCmd {
     AddQuery(AddQueryArgs),
     /// List defined presets (name + type + approval policy).
     List,
-    /// Validate a preset against the current config and keychain.
-    Test { name: String },
+    /// Validate a preset against the current config and keychain, or —
+    /// given a request — say whether that call would be allowed and why,
+    /// without sending it (`preset test gh GET /user`, `--command`, …).
+    Test(TestArgs),
     /// Generate a preset from a built-in template for common APIs
     /// (github-read, notion-read, openai-chat, …). Use `--list` to see
     /// available templates.
@@ -151,7 +154,7 @@ pub async fn run(cmd: PresetCmd, config_path: &Path, kc: &dyn KeychainStore) -> 
         PresetCmd::Add(args) => add(*args, config_path, kc),
         PresetCmd::AddQuery(args) => add_query(args, config_path, kc),
         PresetCmd::List => list(config_path),
-        PresetCmd::Test { name } => test_preset(&name, config_path, kc),
+        PresetCmd::Test(args) => test_preset(args, config_path, kc),
         PresetCmd::Scaffold(args) => scaffold(args, config_path),
         PresetCmd::FromOpenapi(args) => from_openapi(args, config_path).await,
     }
@@ -497,18 +500,119 @@ fn add_query(args: AddQueryArgs, config_path: &Path, kc: &dyn KeychainStore) -> 
     Ok(())
 }
 
-fn test_preset(name: &str, config_path: &Path, kc: &dyn KeychainStore) -> Result<()> {
+#[derive(Debug, Args)]
+pub struct TestArgs {
+    /// Preset to test.
+    pub name: String,
+    /// HTTP method of a `proxy_http` call to simulate (with PATH).
+    #[arg(requires = "path")]
+    pub method: Option<String>,
+    /// HTTP path of the simulated call, e.g. `/repos/OWNER/REPO`.
+    pub path: Option<String>,
+    /// Simulate `ssh_exec` with this command.
+    #[arg(long, conflicts_with_all = ["method", "get", "put", "query"])]
+    pub command: Option<String>,
+    /// Simulate an SFTP download.
+    #[arg(long, num_args = 2, value_names = ["REMOTE", "LOCAL"], conflicts_with_all = ["method", "put", "query"])]
+    pub get: Option<Vec<String>>,
+    /// Simulate an SFTP upload.
+    #[arg(long, num_args = 2, value_names = ["REMOTE", "LOCAL"], conflicts_with_all = ["method", "query"])]
+    pub put: Option<Vec<String>>,
+    /// Simulate `db_query` with this named query.
+    #[arg(long, conflicts_with = "method")]
+    pub query: Option<String>,
+    /// Number of parameters passed with `--query`.
+    #[arg(long, default_value_t = 0, requires = "query")]
+    pub params: usize,
+    /// Output format for a simulated call: `text` or `json`.
+    #[arg(long, default_value = "text")]
+    pub format: String,
+}
+
+impl TestArgs {
+    fn request(&self) -> Option<Request<'_>> {
+        if let (Some(method), Some(path)) = (&self.method, &self.path) {
+            return Some(Request::Http { method, path });
+        }
+        if let Some(command) = &self.command {
+            return Some(Request::Ssh { command });
+        }
+        if let Some([remote, local]) = self.get.as_deref().or(self.put.as_deref()) {
+            return Some(Request::Sftp { remote, local });
+        }
+        self.query.as_deref().map(|query| Request::Db {
+            query,
+            params: self.params,
+        })
+    }
+}
+
+fn test_preset(args: TestArgs, config_path: &Path, kc: &dyn KeychainStore) -> Result<()> {
     let raw = fs::read_to_string(config_path).map_err(WardenError::Io)?;
     let cfg: Config = toml::from_str(&raw).map_err(|e| WardenError::Config(e.to_string()))?;
-    cfg.validate(kc)?;
+    let Some(request) = args.request() else {
+        cfg.validate(kc)?;
+        let p = cfg
+            .find(&args.name)
+            .ok_or_else(|| WardenError::PresetNotFound(args.name.clone()))?;
+        eprintln!(
+            "OK: preset '{}' validates against the current keychain.",
+            p.name
+        );
+        return Ok(());
+    };
+    // A simulated call reads no secret and sends nothing; it only runs the
+    // checks the server runs before it would ask for approval.
     let p = cfg
-        .find(name)
-        .ok_or_else(|| WardenError::PresetNotFound(name.into()))?;
-    eprintln!(
-        "OK: preset '{}' validates against the current keychain.",
-        p.name
-    );
+        .find(&args.name)
+        .ok_or_else(|| WardenError::PresetNotFound(args.name.clone()))?;
+    let verdict = simulate(p, &request);
+    let allowed = matches!(verdict, Verdict::Allowed { .. });
+    if args.format == "json" {
+        println!("{}", verdict_json(p, &request, &verdict));
+    } else {
+        println!("{}", verdict_line(&verdict));
+    }
+    if !allowed {
+        // The verdict is the output; exit 1 so scripts can branch on it.
+        std::process::exit(1);
+    }
     Ok(())
+}
+
+fn verdict_line(verdict: &Verdict) -> String {
+    match verdict {
+        Verdict::Allowed {
+            policy: ApprovalPolicy::Auto,
+            ..
+        } => "ALLOWED — runs without asking (auto)".into(),
+        Verdict::Allowed { window_seconds, .. } => match window_seconds {
+            Some(n) => format!(
+                "ALLOWED — would ask for approval (prompt; {} available)",
+                crate::approval::window_label(*n).to_lowercase()
+            ),
+            None => "ALLOWED — would ask for approval (prompt)".into(),
+        },
+        Verdict::Refused(why) => format!("REFUSED — {why}"),
+    }
+}
+
+fn verdict_json(preset: &Preset, request: &Request, verdict: &Verdict) -> serde_json::Value {
+    let (allowed, policy, window, reason) = match verdict {
+        Verdict::Allowed {
+            policy,
+            window_seconds,
+        } => (true, Some(*policy), *window_seconds, None),
+        Verdict::Refused(why) => (false, None, None, Some(why.as_str())),
+    };
+    serde_json::json!({
+        "preset": preset.name,
+        "tool": request.tool(),
+        "allowed": allowed,
+        "approval": policy,
+        "approval_window_seconds": window,
+        "reason": reason,
+    })
 }
 
 #[cfg(test)]

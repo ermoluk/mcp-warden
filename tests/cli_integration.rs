@@ -299,3 +299,123 @@ fn audit_truncates_long_summaries_and_strips_control_chars() {
         "control chars reach the terminal: {out}"
     );
 }
+
+/// Config with one preset of each kind the policy simulator handles.
+fn seed_simulator_presets(dir: &Path) {
+    fs::create_dir_all(dir).unwrap();
+    let cfg = r#"
+[[preset]]
+name = "gh"
+type = "http"
+description = "GitHub"
+base_url = "https://api.github.com"
+auth = { type = "bearer", secret = "gh_pat" }
+allowed_methods = ["GET"]
+allowed_paths = ["/repos/o/[^/]+"]
+approval = "prompt"
+approval_window_seconds = 600
+
+[[preset]]
+name = "deploy"
+type = "ssh"
+description = "deploy box"
+host = "example.com"
+user = "deploy"
+secret = "deploy_key"
+allowed_commands = ["docker compose (pull|up -d)"]
+approval = "auto"
+
+[[preset]]
+name = "pg"
+type = "postgres"
+description = "db"
+host = "localhost"
+secret = "pg_pw"
+approval = "deny"
+
+[[preset.queries]]
+name = "user_by_id"
+template = "select * from users where id = $1"
+param_types = ["int8"]
+"#;
+    fs::write(dir.join("config.toml"), cfg).unwrap();
+}
+
+fn simulate(dir: &Path, args: &[&str]) -> assert_cmd::assert::Assert {
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", dir)
+        .args(["preset", "test"])
+        .args(args)
+        .assert()
+}
+
+#[test]
+fn preset_test_simulates_an_allowed_http_call() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_simulator_presets(tmp.path());
+    simulate(tmp.path(), &["gh", "GET", "/repos/o/r"])
+        .success()
+        .stdout(predicate::str::contains(
+            "ALLOWED — would ask for approval (prompt; approve for 10 min available)",
+        ));
+}
+
+#[test]
+fn preset_test_refuses_a_path_outside_the_allow_list() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_simulator_presets(tmp.path());
+    simulate(tmp.path(), &["gh", "GET", "/repos/o/r/collaborators"])
+        .code(1)
+        .stdout(predicate::str::starts_with("REFUSED — "));
+    simulate(tmp.path(), &["gh", "DELETE", "/repos/o/r"])
+        .code(1)
+        .stdout(predicate::str::contains("DELETE"));
+}
+
+#[test]
+fn preset_test_simulates_ssh_and_db_calls() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_simulator_presets(tmp.path());
+    simulate(tmp.path(), &["deploy", "--command", "docker compose pull"])
+        .success()
+        .stdout(predicate::str::contains(
+            "ALLOWED — runs without asking (auto)",
+        ));
+    simulate(
+        tmp.path(),
+        &["deploy", "--command", "docker compose pull; id"],
+    )
+    .code(1);
+    simulate(
+        tmp.path(),
+        &["pg", "--query", "user_by_id", "--params", "1"],
+    )
+    .code(1)
+    .stdout(predicate::str::contains("REFUSED — preset policy is deny"));
+    simulate(tmp.path(), &["deploy", "GET", "/"])
+        .code(1)
+        .stdout(predicate::str::contains("not an http preset"));
+}
+
+#[test]
+fn preset_test_json_verdict() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_simulator_presets(tmp.path());
+    let out = simulate(tmp.path(), &["gh", "GET", "/repos/o/r", "--format", "json"])
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+    assert_eq!(v["tool"], "proxy_http");
+    assert_eq!(v["allowed"], true);
+    assert_eq!(v["approval"], "prompt");
+    assert_eq!(v["approval_window_seconds"], 600);
+}
+
+#[test]
+fn preset_test_unknown_preset_fails() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_simulator_presets(tmp.path());
+    simulate(tmp.path(), &["nope", "GET", "/"]).failure();
+}

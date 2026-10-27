@@ -139,7 +139,7 @@ impl Handler for WardenSftpHandler {
     }
 }
 
-fn validate_transfer(preset: &Preset, remote: &str, local: &str) -> Result<()> {
+pub(crate) fn validate_transfer(preset: &Preset, remote: &str, local: &str) -> Result<()> {
     if !preset.allow_sftp {
         return Err(WardenError::Validation(format!(
             "preset '{}' does not have allow_sftp = true",
@@ -162,7 +162,11 @@ pub async fn run(
         SftpDirection::Put => "put",
     };
     let summary = super::summary::sftp(dir_str, &remote, &local);
-    validate_transfer(preset, &remote, &local)
+    let request = super::policy::Request::Sftp {
+        remote: &remote,
+        local: &local,
+    };
+    super::policy::check_request(preset, &request)
         .inspect_err(|e| actx.record_refused(&preset.name, "sftp_transfer", &summary, e))?;
     let event_id = actx
         .authorise(preset, "sftp_transfer", &summary, false)

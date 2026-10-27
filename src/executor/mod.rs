@@ -10,6 +10,7 @@ use std::time::{Duration, Instant};
 pub mod db;
 pub mod http;
 pub mod known_hosts;
+pub mod policy;
 pub mod sftp;
 pub mod ssh;
 pub mod summary;

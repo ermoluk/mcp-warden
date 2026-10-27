@@ -65,7 +65,8 @@ pub async fn run(
     command: String,
 ) -> Result<SshExecResponse> {
     let summary = super::summary::ssh(preset.host.as_deref().unwrap_or(""), &command);
-    validate_command(preset, &command)
+    let request = super::policy::Request::Ssh { command: &command };
+    super::policy::check_request(preset, &request)
         .inspect_err(|e| actx.record_refused(&preset.name, "ssh_exec", &summary, e))?;
     let event_id = actx.authorise(preset, "ssh_exec", &summary, false).await?;
 
