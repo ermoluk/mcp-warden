@@ -57,7 +57,13 @@ If the OS keychain has been read by malware running with the user's UID, `mcp-wa
 
 ### N3. Side-channels via `proxy_http` responses
 
-Response bodies are upstream data and stay untrusted: apart from the credential (below), they reach the agent as the service sent them, and text in them can still try to steer the agent. `mcp-warden` does not redact PII — if a preset allows `GET /me`, the body might contain the user's email; that's the upstream service's contract.
+Response bodies are upstream data and stay untrusted: apart from the credential (below), they reach the agent as the service sent them, and text in them can still try to steer the agent. `mcp-warden` does not redact PII — if a preset allows `GET /me`, the body might contain the user's email; that's the upstream service's contract. The `proxy_http` tool description tells the agent the body is untrusted data, never instructions.
+
+A preset can limit what reaches the agent's context:
+- `max_response_bytes` reads no more than N bytes of the decoded body. A larger body is not returned: the agent gets the status, `body: null` and a `notice` explaining why.
+- `response_fields` returns only the listed JSON fields (`id`, `owner.login`, `items[].title`), picked after the credential scrub below.
+
+Both are opt-in. Neither is a sanitiser: whatever they let through is still untrusted.
 
 The credential itself is the exception. An upstream that reflects the request — httpbin-style `/headers` or `/anything`, a debug or echo endpoint, an error payload such as `{"error": "invalid token …"}` — would hand the agent the secret it never saw, and a prompt injection could steer the agent to such an endpoint whenever `allowed_paths` permits one. So before the body is returned, every key, string and number in it is searched for each form the credential was sent in — the raw value, `<prefix><value>` for header auth, `base64(username:value)` (padded or not) for Basic auth, and any percent-encoding of these, `+` for a space included — and each occurrence is replaced with `[redacted by mcp-warden]` (invariants 1–2). One stderr warning names the preset and the number of replacements, never the value. A body without the credential is returned unchanged. Non-JSON bodies are returned as `null` and response headers not at all, so neither can carry it.
 

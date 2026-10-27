@@ -90,7 +90,7 @@ mcp-warden run github               # what the rewired entry runs: the server, w
 | `mcp-warden preset scaffold <template>` *(v0.3.0)* | Generate a preset from a built-in template (`--list` to discover) |
 | `mcp-warden preset from-openapi <src>` *(v0.3.0)* | Bootstrap a preset from an OpenAPI 3.x spec (URL or file) |
 | `mcp-warden approval <preset> <policy> [--window N]` | Set approval policy; `--window N` (sec) enables time-boxed approvals for `prompt` |
-| `mcp-warden audit [--last N \| --since T]` | Read-only view of the audit log (append-only by design), with what the agent asked for — including refused calls |
+| `mcp-warden audit [--last N \| --since T]` | Read-only view of the audit log (append-only by design), with what the agent asked for — including refused calls — and which MCP client and session made each call |
 | `mcp-warden doctor [--deep]` *(v0.3.0 for `--deep`)* | Diagnostic summary; `--deep` runs safe read-only HTTP probes per preset |
 | `mcp-warden web [--port N]` *(v0.3.0)*     | Local read-only web UI (binds 127.0.0.1 only)            |
 | `mcp-warden mcp`                           | Run the MCP server over stdio (consumed by the AI agent) |
@@ -150,6 +150,7 @@ See `docs/web-ui.md` for the web UI design notes.
 - The MCP server loads and validates `config.toml` once at startup and never re-reads it: restart the server after editing presets.
 - Audit log is append-only — the trait surface itself contains no `delete` / `clear` method.
 - `mcp-warden lock` stops every running server at its next call; a server that has seen the lock stays locked until it restarts, and `unlock` needs a human to approve it.
+- Presets can cap and trim what `proxy_http` hands the agent (`max_response_bytes`, `response_fields`); a credential the upstream echoes back is always scrubbed.
 - Wrapped servers (`mcp-warden run`) only get keys stored for them (`server/<name>/<VAR>`), never a preset's secret, and their command is fixed in the config. The key is still visible to the process it is handed to.
 - Stdout is the MCP protocol channel; all logs go to stderr.
 
