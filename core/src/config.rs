@@ -15,7 +15,9 @@ pub fn anchored_regex(pattern: &str) -> std::result::Result<regex::Regex, regex:
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
 pub struct Config {
-    #[serde(default)]
+    // Skipped when empty: `preset = []` at the top of a written config makes
+    // every `[[preset]]` table added below it a TOML error.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub preset: Vec<Preset>,
     /// Optional approval-transport configuration. When `approval.telegram`
     /// is set and a `[approval.telegram]` block is present, the binary
@@ -441,6 +443,19 @@ mod tests {
     fn servers(toml: &str) -> Result<()> {
         let cfg: Config = toml::from_str(toml).unwrap();
         cfg.validate_servers()
+    }
+
+    #[test]
+    fn a_written_config_without_presets_takes_preset_tables_later() {
+        let cfg: Config = toml::from_str("[[server]]\nname = \"a\"\ncommand = \"x\"\n").unwrap();
+        let written = toml::to_string_pretty(&cfg).unwrap();
+        assert!(!written.contains("preset"), "{written}");
+        let appended = format!(
+            "{written}\n[[preset]]\nname = \"p\"\ntype = \"http\"\ndescription = \"x\"\napproval = \"prompt\"\n"
+        );
+        let back: Config = toml::from_str(&appended).unwrap();
+        assert_eq!(back.preset.len(), 1);
+        assert_eq!(back.server.len(), 1);
     }
 
     #[test]
