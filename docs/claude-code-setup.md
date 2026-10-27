@@ -5,8 +5,8 @@ Claude Code reads MCP server config from `~/.claude/mcp_config.json` (or via the
 ## 1. Build / install `mcp-warden`
 
 ```bash
-cargo install --path .                        # from this repo, or:
-cargo install mcp-warden                      # once published to crates.io
+cargo install --locked --path .               # from this repo, or:
+cargo install --locked mcp-warden             # once published to crates.io
 ```
 
 Verify:

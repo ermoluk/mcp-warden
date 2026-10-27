@@ -9,7 +9,7 @@ cat <<'MSG'
 The mcp-warden Claude Code plugin is installed, but the mcp-warden binary was
 not found, so its MCP server cannot start. If the user asks for anything that
 needs credentials, tell them to install it first:
-  cargo install mcp-warden
+  cargo install --locked mcp-warden
 or download a prebuilt binary from https://github.com/ermoluk/mcp-warden/releases
 then restart Claude Code and run /mcp-warden:setup.
 MSG

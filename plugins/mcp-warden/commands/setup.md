@@ -16,7 +16,7 @@ Run `mcp-warden --version` (fall back to `~/.cargo/bin/mcp-warden --version`).
 If it is missing, tell the user the two ways to install it and ask which they
 want before running anything:
 
-- `cargo install mcp-warden` (needs a Rust toolchain)
+- `cargo install --locked mcp-warden` (needs a Rust toolchain)
 - a prebuilt binary for macOS or Linux from https://github.com/ermoluk/mcp-warden/releases
 
 ## 2. Config

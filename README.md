@@ -25,8 +25,8 @@ The agent's context window contains zero secrets.
 ## Install
 
 ```bash
-cargo install mcp-warden          # from crates.io
-cargo install --path .            # or from a clone
+cargo install --locked mcp-warden # from crates.io
+cargo install --locked --path .   # or from a clone
 ```
 
 Pre-built binaries for macOS (x86_64, aarch64) and Linux (x86_64), each with a SHA-256 checksum, are attached to every [GitHub release](https://github.com/ermoluk/mcp-warden/releases).

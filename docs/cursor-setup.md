@@ -5,7 +5,7 @@ Cursor reads MCP server configuration from `~/.cursor/mcp.json` (path may vary b
 ## 1. Install
 
 ```bash
-cargo install --path .
+cargo install --locked --path .
 which mcp-warden
 ```
 

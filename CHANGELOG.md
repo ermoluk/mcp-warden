@@ -8,6 +8,10 @@ All notable changes to this project will be documented in this file. The format 
 
 - **`cargo install mcp-warden` could not build 0.5.0.** It failed with `cannot find function use_native_store in crate keyring`: without `--locked`, cargo resolves the newest `keyring`, and keyring 4.2 moved that function behind a feature in a minor release. `mcp-warden-core` no longer depends on `keyring`. It links the OS credential stores directly through `keyring-core`: the macOS keychain, Windows Credential Manager and Linux keyutils. These are the same stores with the same settings, so secrets saved by earlier versions stay readable (verified on macOS). This also drops about 1,500 lines of unused dependencies from `Cargo.lock`. On other platforms mcp-warden now reports that no OS keychain is available, where `keyring` fell back to its plaintext sample store.
 
+### Changed
+
+- Install instructions use `cargo install --locked`, so a future semver break upstream can't break the install again.
+
 ## [0.5.0]
 
 ### Security

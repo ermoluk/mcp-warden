@@ -18,7 +18,7 @@ conversation. See the [main README](../../README.md) for how mcp-warden works.
 The plugin does not include the binary. Install it first:
 
 ```bash
-cargo install mcp-warden
+cargo install --locked mcp-warden
 ```
 
 or download a prebuilt binary from the [releases page](https://github.com/ermoluk/mcp-warden/releases). Then in Claude Code:
