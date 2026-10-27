@@ -153,7 +153,7 @@
 
   <!-- header -->
   <div id="brand" class="abs"><svg width="36" height="36" style="color:var(--brass)"><use href="#tag"/></svg><span class="wordmark">mcp-warden</span></div>
-  <div id="steps" class="abs"><div class="bars"><i class="bar"></i><i class="bar"></i><i class="bar"></i></div><span id="stepName"></span></div>
+  <div id="steps" class="abs"><div class="bars"><i class="bar"></i><i class="bar"></i><i class="bar"></i><i class="bar"></i></div><span id="stepName"></span></div>
 
   <!-- agent -->
   <div id="agent" class="abs">
@@ -169,6 +169,10 @@
     <div id="m3u" class="abs msg user" style="top:36px">Ship it to prod</div>
     <div id="m3t" class="abs msg slip" style="top:92px"></div>
     <div id="m3r" class="abs msg reply" style="top:204px">Deployed. Three containers are up.</div>
+
+    <div id="m4u" class="abs msg user" style="top:36px">Any API keys sitting in my configs?</div>
+    <div id="m4t" class="abs msg slip" style="top:92px"></div>
+    <div id="m4r" class="abs msg reply" style="top:204px">One GitHub token in <b>~/.claude.json</b>. All I can see is <b>ghp_…, 40 chars</b>. Run <b>mcp-warden import</b> to move it.</div>
   </div>
 
   <!-- warden -->
@@ -214,8 +218,8 @@
   <div id="audit" class="abs">
     <div class="lbl">Audit log <span>(append-only)</span></div>
     <div class="abs ledger" style="top:30px"><div id="a1" class="abs arow"><span class="id">#40</span>  github-read  proxy_http  <span class="ok">auto</span>      200 OK</div></div>
-    <div class="abs ledger" style="top:60px"><div id="a2" class="abs arow"><span class="id">#41</span>  prod-deploy  ssh_exec    <span class="ok">approved</span>  exit 0</div></div>
-    <div class="abs ledger" style="top:90px"></div>
+    <div class="abs ledger" style="top:60px"><div id="a2" class="abs arow"><span class="id">#41</span>  github-read  proxy_http  <span class="bad">refused</span>   DELETE /repos/…</div></div>
+    <div class="abs ledger" style="top:90px"><div id="a3" class="abs arow"><span class="id">#42</span>  prod-deploy  ssh_exec    <span class="ok">approved</span>  exit 0</div></div>
   </div>
 
   <!-- intro / outro -->
@@ -234,7 +238,7 @@
 </div>
 
 <script>
-const DURATION = 31;
+const DURATION = 39;
 const $ = (id) => document.getElementById(id);
 const clamp = (x, a = 0, b = 1) => Math.min(b, Math.max(a, x));
 const ease = (x) => { x = clamp(x); return x < .5 ? 4*x*x*x : 1 - Math.pow(-2*x + 2, 3) / 2; };
@@ -291,6 +295,7 @@ function stamp(t, s, e, text, color) {
 const T1 = [["proxy_http", "k"], ["\n  preset: \"github-read\"\n  GET /user/repos", ""]];
 const T2 = [["proxy_http", "k"], ["\n  preset: \"github-read\"\n  DELETE /repos/ermoluk/prod", ""]];
 const T3 = [["ssh_exec", "k"], ["\n  preset: \"prod-deploy\"\n  docker compose up -d", ""]];
+const T4 = [["bash", "k"], ["\n  mcp-warden scan", ""]];
 
 function render(t) {
   t = ((t % DURATION) + DURATION) % DURATION;
@@ -298,10 +303,10 @@ function render(t) {
   // ---- intro / outro
   show($('intro'), 1 - prog(t, 2.6, .5));
   $('intro').style.transform = `scale(${1 + prog(t, 2.6, .5) * .05})`;
-  show($('outro'), prog(t, 26.6, .6), 0, 1.03 - .03 * ease(prog(t, 26.6, .8)));
+  show($('outro'), prog(t, 34.6, .6), 0, 1.03 - .03 * ease(prog(t, 34.6, .8)));
 
-  // ---- scene progress (three scenes, a real sequence)
-  const scenes = [[3.1, 12.3, 'A normal call'], [12.3, 19.4, 'Prompt injection'], [19.4, 26.8, 'Human approval']];
+  // ---- scene progress (four scenes, a real sequence)
+  const scenes = [[3.1, 12.3, 'A normal call'], [12.3, 19.4, 'Prompt injection'], [19.4, 26.8, 'Human approval'], [26.8, 34.8, 'Plaintext keys']];
   const si = scenes.findIndex(([s, e]) => t >= s && t < e);
   document.querySelectorAll('#steps .bar').forEach((b, i) => b.style.background = i <= si ? 'var(--brass)' : 'var(--rule)');
   $('stepName').textContent = si >= 0 ? scenes[si][2] : '';
@@ -317,11 +322,16 @@ function render(t) {
   show($('m3u'), win(t, 19.8, 26.6), 10);
   show($('m3t'), win(t, 20.4, 26.6), 10); type($('m3t'), T3, t, 20.6);
   show($('m3r'), win(t, 25.0, 26.6), 10);
+  show($('m4u'), win(t, 27.2, 34.5), 10);
+  show($('m4t'), win(t, 27.8, 34.5), 10); type($('m4t'), T4, t, 28.0);
+  show($('m4r'), win(t, 30.6, 34.5), 10);
 
   // ---- warden: the key hangs on its hook and never leaves
-  $('keyName').textContent = t >= 19.4 ? 'deploy_key' : 'gh_pat';
+  // Scene 4: no key on the hook until `import` hangs the found one there.
+  $('keyName').textContent = t >= 32.2 ? 'GITHUB_TOKEN' : t >= 26.8 ? '' : t >= 19.4 ? 'deploy_key' : 'gh_pat';
+  $('key').style.opacity = t >= 26.8 && t < 32.2 ? .2 : 1;
   const swing = (s) => t >= s && t < s + 1.3 ? Math.sin((t - s) * 13) * 11 * (1 - prog(t, s, 1.3)) : 0;
-  $('key').style.transform = `rotate(${swing(7.5) + swing(24.05)}deg)`;
+  $('key').style.transform = `rotate(${swing(7.5) + swing(24.05) + swing(32.2)}deg)`;
 
   const C = ['c1', 'c2', 'c3'].map($);
   C.forEach((c) => show(c, 0));
@@ -348,12 +358,20 @@ function render(t) {
     show(C[2], win(t, 24.1, 26.6, .25), 8);
     stamp(t, 22.25, 23.75, 'ASKING YOU', 'var(--amber)') || stamp(t, 23.75, 26.6, 'APPROVED', 'var(--green)');
   }
+  if (t >= 29.5 && t < 34.8) {
+    check(C[0], 'glass', 'warn', 'Found 1 key in <code>~/.claude.json</code>; the value is never printed');
+    check(C[1], 'keymini', 'warn', '<code>import</code>: moved to your keychain');
+    check(C[2], 'tick', 'ok', 'The client now runs <code>mcp-warden run github</code>');
+    show(C[0], win(t, 29.5, 34.5, .25), 8); show(C[1], win(t, 32.2, 34.5, .25), 8); show(C[2], win(t, 32.7, 34.5, .25), 8);
+    stamp(t, 29.7, 31.6, 'FOUND', 'var(--amber)') || stamp(t, 32.3, 34.5, 'MOVED', 'var(--green)');
+  }
   // the plate jolts when a stamp lands
-  const jolt = [7.05, 15.2, 22.25, 23.75].reduce((a, s) => a + (t >= s + .14 && t < s + .3 ? Math.sin(prog(t, s + .14, .16) * Math.PI) * 3 : 0), 0);
+  const jolt = [7.05, 15.2, 22.25, 23.75, 29.7, 32.3].reduce((a, s) => a + (t >= s + .14 && t < s + .3 ? Math.sin(prog(t, s + .14, .16) * Math.PI) * 3 : 0), 0);
   $('warden').style.transform = `translateY(${jolt}px)`;
 
   // ---- server
-  $('apiName').textContent = t >= 19.4 ? 'prod.example.com' : 'api.github.com';
+  $('apiName').textContent = t >= 26.8 ? '~/.claude.json' : t >= 19.4 ? 'prod.example.com' : 'api.github.com';
+  $('counter').style.visibility = t >= 26.8 ? 'hidden' : 'visible';
   ['l1', 'l2', 'l3'].forEach((id) => show($(id), 0));
   if (t >= 8.3 && t < 12.3) {
     $('l1').innerHTML = '<span style="color:var(--agent)">GET</span> /user/repos';
@@ -367,6 +385,19 @@ function render(t) {
     $('l2').innerHTML = '<span class="ok">exit 0</span>, 3 containers up';
     show($('l1'), win(t, 24.6, 26.6), 6); show($('l2'), win(t, 24.9, 26.6), 6);
   }
+  if (t >= 29.2 && t < 34.8) {
+    // The client config, before and after `import` (text matches its output).
+    $('l1').innerHTML = '<span style="color:var(--dim)">"github": {</span>';
+    if (t < 32.4) {
+      $('l2').innerHTML = '&nbsp;&nbsp;<span style="color:var(--dim)">"command": "npx", …</span>';
+      $('l3').innerHTML = '&nbsp;&nbsp;<span class="bad">"env": { "GITHUB_TOKEN": "ghp_••••••••" }</span>';
+    } else {
+      $('l2').innerHTML = '&nbsp;&nbsp;<span class="ok">"command": "mcp-warden",</span>';
+      $('l3').innerHTML = '&nbsp;&nbsp;<span class="ok">"args": ["run", "github"]</span>';
+    }
+    show($('l1'), win(t, 29.2, 34.5), 6); show($('l2'), win(t, 29.3, 34.5), 6);
+    show($('l3'), t < 32.4 ? win(t, 29.4, 31.9, .25) : win(t, 32.4, 34.5, .25), 6);
+  }
   $('cnt').textContent = t >= 19.4 ? (t >= 24.6 ? 1 : 0) : (t >= 8.3 ? 1 : 0);
 
   // ---- request slips
@@ -378,7 +409,10 @@ function render(t) {
   packet(t, 14.4, .55, AG, WC, 'DELETE /repos/…', 'var(--red)') ||
   packet(t, 15.7, .5, WC, AG, 'refused', 'var(--red)') ||
   packet(t, 21.3, .55, AG, WC, 'ssh_exec', 'var(--agent)') ||
-  packet(t, 24.15, .5, WC, AP, sealed('exec'), 'var(--brass)');
+  packet(t, 24.15, .5, WC, AP, sealed('exec'), 'var(--brass)') ||
+  packet(t, 28.9, .55, AG, WC, 'mcp-warden scan', 'var(--agent)') ||
+  packet(t, 30.0, .55, WC, AG, 'GitHub token, ghp_…, 40 chars', 'var(--amber)') ||
+  packet(t, 31.6, .55, AP, WC, sealed('ghp_••••••••'), 'var(--brass)');
 
   // ---- telegram approval
   const tgIn = win(t, 22.5, 24.5, .35);
@@ -391,9 +425,10 @@ function render(t) {
 
   // ---- bottom: the zero is underlined each time a key is used
   const sweep = (s) => t >= s && t < s + 1.6 ? Math.min(prog(t, s, .35), 1 - prog(t, s + 1.2, .4)) : 0;
-  $('zeroLine').style.width = (44 * Math.max(sweep(10.3), sweep(17.0), sweep(25.2))) + 'px';
-  show($('a1'), t >= 10.6 && t < 26.8 ? prog(t, 10.6, .35) : 0, 8);
-  show($('a2'), t >= 25.3 && t < 26.8 ? prog(t, 25.3, .35) : 0, 8);
+  $('zeroLine').style.width = (44 * Math.max(sweep(10.3), sweep(17.0), sweep(25.2), sweep(30.7))) + 'px';
+  show($('a1'), t >= 10.6 && t < 34.8 ? prog(t, 10.6, .35) : 0, 8);
+  show($('a2'), t >= 16.2 && t < 34.8 ? prog(t, 16.2, .35) : 0, 8);
+  show($('a3'), t >= 25.3 && t < 34.8 ? prog(t, 25.3, .35) : 0, 8);
 }
 
 window.render = render;
