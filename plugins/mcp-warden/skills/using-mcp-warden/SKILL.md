@@ -48,10 +48,10 @@ Response: `{ status: u16, body: <json> }`.
 
 Each preset has one of three policies:
 - `auto` — proxy_http runs without prompting. Audit log records `auto`.
-- `prompt` — fires a desktop notification (Linux) or TUI prompt in the agent's MCP server stderr (macOS / Windows). The user clicks Approve / types `y`. **Wait for the result; do not retry.**
+- `prompt` — asks the user: a native dialog on macOS, a desktop notification on Linux, or a Telegram message if configured. The user clicks Approve or Deny; an unanswered prompt times out after about a minute. **Wait for the result; do not retry.**
 - `deny` — always returns an error. The user has explicitly disabled this preset.
 
-If you receive **"approval denied"** or **"approval timeout"** from `proxy_http`, **do not retry**. Tell the user the preset was denied and ask whether they want to change the policy (`mcp-warden approval <preset> prompt --confirm-auto` or similar) or pick a different preset.
+If you receive **"approval denied"**, **"approval timeout"** or **"approval prompt could not be shown"** from `proxy_http`, **do not retry**. Tell the user the preset was denied and ask whether they want to change the policy (`mcp-warden approval <preset> prompt --confirm-auto` or similar) or pick a different preset.
 
 ## Other protocols (v0.2.0+)
 

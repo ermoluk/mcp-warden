@@ -79,5 +79,6 @@ mcp-warden audit --last 5
 |--------------------------------------------------|---------------------------------------------------------------------------------|
 | "tool not found"                                 | Server didn't start; check stderr with manual `mcp-warden mcp` in a terminal    |
 | Garbled output / agent confusion                 | A library logged to stdout — set `RUST_LOG=warn` and report a bug               |
-| "approval timeout"                               | macOS desktop notifications aren't interactive without a signed bundle; the TUI prompt fires in the terminal where Claude Code launched the server. Check that terminal. |
+| "approval timeout"                               | Nobody answered within 60 s. On macOS the prompt is a dialog titled "mcp-warden — approval requested" (look behind other windows); on Linux a desktop notification; with `[approval.telegram]`, a message in your chat. Windows has no native prompt yet — configure Telegram. |
+| "approval prompt could not be shown"             | The approval transport failed (e.g. no desktop session). The action did not run and `mcp-warden audit` shows it as `failed`. Use Telegram where there is no desktop. |
 | "preset references missing secret"               | Run `mcp-warden secret add <name>` for the missing secret name                  |

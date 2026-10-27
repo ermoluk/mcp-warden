@@ -2,6 +2,23 @@
 
 All notable changes to this project will be documented in this file. The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+- **`prompt` presets could not be approved on macOS.** macOS notifications have no buttons, so approval fell through to the TUI prompt — which cannot run when an MCP client launches the server. With no terminal (Claude Desktop) it failed with `io: Device not configured`, in a terminal (Claude Code CLI) with `io: Failed to initialize input reader`, both within a fraction of a second, so every `prompt` call was refused unless Telegram was configured. The call failed closed: nothing ran and no credential was read.
+- **Approval transport errors left an unfinished audit event** with no decision or outcome. Such calls are now recorded with the new `failed` decision and the error as the outcome, and the agent is told the prompt could not be shown and the action did not run.
+
+### Added
+
+- **Native approval dialog on macOS.** `prompt` presets ask in a dialog (via `osascript`) with Deny / Approve once / Approve for N min — the last only when the preset has an approval window. Deny is the default, so Return and Esc deny and approving takes a click; an unanswered dialog closes itself after 60 s and the call is refused as `timeout`. Request text is passed to a fixed AppleScript as arguments, never as script source. No extra macOS permissions are needed.
+- **`failed` audit decision** — the approval prompt could not be shown; nobody approved and the action did not run. Shown by `mcp-warden audit` and `mcp-warden web`.
+
+### Changed
+
+- **The TUI is a fallback only where it can be seen.** On macOS the dialog has no fallback, and it is itself the fallback when a Telegram prompt times out. On Linux and Windows the TUI is asked after a timeout only when the server's stderr is a terminal — under an MCP client it was invisible. `MCP_WARDEN_APPROVAL_TRANSPORT=tui` still selects it explicitly.
+- Docs, the `proxy_http` tool description and the plugin skill no longer say the approval prompt appears as a TUI in the MCP client's output panel.
+
 ## [0.4.3]
 
 ### Security

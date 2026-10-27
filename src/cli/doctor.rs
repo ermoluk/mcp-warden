@@ -82,7 +82,7 @@ pub async fn run(args: DoctorArgs, config_dir: &Path, kc: &dyn KeychainStore) ->
 
     #[cfg(target_os = "macos")]
     println!(
-        "note (macos): unsigned binaries may degrade desktop notifications; the TUI fallback handles approval prompts."
+        "note (macos): `prompt` presets ask in a native dialog titled \"mcp-warden — approval requested\"."
     );
 
     if args.deep {

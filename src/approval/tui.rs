@@ -18,8 +18,9 @@ use std::time::{Duration, Instant};
 
 /// Full-screen ratatui approval dialog. Renders to **stderr** (alternate
 /// screen + raw mode) so it never collides with the MCP JSON-RPC channel
-/// on stdout. Visible in Claude Code / Cursor's MCP output panel; users
-/// can also see it directly when running `mcp-warden mcp` in a TTY.
+/// on stdout. Only usable when `mcp-warden mcp` runs in a terminal you can
+/// see: an MCP client captures stderr, so it is a fallback only when stderr
+/// is a terminal (see `cli::mcp::plan_transports`).
 pub struct TuiApproval {
     default_timeout: Duration,
 }

@@ -16,7 +16,7 @@ pub struct ApprovalArgs {
     pub confirm_auto: bool,
     /// Time-boxed approval window for `policy=prompt`.
     ///
-    /// When set to a positive value, the TUI / desktop prompt offers an
+    /// When set to a positive value, the approval prompt offers an
     /// "Approve for N seconds" choice that suppresses re-prompting for
     /// subsequent calls to the same preset+action within the window.
     /// `--window 0` removes any previously-configured window.

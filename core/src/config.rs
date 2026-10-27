@@ -19,7 +19,7 @@ pub struct Config {
     pub preset: Vec<Preset>,
     /// Optional approval-transport configuration. When `approval.telegram`
     /// is set and a `[approval.telegram]` block is present, the binary
-    /// selects the Telegram transport over the default Desktop+TUI pair.
+    /// selects the Telegram transport over the default desktop prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<ApprovalConfig>,
 }
@@ -59,7 +59,7 @@ pub struct Preset {
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_methods: Vec<String>,
     pub approval: ApprovalPolicy,
-    /// Cap (in seconds) for an approve-for-window option in TUI / desktop
+    /// Cap (in seconds) for an approve-for-window option in approval
     /// prompts. `None` (the default) means windowing is disabled for this
     /// preset — every call requires a fresh prompt. Only meaningful when
     /// `approval = "prompt"`; ignored for `auto` and `deny`.

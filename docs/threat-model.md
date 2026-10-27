@@ -63,13 +63,17 @@ If a preset allows `GET /me`, the response body might contain the user's email o
 
 ## Residual risks (known, accepted in MVP)
 
-### R1. macOS / Windows desktop-notification approval is degraded
+### R1. Local approval prompts trust the local screen; Windows has none
 
-`notify-rust` exposes interactive notification actions (Approve / Deny buttons) only on Linux/DBus. On macOS and Windows the notification fires for awareness, but actual approval happens in the TUI prompt printed to the MCP server's stderr (visible in Claude Code / Cursor's MCP output panel). Documented in `src/approval/desktop.rs`.
+On macOS approval is a native dialog shown with `osascript` (`src/approval/osascript.rs`). Deny is the default and the cancel button, so Return and Esc deny and approving takes a click; the dialog gives up after the request timeout (`timeout`). Request text reaches the fixed AppleScript as arguments, never as script source, and is sanitised as in T5. On Linux `notify-rust` shows a notification with Approve / Deny actions over DBus. Windows notifications have no actions and there is no native dialog yet, so `prompt` presets on Windows need the Telegram transport.
 
-### R2. TUI approval is rendered to stderr only
+A local prompt is only as trustworthy as the screen it is on: an agent that can drive the desktop (computer-use tools) could click Approve. Users who give an agent screen control should approve through Telegram, which is out of band.
 
-The full-screen ratatui dialog (v0.2.0) renders via `CrosstermBackend::new(std::io::stderr())` so it never touches stdout (the JSON-RPC channel). Visible in Claude Code / Cursor's MCP output panel. It restores the terminal state on exit (alt-screen + raw mode), but a process kill mid-dialog can leave the terminal in raw mode — the panic hook should reset.
+Up to v0.4.3 macOS had no working prompt under an MCP client: the notification had no buttons and the TUI fallback could not run, so every `prompt` call was refused (fail closed).
+
+### R2. TUI approval works only in a terminal you can see
+
+The full-screen ratatui dialog renders via `CrosstermBackend::new(std::io::stderr())` so it never touches stdout (the JSON-RPC channel). Under an MCP client stderr is captured and stdin is the JSON-RPC pipe, so the dialog cannot be seen (and on macOS cannot read keys). It is therefore a fallback only on Linux / Windows when stderr is a terminal, or chosen explicitly with `MCP_WARDEN_APPROVAL_TRANSPORT=tui`. Whenever a transport fails to show its prompt, the call is refused and audited as `failed` — never approved. The TUI restores the terminal state on exit (alt-screen + raw mode), but a process kill mid-dialog can leave the terminal in raw mode — the panic hook should reset.
 
 ### R3. Audit log integrity is policy, not crypto
 
@@ -97,11 +101,11 @@ The SQLite file is `0600`-permissioned and rejects symlinks at open time, but ro
 
 ### R9. Time-boxed approvals are convenience, not deeper trust
 
-When the user picks **Approve for window** in the TUI / desktop prompt, the executor caches `(preset, action) → expires_at` in process memory and skips re-prompting for that pair until the window expires. Properties:
+When the user picks **Approve for window** in the approval prompt (dialog, notification, Telegram or TUI), the executor caches `(preset, action) → expires_at` in process memory and skips re-prompting for that pair until the window expires. Properties:
 
 - **In-process only.** The cache is a `tokio::sync::Mutex<HashMap<…, Instant>>` inside `ActionExecutor`. Restarting `mcp-warden mcp` clears every window — by design. There is no file or socket through which a different process can inject or read windows.
 - **Per `(preset, action)` keyed.** A window for `proxy_http` on `github-read` does **not** cover `ssh_exec` on the same preset. Each tool class requires its own approval.
-- **Capped by the preset.** `approval_window_seconds = N` in the preset is the maximum window length; the TUI cannot exceed it. Presets that omit the field disable the window option entirely — the TUI shows only Approve once / Deny.
+- **Capped by the preset.** `approval_window_seconds = N` in the preset is the maximum window length; no prompt can exceed it. Presets that omit the field disable the window option entirely — prompts show only Approve once / Deny.
 - **`get_secret_for_env` is never windowed.** Spec §6 mandates a fresh prompt every time a raw secret is revealed; the executor's `force_prompt = true` path bypasses the cache and never registers a window.
 - **Audited.** Calls that proceed via an active window are recorded with `decision = "windowed"` in `audit.db`. Reviewing recent activity makes it visible that the user did not see a fresh prompt; the initial approve-for-window decision is still recorded as `approved`.
 

@@ -18,8 +18,8 @@ pub const PROXY_HTTP_DESCRIPTION: &str = "\
 Make an HTTP request through a preset. The preset selects the base URL and \
 authentication; you supply `path`, `method`, and optional `body` / `query`. \
 Allow-listed methods and paths are validated server-side BEFORE any \
-credential is injected. Sensitive presets trigger a desktop / TUI approval \
-prompt; you cannot bypass approval. If the user previously approved a \
+credential is injected. Sensitive presets trigger an approval prompt the \
+user must answer; you cannot bypass approval. If the user previously approved a \
 time-boxed window for this preset+action, the call proceeds without a new \
 prompt and is recorded as 'windowed' in the audit log. Every call is \
 recorded to a local audit log.";

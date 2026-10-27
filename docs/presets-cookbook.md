@@ -60,7 +60,7 @@ approval = "prompt"
 approval_window_seconds = 600
 ```
 
-When the agent triggers the first call, the TUI / desktop prompt offers a
+When the agent triggers the first call, the approval prompt offers a
 third choice: **Approve for 10 min**. Subsequent `proxy_http` calls on
 `linear-read` inside the window proceed without re-prompting and are
 recorded with `decision = "windowed"` in `mcp-warden audit recent`.

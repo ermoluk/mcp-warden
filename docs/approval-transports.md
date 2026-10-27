@@ -4,14 +4,16 @@ When a preset's approval policy is `prompt` (the default), `mcp-warden`
 asks a human before running the action. *How* it asks is the job of an
 `ApprovalTransport`. The OSS binary ships three.
 
-| Transport  | How it asks                                         | Good for                          |
-|------------|-----------------------------------------------------|-----------------------------------|
-| `desktop`  | OS desktop notification with Approve / Deny actions | Linux desktops                    |
-| `tui`      | Interactive prompt drawn on the terminal (stderr)   | macOS / Windows, SSH sessions     |
-| `telegram` | Bot message with inline Approve / Deny buttons      | Approving from your phone         |
+| Transport  | How it asks                                                                 | Good for                                   |
+|------------|-----------------------------------------------------------------------------|--------------------------------------------|
+| `desktop`  | macOS: native dialog. Linux: notification with Approve / Deny actions       | The default on macOS and Linux desktops    |
+| `tui`      | Full-screen prompt drawn on the terminal (stderr)                           | Running `mcp-warden mcp` by hand in a terminal |
+| `telegram` | Bot message with inline Approve / Deny buttons                              | Approving from your phone; Windows; machines without a desktop |
 
-Every decision — `approved`, `denied`, `timeout`, `windowed` — is written to
-the append-only audit log regardless of transport.
+Every decision — `approved`, `denied`, `timeout`, `windowed`, plus `refused`
+(the allow-list turned the call away before anyone was asked) and `failed`
+(the prompt could not be shown) — is written to the append-only audit log
+regardless of transport.
 
 ## How the transport is chosen
 
@@ -20,14 +22,65 @@ Resolved once when `mcp-warden mcp` starts (config is load-once-and-freeze):
 1. **`MCP_WARDEN_APPROVAL_TRANSPORT`** env var — `telegram`, `desktop` or
    `tui`. Wins over everything else.
 2. **`[approval.telegram]`** block present in `config.toml` → Telegram is
-   primary, TUI is the fallback.
-3. **Default** → desktop notification primary, TUI fallback.
+   primary.
+3. **Default** → the `desktop` prompt: the native dialog on macOS, a
+   notification on Linux.
 
 The fallback is asked only when the primary **times out** — nobody answered,
-or (for Telegram) polling kept failing until the deadline. If the primary
-returns an error outright (e.g. Telegram rejects `sendMessage`), the call is
-refused without asking the fallback. Errors fail closed; they never become
+or (for Telegram) polling kept failing until the deadline — so it has to be a
+prompt you can actually see:
+
+| Primary    | Fallback on macOS | Fallback on Linux / Windows                      |
+|------------|-------------------|--------------------------------------------------|
+| `desktop`  | none              | `tui`, only if the server's stderr is a terminal |
+| `telegram` | the native dialog | `tui`, only if the server's stderr is a terminal |
+| `tui`      | none              | none                                             |
+
+An MCP client (Claude Code, Cursor, …) captures the server's stderr and feeds
+JSON-RPC through its stdin, so a TUI prompt there can't be seen — and on
+macOS can't read keys at all. That is why the TUI is never a silent fallback
+under a client; choose it explicitly only when you run `mcp-warden mcp`
+yourself in a terminal.
+
+If a transport returns an error outright (e.g. Telegram rejects
+`sendMessage`, or no desktop session is available for the dialog), the call
+is refused without asking the fallback and audited as `failed`; the agent is
+told the prompt could not be shown. Errors fail closed; they never become
 approvals.
+
+## macOS dialog
+
+On macOS the `desktop` transport shows a native dialog through
+`/usr/bin/osascript`:
+
+```
+mcp-warden — approval requested
+
+proxy_http → stripe-write
+
+POST /charges, body ~120 bytes
+
+No answer in 60 s means Deny.
+
+        [Approve for 10 min]  [Approve once]  [ Deny ]
+```
+
+- **Deny is the default.** Return and Esc both deny; approving takes a click.
+- **Approve for N min** appears only when the preset has a time-boxed window
+  (`mcp-warden approval <preset> prompt --window N`).
+- **Unanswered means no.** The dialog closes itself after 60 s and the call
+  is refused as `timeout`.
+- **No script injection.** The AppleScript is a fixed constant; the preset
+  name, action and summary are passed to it as arguments, never as script
+  source, and are sanitised like every other prompt.
+- **No extra permissions.** The dialog needs no Automation or Accessibility
+  grant. It may open behind other windows if you are busy elsewhere.
+
+A local dialog is only as trustworthy as the screen it is on: an agent that
+can drive your desktop (computer-use tools) could click it. If you give an
+agent screen control, approve through Telegram instead.
+
+Windows has no native dialog yet; use Telegram there.
 
 ## Telegram
 

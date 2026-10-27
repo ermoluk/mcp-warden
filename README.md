@@ -17,8 +17,8 @@ The agent calls high-level tools (`proxy_http`); `mcp-warden` injects the secret
 3. The AI agent connects to `mcp-warden` as an MCP server (stdio).
 4. When the agent wants to act, it calls `proxy_http` with a preset name and a path/method.
 5. `mcp-warden` validates the request against the preset's allow-list, injects the credential, executes, and returns only the response.
-6. Sensitive presets trigger an approval prompt (desktop notification on Linux, TUI prompt on macOS/Windows). Opt in to **time-boxed approvals** per preset so one OK can cover a short burst of follow-up calls without re-prompt spam.
-7. Every action lands in a local SQLite audit log — including a `windowed` decision for calls authorised by an active approval window, and a `refused` decision (with the raw requested path or command) for calls the allow-list turned away.
+6. Sensitive presets trigger an approval prompt: a native dialog on macOS, a desktop notification with Approve / Deny on Linux, or a Telegram message on any OS (the option for Windows). Opt in to **time-boxed approvals** per preset so one OK can cover a short burst of follow-up calls without re-prompt spam.
+7. Every action lands in a local SQLite audit log — including a `windowed` decision for calls authorised by an active approval window, a `refused` decision (with the raw requested path or command) for calls the allow-list turned away, and a `failed` decision when the approval prompt could not be shown.
 
 The agent's context window contains zero secrets.
 
@@ -106,7 +106,7 @@ Other MCP clients: see [`docs/claude-code-setup.md`](docs/claude-code-setup.md) 
   chat_id = 123456789                  # your numeric Telegram chat id
   timeout_seconds = 120                # optional
   ```
-  then `mcp-warden secret add tg_bot_token` (pastes the bot token into the keychain). `prompt`-policy presets now send Approve / Deny inline-button messages to that chat; TUI is the fallback if the Telegram prompt times out (see [`docs/approval-transports.md`](docs/approval-transports.md)). Override at runtime with `MCP_WARDEN_APPROVAL_TRANSPORT={telegram|desktop|tui}`.
+  then `mcp-warden secret add tg_bot_token` (pastes the bot token into the keychain). `prompt`-policy presets now send Approve / Deny inline-button messages to that chat; if the Telegram prompt times out, macOS asks again in the native dialog (see [`docs/approval-transports.md`](docs/approval-transports.md)). Override at runtime with `MCP_WARDEN_APPROVAL_TRANSPORT={telegram|desktop|tui}`.
 
 ## What's new in v0.3.0
 
@@ -114,7 +114,7 @@ Other MCP clients: see [`docs/claude-code-setup.md`](docs/claude-code-setup.md) 
 - **`preset from-openapi <url-or-file>`** — point it at an OpenAPI 3.0/3.1 JSON or YAML spec and it derives `base_url`, `allowed_paths`, `allowed_methods`, and the auth scheme (Bearer or APIKey-Header). Filter by HTTP method or tag.
 - **`doctor --deep`** — for each HTTP preset, runs a safe read-only probe (GET against base URL or first literal allowed path), reports ok / auth_failed / auth_ok_404 / network_error / tls_error / skipped, with elapsed time and a redacted body snippet. Skips `prompt`-policy presets unless `--include-prompt` is passed.
 - **`web`** — a small local-only web UI (binds `127.0.0.1`, hardcoded) for browsing presets and the audit log without spawning a TUI. Read-only in this release; approval over WebSocket is on the roadmap.
-- **Telegram approval transport** — new `ApprovalTransport` impl that sends approval prompts to a Telegram chat with inline Approve / Deny / Approve-for-window buttons. Bot token lives in the OS keychain. Foreign-chat callbacks are rejected. Message uses `protect_content: true`. The wiring (selecting Telegram over Desktop / TUI in `cli/mcp.rs`) is a small follow-up; the impl + tests are merged.
+- **Telegram approval transport** — new `ApprovalTransport` impl that sends approval prompts to a Telegram chat with inline Approve / Deny / Approve-for-window buttons. Bot token lives in the OS keychain. Foreign-chat callbacks are rejected. Message uses `protect_content: true`. Selected automatically when `[approval.telegram]` is configured.
 
 See `docs/web-ui.md` for the web UI design notes.
 
