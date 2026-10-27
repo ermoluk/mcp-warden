@@ -1,5 +1,7 @@
 use crate::approval::{
-    desktop::DesktopApproval, osascript::OsascriptApproval, telegram::TelegramApproval,
+    desktop::DesktopApproval,
+    osascript::OsascriptApproval,
+    telegram::{TelegramApproval, TelegramBot},
     tui::TuiApproval,
 };
 use crate::executor::ActionExecutor;
@@ -39,7 +41,12 @@ pub async fn cmd(config_dir: &Path) -> Result<()> {
     // so edits made after startup need a restart (and pass validation then).
     let presets: Arc<dyn mcp_warden_core::presets::PresetSource> =
         Arc::new(FrozenSource::new(cfg.preset.clone()));
-    let (approval, approval_fallback) = build_approval(&cfg, keychain.as_ref())?;
+    let transports = build_approval(&cfg, keychain.as_ref(), config_dir)?;
+    // With Telegram configured, listen for `/lock` (and deliver button
+    // presses) for as long as the server runs; servers take turns polling.
+    if let Some(bot) = transports.telegram.clone() {
+        tokio::spawn(bot.listen());
+    }
     let audit: Arc<dyn AuditSink> = Arc::new(LocalSqlite::open(&audit_path)?);
     // One id per server process — one per client connection — so a
     // session's calls group together in the log; the client's name and
@@ -47,7 +54,7 @@ pub async fn cmd(config_dir: &Path) -> Result<()> {
     audit.set_session(&session_id());
 
     let executor = Arc::new(
-        ActionExecutor::new(keychain, approval, approval_fallback, audit)
+        ActionExecutor::new(keychain, transports.primary, transports.fallback, audit)
             .with_lock(config_dir.join(crate::executor::lock::LOCK_FILE)),
     );
     let server = WardenServer::new(presets, executor);
@@ -77,11 +84,13 @@ fn session_id() -> String {
     format!("{:012x}", h.finish() & 0xffff_ffff_ffff)
 }
 
-/// Primary approval transport plus an optional fallback.
-pub(crate) type ApprovalTransports = (
-    Arc<dyn ApprovalTransport>,
-    Option<Arc<dyn ApprovalTransport>>,
-);
+/// The approval transports to use, plus the Telegram bot (when
+/// configured) whose `/lock` listener the MCP server runs.
+pub(crate) struct ApprovalTransports {
+    pub primary: Arc<dyn ApprovalTransport>,
+    pub fallback: Option<Arc<dyn ApprovalTransport>>,
+    pub telegram: Option<Arc<TelegramBot>>,
+}
 
 /// Which transport fills a slot; `build_approval` turns it into an instance.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -94,7 +103,11 @@ enum Kind {
 
 /// Construct the active approval transport + optional fallback. See
 /// `plan_transports` for how they are chosen.
-pub(crate) fn build_approval(cfg: &Config, kc: &dyn KeychainStore) -> Result<ApprovalTransports> {
+pub(crate) fn build_approval(
+    cfg: &Config,
+    kc: &dyn KeychainStore,
+    config_dir: &Path,
+) -> Result<ApprovalTransports> {
     let env_choice = std::env::var("MCP_WARDEN_APPROVAL_TRANSPORT").ok();
     let env_choice = env_choice.as_deref().map(str::trim).map(str::to_lowercase);
     let telegram = cfg.approval.as_ref().and_then(|a| a.telegram.as_ref());
@@ -104,14 +117,30 @@ pub(crate) fn build_approval(cfg: &Config, kc: &dyn KeychainStore) -> Result<App
         cfg!(target_os = "macos"),
         std::io::stderr().is_terminal(),
     );
+    let bot = telegram
+        .map(|tg| telegram_bot(tg, kc, config_dir))
+        .transpose()?;
     let build = |kind| -> Result<Arc<dyn ApprovalTransport>> {
         Ok(match kind {
-            Kind::Telegram => telegram_transport(telegram, kc)?,
+            Kind::Telegram => {
+                let (bot, tg) = bot.clone().zip(telegram).ok_or_else(|| {
+                    WardenError::Validation(
+                        "MCP_WARDEN_APPROVAL_TRANSPORT=telegram set but [approval.telegram] \
+                         missing in config"
+                            .into(),
+                    )
+                })?;
+                Arc::new(TelegramApproval::new(bot).with_timeout(tg.timeout_seconds))
+            }
             Kind::Desktop => desktop_transport(),
             Kind::Tui => Arc::new(TuiApproval::from_stderr()),
         })
     };
-    Ok((build(primary)?, fallback.map(build).transpose()?))
+    Ok(ApprovalTransports {
+        primary: build(primary)?,
+        fallback: fallback.map(build).transpose()?,
+        telegram: bot,
+    })
 }
 
 /// Pick the primary approval transport and its fallback:
@@ -148,25 +177,23 @@ fn plan_transports(
     (primary, fallback)
 }
 
-fn telegram_transport(
-    tg_cfg: Option<&TelegramConfig>,
+/// The bot for `[approval.telegram]`, with its token from the keychain.
+pub(crate) fn telegram_bot(
+    tg_cfg: &TelegramConfig,
     kc: &dyn KeychainStore,
-) -> Result<Arc<dyn ApprovalTransport>> {
-    let tg_cfg = tg_cfg.ok_or_else(|| {
-        WardenError::Validation(
-            "MCP_WARDEN_APPROVAL_TRANSPORT=telegram set but [approval.telegram] missing in config"
-                .into(),
-        )
-    })?;
+    config_dir: &Path,
+) -> Result<Arc<TelegramBot>> {
     let token = kc.get(&tg_cfg.bot_token_secret)?.ok_or_else(|| {
         WardenError::Validation(format!(
             "approval.telegram.bot_token_secret '{}' not in keychain",
             tg_cfg.bot_token_secret
         ))
     })?;
-    Ok(Arc::new(
-        TelegramApproval::new(token, tg_cfg.chat_id).with_timeout(tg_cfg.timeout_seconds),
-    ))
+    Ok(Arc::new(TelegramBot::new(
+        token,
+        tg_cfg.chat_id,
+        config_dir,
+    )))
 }
 
 /// The native desktop prompt: a dialog on macOS, where notifications have no

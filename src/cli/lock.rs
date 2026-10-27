@@ -45,12 +45,12 @@ pub async fn unlock_cmd(
         Ok(raw) => toml::from_str(&raw).map_err(|e| WardenError::Config(e.to_string()))?,
         Err(_) => Config::default(),
     };
-    let (approval, fallback) = crate::cli::mcp::build_approval(&cfg, kc.as_ref())?;
+    let transports = crate::cli::mcp::build_approval(&cfg, kc.as_ref(), config_dir)?;
     std::fs::create_dir_all(config_dir).map_err(WardenError::Io)?;
     let audit = Arc::new(LocalSqlite::open(audit_db)?);
     // No lock state on this executor: unlocking must not be refused by the
     // very lock it removes.
-    let exec = ActionExecutor::new(kc, approval, fallback, audit);
+    let exec = ActionExecutor::new(kc, transports.primary, transports.fallback, audit);
     unlock(config_dir, &exec).await
 }
 

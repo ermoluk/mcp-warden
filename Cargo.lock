@@ -3339,6 +3339,7 @@ dependencies = [
  "crossterm",
  "directories",
  "dirs",
+ "getrandom 0.3.4",
  "insta",
  "is-terminal",
  "libc",
