@@ -11,7 +11,7 @@
       "name": "mcp-warden",
       "source": "./plugins/mcp-warden",
       "description": "Let Claude Code use your API keys, SSH keys and database passwords without ever seeing them. Bundles the mcp-warden MCP server config, a skill that teaches Claude to call it, and a guided /mcp-warden:setup.",
-      "version": "0.4.1",
+      "version": "0.5.0",
       "category": "security",
       "homepage": "https://github.com/ermoluk/mcp-warden"
     }
