@@ -16,6 +16,7 @@ const TEMPLATE: &str = "\
 # base_url = \"https://api.github.com\"
 # auth = { type = \"bearer\", secret = \"gh_pat\" }
 # allowed_methods = [\"GET\"]
+# allowed_paths = [\"/user/repos\"]
 # approval = \"auto\"
 ";
 

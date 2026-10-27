@@ -12,6 +12,7 @@ description = "GitHub API (read-only)"
 base_url = "https://api.github.com"
 auth = { type = "bearer", secret = "gh_pat" }
 allowed_methods = ["GET"]
+allowed_paths = ["/user/repos", "/repos/OWNER/[^/]+"]
 approval = "auto"
 ```
 
@@ -20,10 +21,11 @@ mcp-warden secret add gh_pat
 mcp-warden preset add github-read \
   --type http --base-url https://api.github.com \
   --auth-bearer gh_pat --allowed-methods GET \
+  --allowed-paths '/user/repos,/repos/OWNER/[^/]+' \
   --approval auto --confirm-auto
 ```
 
-With no `allowed_paths`, every path under `base_url` is allowed: with a classic PAT and `approval = "auto"` the agent can read every private repo the token can see, without a prompt, so narrow it (e.g. `allowed_paths = ["/user/repos", "/repos/OWNER/[^/]+"]`) and prefer a fine-grained PAT limited to specific repositories — `mcp-warden doctor` warns about every HTTP preset without `allowed_paths`.
+Replace `OWNER` with your account or org. Without `allowed_paths`, every path under `base_url` is allowed: with a classic PAT and `approval = "auto"` the agent could read every private repo the token can see, without a prompt — so keep `auto` only on narrowed presets (the built-in `github-read` template ships with `approval = "prompt"` because it has no paths) and prefer a fine-grained PAT limited to specific repositories — `mcp-warden doctor` warns about every HTTP preset without `allowed_paths`.
 
 Each `allowed_paths` entry must match the whole path, as an exact string or a regex anchored as `^(?:…)$` — never as a prefix, so `/repos/` allows only `/repos/` itself — and `[^/]+` is safer than `.*` for one path segment, because `.*` also matches `/` and reaches everything below.
 

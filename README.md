@@ -41,10 +41,11 @@ mcp-warden preset add github-read \
   --base-url https://api.github.com \
   --auth-bearer gh_pat \
   --allowed-methods GET \
+  --allowed-paths /user/repos \
   --approval auto --confirm-auto
 ```
 
-This preset has no `--allowed-paths`, so every path under `base_url` is allowed (`preset add` and `doctor` warn about it): with a classic PAT the agent can read every private repo the token can see, so narrow it — e.g. `--allowed-paths '/user/repos,/repos/OWNER/[^/]+'` — or use a fine-grained PAT limited to specific repos. Patterns match the whole path, as exact strings or regexes anchored as `^(?:…)$`, never as prefixes; `[^/]+` is safer than `.*` for one segment.
+The preset auto-approves only `GET /user/repos`; any other path is refused before the token is touched. To let the agent read more, widen the allow-list (e.g. `--allowed-paths '/user/repos,/repos/OWNER/[^/]+'`) and prefer a fine-grained PAT limited to specific repos. Patterns match the whole path, as exact strings or regexes anchored as `^(?:…)$`, never as prefixes; `[^/]+` is safer than `.*` for one segment. An HTTP preset with no `allowed_paths` allows every path under `base_url` — `preset add` and `doctor` warn about it, and the built-in `github-read` / `gitea-read` / `stripe-read` templates ship with `approval = "prompt"` for that reason.
 
 Wire `mcp-warden` into your agent — see [`docs/claude-code-setup.md`](docs/claude-code-setup.md) or [`docs/cursor-setup.md`](docs/cursor-setup.md).
 

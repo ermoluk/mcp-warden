@@ -17,13 +17,14 @@ pub struct Template {
 pub const TEMPLATES: &[Template] = &[
     Template {
         name: "github-read",
-        description: "GitHub API (read-only), auto-approve GET",
+        description: "GitHub API (read-only), prompt per call",
         default_secret_name: "gh_pat",
         build: github_read,
         open_paths_note: &[
             "  allowed_paths = [\"/user/repos\", \"/repos/OWNER/[^/]+\"]",
             "A classic PAT lets this preset read every private repo the token can see.",
             "Prefer a fine-grained PAT limited to specific repositories, read-only.",
+            "Approval stays `prompt` until you narrow allowed_paths; then set it to auto if you want.",
         ],
     },
     Template {
@@ -66,12 +67,13 @@ pub const TEMPLATES: &[Template] = &[
     },
     Template {
         name: "gitea-read",
-        description: "Gitea API read-only, auto-approve GET",
+        description: "Gitea API read-only, prompt per call",
         default_secret_name: "gitea_token",
         build: gitea_read,
         open_paths_note: &[
             "  allowed_paths = [\"/api/v1/user/repos\", \"/api/v1/repos/OWNER/[^/]+\"]",
             "Prefer a token with read-only scopes (e.g. read:repository) over an all-access one.",
+            "Approval stays `prompt` until you narrow allowed_paths; then set it to auto if you want.",
         ],
     },
     Template {
@@ -134,7 +136,7 @@ fn github_read(name: &str, secret_name: &str) -> Preset {
         bearer(secret_name),
         &["GET"],
         &[],
-        ApprovalPolicy::Auto,
+        ApprovalPolicy::Prompt,
     )
 }
 
@@ -216,7 +218,7 @@ fn gitea_read(name: &str, secret_name: &str) -> Preset {
         },
         &["GET"],
         &[],
-        ApprovalPolicy::Auto,
+        ApprovalPolicy::Prompt,
     )
 }
 
@@ -254,7 +256,7 @@ mod tests {
     fn github_read_uses_bearer_and_get_only() {
         let p = github_read("github-read", "gh_pat");
         assert_eq!(p.allowed_methods, vec!["GET"]);
-        assert!(matches!(p.approval, ApprovalPolicy::Auto));
+        assert!(matches!(p.approval, ApprovalPolicy::Prompt));
         match p.auth.as_ref().unwrap() {
             Auth::Bearer { secret } => assert_eq!(secret, "gh_pat"),
             _ => panic!("expected Bearer"),
@@ -271,6 +273,23 @@ mod tests {
                 "template {}: open_paths_note must be set exactly when allowed_paths is empty",
                 t.name
             );
+        }
+    }
+
+    /// Invariant 4: a template that allows every path under `base_url` must
+    /// not also skip the approval prompt. `auto` is for presets the user has
+    /// narrowed with `allowed_paths`.
+    #[test]
+    fn templates_without_allowed_paths_are_never_auto() {
+        for t in TEMPLATES {
+            let p = (t.build)(t.name, t.default_secret_name);
+            if p.allowed_paths.is_empty() {
+                assert!(
+                    !matches!(p.approval, ApprovalPolicy::Auto),
+                    "template {} has open allowed_paths and approval = auto",
+                    t.name
+                );
+            }
         }
     }
 

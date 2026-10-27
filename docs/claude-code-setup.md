@@ -43,6 +43,7 @@ mcp-warden preset add github-read \
   --base-url https://api.github.com \
   --auth-bearer gh_pat \
   --allowed-methods GET \
+  --allowed-paths /user/repos \
   --approval auto --confirm-auto
 ```
 

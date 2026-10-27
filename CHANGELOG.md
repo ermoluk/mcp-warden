@@ -4,6 +4,11 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### Changed
+
+- **`github-read` and `gitea-read` templates now default to `approval = "prompt"`.** They ship without `allowed_paths`, and pairing an open allow-list with `auto` let an agent read every private repo a classic PAT can see without a single prompt — contrary to invariant 4. `preset scaffold` output explains how to narrow `allowed_paths` and switch to `auto` afterwards. A test now fails if any template combines empty `allowed_paths` with `auto`. Existing configs are unchanged.
+- README, `docs/claude-code-setup.md`, the presets cookbook and the `init` config template now show `github-read` with `allowed_paths` set, so the quickstart no longer creates an open auto-approved preset.
+
 ### Added
 
 - **Warnings for HTTP presets without `allowed_paths`.** An empty `allowed_paths` allows every path under `base_url`, and the built-in `github-read` template ships that way with `approval = "auto"`: with a classic PAT the agent can read every private repo the token can see. Behaviour is unchanged so existing configs keep working, but it is now visible: `mcp-warden doctor` prints a warning per such preset (and adds a `warnings` field to each `--deep --format json` probe result), `preset add --type http` without `--allowed-paths` warns on stderr, and `preset scaffold` explains it in `--dry-run` output for `github-read`, `stripe-read` and `gitea-read` (with an example allow-list and token advice) and warns when it writes the config. README and the presets cookbook now say that patterns match the whole path (exact strings or regexes anchored as `^(?:…)$`, never prefixes) and that `[^/]+` is safer than `.*` for one segment.
