@@ -3,6 +3,7 @@ use mcp_warden_core::audit::AuditOutcome;
 use mcp_warden_core::config::{Auth, Preset};
 use mcp_warden_core::error::{Result, WardenError};
 use mcp_warden_core::secret::Secret;
+use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
 use url::Url;
@@ -46,8 +47,8 @@ pub fn validate_request(preset: &Preset, method: &str, path: &str) -> Result<()>
     // URL parsers treat `%2e` as `.` (WHATWG URL spec) and `\` as `/` for
     // http(s), so `/users/%2e%2e/admin` would pass the allow-list and then be
     // normalised to `/admin`. Refuse anything normalisation could rewrite.
-    // `%2f` stays allowed: without dots it cannot climb, and GitLab-style
-    // APIs need it for namespaced ids.
+    // `%2f` stays allowed — GitLab-style APIs need it for namespaced ids —
+    // but patterns see it decoded, as a separator (see `decode_path`).
     let lower = path.to_ascii_lowercase();
     if path.contains('\\')
         || lower.contains("%2e")
@@ -58,15 +59,16 @@ pub fn validate_request(preset: &Preset, method: &str, path: &str) -> Result<()>
             "path '{path}' contains dot segments, encoded dots or backslashes"
         )));
     }
+    let decoded = decode_path(path)?;
     if preset.allowed_paths.is_empty() {
         return Ok(());
     }
     for pat in &preset.allowed_paths {
-        if pat == path {
+        if pat == &*decoded {
             return Ok(());
         }
         if let Ok(rx) = mcp_warden_core::config::anchored_regex(pat) {
-            if rx.is_match(path) {
+            if rx.is_match(&decoded) {
                 return Ok(());
             }
         }
@@ -75,6 +77,39 @@ pub fn validate_request(preset: &Preset, method: &str, path: &str) -> Result<()>
         "path '{path}' not allowed by preset '{}'",
         preset.name
     )))
+}
+
+/// Percent-decode `path` for allow-list matching.
+///
+/// Upstreams may decode `%2F` before routing (nginx does by default), so
+/// `/repos/o/x%2Fcollaborators` can reach a route `/repos/o/[^/]+` never
+/// approved; patterns therefore see the decoded path. Anything an upstream
+/// could split, merge or cut differently once decoded is refused: empty
+/// segments (slash merging), `.`/`..`, `\`, control characters (NUL
+/// truncation, header splitting) and invalid UTF-8. The raw path is still
+/// what gets sent — `build_url` checks that.
+fn decode_path(path: &str) -> Result<std::borrow::Cow<'_, str>> {
+    let decoded = percent_decode_str(path).decode_utf8().map_err(|_| {
+        WardenError::Validation(format!(
+            "path '{path}' is not valid UTF-8 once percent-decoded"
+        ))
+    })?;
+    // Decoding never removes a `/`, so this also covers a raw `//`.
+    if decoded.contains("//") {
+        return Err(WardenError::Validation(format!(
+            "path '{path}' contains an empty segment (`//`)"
+        )));
+    }
+    if decoded.contains('\\')
+        || decoded.chars().any(char::is_control)
+        || decoded.split('/').any(|seg| seg == "." || seg == "..")
+    {
+        return Err(WardenError::Validation(format!(
+            "path '{path}' contains dot segments, backslashes or control \
+             characters once percent-decoded"
+        )));
+    }
+    Ok(decoded)
 }
 
 /// Join `base_url` and the agent-supplied path.
@@ -272,10 +307,98 @@ mod tests {
     #[test]
     fn accepts_encoded_slash_for_namespaced_ids() {
         // GitLab-style APIs require `group%2Fproject` as one path segment.
+        // Patterns see the decoded path, so the id spans two segments there;
+        // what gets sent is still the raw, encoded path.
+        let mut q = p();
+        q.allowed_paths = vec!["/projects/[^/]+/[^/]+".into()];
+        validate_request(&q, "GET", "/projects/group%2Fproject").unwrap();
+        let u = build_url("https://gitlab.example/api/v4", "/projects/group%2Fproject").unwrap();
+        assert_eq!(u.path(), "/api/v4/projects/group%2Fproject");
+    }
+
+    #[test]
+    fn encoded_slash_counts_as_a_separator_for_the_allow_list() {
+        // An upstream that decodes `%2F` before routing (nginx does by
+        // default) sees two segments, so the allow-list must too.
         let mut q = p();
         q.allowed_paths = vec!["/projects/[^/]+".into()];
-        validate_request(&q, "GET", "/projects/group%2Fproject").unwrap();
-        build_url("https://gitlab.example/api/v4", "/projects/group%2Fproject").unwrap();
+        assert!(validate_request(&q, "GET", "/projects/group%2Fproject").is_err());
+        q.allowed_paths = vec!["/repos/ermoluk/[^/]+".into()];
+        for evil in [
+            "/repos/ermoluk/x%2Fcollaborators",
+            "/repos/ermoluk/x%2fcollaborators",
+        ] {
+            let err = validate_request(&q, "GET", evil).unwrap_err();
+            assert!(err.to_string().contains("not allowed"), "{evil}: {err}");
+        }
+    }
+
+    #[test]
+    fn exact_pattern_matches_the_decoded_path() {
+        // `+` makes this a different regex, so only the exact comparison
+        // can match it, and it has to compare against the decoded path.
+        let mut q = p();
+        q.allowed_paths = vec!["/files/a+b".into()];
+        validate_request(&q, "GET", "/files/a%2Bb").unwrap();
+    }
+
+    #[test]
+    fn rejects_empty_segments_raw_or_decoded() {
+        // Upstreams that merge slashes would route a different path than
+        // the allow-list saw. Empty allowed_paths: only the structural
+        // checks stand between these and the upstream.
+        let mut q = p();
+        q.allowed_paths = vec![];
+        for evil in [
+            "/user//repos",
+            "//user/repos",
+            "/user/%2Frepos",
+            "/user%2F%2Frepos",
+        ] {
+            assert!(
+                validate_request(&q, "GET", evil).is_err(),
+                "should reject: {evil}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_decoded_control_chars_and_invalid_utf8() {
+        let mut q = p();
+        q.allowed_paths = vec![];
+        for evil in [
+            "/users/a%00b",
+            "/users/a%0ab",
+            "/users/a%0D%0Ab",
+            "/users/a%7fb",
+            "/users/a%ff",
+            "/users/a%c3%28",
+        ] {
+            assert!(
+                validate_request(&q, "GET", evil).is_err(),
+                "should reject: {evil}"
+            );
+        }
+    }
+
+    #[test]
+    fn rejects_dot_segments_that_appear_only_after_decoding() {
+        let mut q = p();
+        q.allowed_paths = vec![];
+        for evil in ["/users/a%2F.%2Fb", "/users/a%2F.", "/users/.%2Fb"] {
+            assert!(
+                validate_request(&q, "GET", evil).is_err(),
+                "should reject: {evil}"
+            );
+        }
+    }
+
+    #[test]
+    fn accepts_ordinary_encoded_characters() {
+        let mut q = p();
+        q.allowed_paths = vec!["/search/[^/]+".into()];
+        validate_request(&q, "GET", "/search/a%20b").unwrap();
+        validate_request(&q, "GET", "/search/%D0%BF%D1%80%D0%B8").unwrap();
     }
 
     #[test]

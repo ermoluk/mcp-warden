@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### Security
+
+- **HTTP path allow-list bypass via encoded slashes and empty segments.** `allowed_paths` were matched against the raw path, where `%2F` is part of a segment, but upstreams that decode it before routing (nginx does by default) see a separator: `/repos/OWNER/[^/]+` let `/repos/OWNER/x%2Fcollaborators` reach `/repos/OWNER/x/collaborators`. Likewise `//` was accepted although upstreams that merge slashes route a different path. Patterns (exact strings and regexes) are now matched against the percent-decoded path, while the raw path is still what is sent, and paths are rejected if they contain an empty segment (raw or decoded) or decode to invalid UTF-8, control characters (`%00`, `%0a`, …), `\` or `.` / `..` segments (invariants 3 and 6). **Behaviour change** for presets that relied on encoded slashes: a GitLab-style id like `/projects/group%2Fproject` no longer matches `/projects/[^/]+` — use `/projects/[^/]+/[^/]+`; exact entries and regexes that spell out `%2F` (or any other percent-escape) must be written in decoded form.
+
 ### Added
 
 - **Warnings for HTTP presets without `allowed_paths`.** An empty `allowed_paths` allows every path under `base_url`, and the built-in `github-read` template ships that way with `approval = "auto"`: with a classic PAT the agent can read every private repo the token can see. Behaviour is unchanged so existing configs keep working, but it is now visible: `mcp-warden doctor` prints a warning per such preset (and adds a `warnings` field to each `--deep --format json` probe result), `preset add --type http` without `--allowed-paths` warns on stderr, and `preset scaffold` explains it in `--dry-run` output for `github-read`, `stripe-read` and `gitea-read` (with an example allow-list and token advice) and warns when it writes the config. README and the presets cookbook now say that patterns match the whole path (exact strings or regexes anchored as `^(?:…)$`, never prefixes) and that `[^/]+` is safer than `.*` for one segment.
