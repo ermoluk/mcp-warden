@@ -419,3 +419,63 @@ fn preset_test_unknown_preset_fails() {
     seed_simulator_presets(tmp.path());
     simulate(tmp.path(), &["nope", "GET", "/"]).failure();
 }
+
+#[test]
+fn preset_grant_and_revoke_set_and_clear_expiry() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_simulator_presets(tmp.path());
+    let cfg = || fs::read_to_string(tmp.path().join("config.toml")).unwrap();
+    let preset = |name: &str| -> toml::Value {
+        let v: toml::Value = toml::from_str(&cfg()).unwrap();
+        v["preset"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|p| p["name"].as_str() == Some(name))
+            .unwrap()
+            .clone()
+    };
+    let expiry = |name: &str| -> Option<chrono::DateTime<chrono::Utc>> {
+        preset(name)
+            .get("expires_at")
+            .map(|v| v.as_str().unwrap().parse().unwrap())
+    };
+
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["preset", "grant", "gh", "--for", "1h"])
+        .assert()
+        .success();
+    let until = expiry("gh").expect("grant sets expires_at");
+    let left = until - chrono::Utc::now();
+    assert!(left > chrono::Duration::minutes(59) && left <= chrono::Duration::hours(1));
+    simulate(tmp.path(), &["gh", "GET", "/repos/o/r"]).success();
+
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["preset", "revoke", "gh"])
+        .assert()
+        .success();
+    assert!(expiry("gh").unwrap() <= chrono::Utc::now());
+    simulate(tmp.path(), &["gh", "GET", "/repos/o/r"])
+        .code(1)
+        .stdout(predicate::str::contains("expired"));
+
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["preset", "grant", "gh", "--permanent"])
+        .assert()
+        .success();
+    assert_eq!(expiry("gh"), None);
+
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["preset", "grant", "gh", "--for", "31d"])
+        .assert()
+        .failure();
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["preset", "grant", "gh"])
+        .assert()
+        .failure();
+}

@@ -119,6 +119,7 @@ fn http_preset(
         sftp_allowed_paths: vec![],
         database: None,
         queries: vec![],
+        expires_at: None,
     }
 }
 

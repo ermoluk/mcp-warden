@@ -89,6 +89,11 @@ pub struct Preset {
     pub database: Option<String>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub queries: Vec<NamedQuery>,
+    /// When access through this preset ends (`mcp-warden preset grant`).
+    /// Calls after this instant are refused; `None` means no time limit.
+    /// Written as an RFC 3339 string.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
 /// A named, parameterised query template declared in a preset. The agent
@@ -580,6 +585,7 @@ mod tests {
                 sftp_allowed_paths: vec![],
                 database: None,
                 queries: vec![],
+                expires_at: None,
             }],
         };
         let s = toml::to_string(&cfg).unwrap();

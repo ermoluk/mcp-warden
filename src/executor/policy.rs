@@ -3,6 +3,7 @@
 //! cannot disagree. Every check here is pure: no secret is read and nothing
 //! is sent.
 
+use chrono::{DateTime, SecondsFormat, Utc};
 use mcp_warden_core::config::{ApprovalPolicy, Preset, PresetType};
 use mcp_warden_core::error::{Result, WardenError};
 
@@ -68,6 +69,19 @@ pub fn check_request(preset: &Preset, req: &Request) -> Result<()> {
     }
 }
 
+/// Refuse a preset whose access window (`mcp-warden preset grant`) has ended.
+pub fn check_expiry(preset: &Preset, now: DateTime<Utc>) -> Result<()> {
+    match preset.expires_at {
+        Some(at) if at <= now => Err(WardenError::Validation(format!(
+            "access to preset '{name}' expired at {at}; run `mcp-warden preset grant {name} --for 1h`, \
+             then restart the MCP server",
+            name = preset.name,
+            at = at.to_rfc3339_opts(SecondsFormat::Secs, true),
+        ))),
+        _ => Ok(()),
+    }
+}
+
 /// What `mcp-warden preset test` reports for a simulated call.
 #[derive(Debug, PartialEq, Eq)]
 pub enum Verdict {
@@ -80,10 +94,10 @@ pub enum Verdict {
     Refused(String),
 }
 
-/// Simulate a call in the order the server checks it: the request first,
-/// then the approval policy.
-pub fn simulate(preset: &Preset, req: &Request) -> Verdict {
-    if let Err(e) = check_request(preset, req) {
+/// Simulate a call at `now` in the order the server checks it: the preset's
+/// access window, the request, then the approval policy.
+pub fn simulate(preset: &Preset, req: &Request, now: DateTime<Utc>) -> Verdict {
+    if let Err(e) = check_expiry(preset, now).and_then(|()| check_request(preset, req)) {
         return Verdict::Refused(e.to_string());
     }
     match preset.approval {
@@ -268,7 +282,7 @@ mod tests {
             path: "/repos/o/r",
         };
         assert_eq!(
-            simulate(&http(ApprovalPolicy::Auto), &req),
+            simulate(&http(ApprovalPolicy::Auto), &req, Utc::now()),
             Verdict::Allowed {
                 policy: ApprovalPolicy::Auto,
                 window_seconds: None
@@ -277,16 +291,40 @@ mod tests {
         let mut prompt = http(ApprovalPolicy::Prompt);
         prompt.approval_window_seconds = Some(600);
         assert_eq!(
-            simulate(&prompt, &req),
+            simulate(&prompt, &req, Utc::now()),
             Verdict::Allowed {
                 policy: ApprovalPolicy::Prompt,
                 window_seconds: Some(600)
             }
         );
         assert_eq!(
-            simulate(&http(ApprovalPolicy::Deny), &req),
+            simulate(&http(ApprovalPolicy::Deny), &req, Utc::now()),
             Verdict::Refused("preset policy is deny".into())
         );
+    }
+
+    #[test]
+    fn expired_preset_is_refused_before_the_request_is_checked() {
+        let now = Utc::now();
+        let mut p = http(ApprovalPolicy::Auto);
+        p.expires_at = Some(now - chrono::Duration::seconds(1));
+        let err = check_expiry(&p, now).unwrap_err().to_string();
+        assert!(err.contains("access to preset 'gh' expired"), "{err}");
+        assert!(err.contains("preset grant gh"), "{err}");
+        let req = Request::Http {
+            method: "DELETE",
+            path: "/nope",
+        };
+        match simulate(&p, &req, now) {
+            Verdict::Refused(why) => assert!(why.contains("expired"), "{why}"),
+            other => panic!("{other:?}"),
+        }
+
+        p.expires_at = Some(now + chrono::Duration::minutes(5));
+        assert!(check_expiry(&p, now).is_ok());
+        // Ends exactly at the instant it names.
+        p.expires_at = Some(now);
+        assert!(check_expiry(&p, now).is_err());
     }
 
     #[test]
@@ -295,7 +333,7 @@ mod tests {
             method: "DELETE",
             path: "/repos/o/r",
         };
-        match simulate(&http(ApprovalPolicy::Deny), &req) {
+        match simulate(&http(ApprovalPolicy::Deny), &req, Utc::now()) {
             Verdict::Refused(why) => assert!(why.contains("DELETE"), "{why}"),
             other => panic!("{other:?}"),
         }

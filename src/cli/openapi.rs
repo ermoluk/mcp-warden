@@ -197,6 +197,7 @@ fn build_preset(api: OpenAPI, opts: FromOpenapiOptions<'_>) -> Result<Bootstrapp
         sftp_allowed_paths: vec![],
         database: None,
         queries: vec![],
+        expires_at: None,
     };
     Ok(Bootstrapped {
         spec_title: api.info.title,

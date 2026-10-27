@@ -25,6 +25,10 @@ pub const MAX_REFUSED_TEXT: usize = 1024;
 /// without sleeping.
 pub trait Clock: Send + Sync {
     fn now(&self) -> Instant;
+    /// Wall-clock time, for preset access windows (`preset grant`).
+    fn now_utc(&self) -> chrono::DateTime<chrono::Utc> {
+        chrono::Utc::now()
+    }
 }
 
 pub struct SystemClock;
@@ -336,6 +340,7 @@ mod tests {
             sftp_allowed_paths: vec![],
             database: None,
             queries: vec![],
+            expires_at: None,
         }
     }
 

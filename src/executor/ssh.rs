@@ -204,6 +204,7 @@ mod tests {
             known_hosts: None,
             database: None,
             queries: vec![],
+            expires_at: None,
         }
     }
 

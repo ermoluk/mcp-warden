@@ -181,6 +181,7 @@ mod tests {
                 param_types: types,
                 readonly: true,
             }],
+            expires_at: None,
         }
     }
 

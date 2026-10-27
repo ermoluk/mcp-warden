@@ -33,6 +33,9 @@ pub struct PresetSummary {
     pub kind: String,
     /// "auto", "prompt", or "deny".
     pub approval: String,
+    /// When access through this preset ends (RFC 3339). Absent: no limit.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, rmcp::schemars::JsonSchema)]
@@ -99,8 +102,11 @@ impl WardenServer {
             .presets
             .list()
             .map_err(|e| McpError::internal_error(e.to_string(), None))?;
+        // Presets whose access window has ended are not offered at all.
+        let now = self.executor.clock.now_utc();
         let summaries = presets
             .into_iter()
+            .filter(|p| p.expires_at.is_none_or(|at| at > now))
             .map(|p| PresetSummary {
                 name: p.name,
                 description: p.description,
@@ -116,6 +122,9 @@ impl WardenServer {
                     ApprovalPolicy::Prompt => "prompt".into(),
                     ApprovalPolicy::Deny => "deny".into(),
                 },
+                expires_at: p
+                    .expires_at
+                    .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
             })
             .collect();
         Ok(Json(ListPresetsResponse { presets: summaries }))
@@ -200,6 +209,7 @@ impl WardenServer {
             sftp_allowed_paths: vec![],
             database: None,
             queries: vec![],
+            expires_at: None,
         };
         let summary = format!("Reveal secret '{}' to agent", args.name);
         self.executor
@@ -320,18 +330,27 @@ impl WardenServer {
 }
 
 impl WardenServer {
-    /// Look up the preset the agent named. An unknown name is refused and
+    /// Look up the preset the agent named. An unknown name, or a preset
+    /// whose access window (`preset grant`) has ended, is refused and
     /// audited like any other refusal, so the log shows what the agent
-    /// tried even when it named no real preset.
+    /// tried even when it named no usable preset.
     fn find_preset(&self, name: &str, action: &str, summary: &str) -> Result<Preset, McpError> {
-        self.presets
+        let preset = self
+            .presets
             .find(name)
             .map_err(|e| McpError::internal_error(e.to_string(), None))?
             .ok_or_else(|| {
                 let err = mcp_warden_core::error::WardenError::PresetNotFound(name.into());
                 self.executor.record_refused(name, action, summary, &err);
                 McpError::invalid_params(format!("preset '{name}' not found"), None)
-            })
+            })?;
+        crate::executor::policy::check_expiry(&preset, self.executor.clock.now_utc()).map_err(
+            |err| {
+                self.executor.record_refused(name, action, summary, &err);
+                McpError::invalid_params(err.to_string(), None)
+            },
+        )?;
+        Ok(preset)
     }
 }
 
@@ -527,6 +546,60 @@ mod tests {
         assert_eq!(e.preset, "deploy");
         assert_eq!(e.action, "sftp_transfer");
         assert_eq!(e.summary, "sftp steal /etc/shadow ↔ /tmp/shadow");
+        assert_eq!(e.decision, Some(AuditDecision::Refused));
+    }
+
+    #[tokio::test]
+    async fn expired_presets_are_hidden_and_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let audit = Arc::new(LocalSqlite::open(&dir.path().join("audit.db")).unwrap());
+        let executor = Arc::new(ActionExecutor::new(
+            Arc::new(mcp_warden_core::keychain::memory::InMemoryKeychain::new()),
+            Arc::new(crate::approval::always_deny::AlwaysDeny),
+            None,
+            audit.clone(),
+        ));
+        let preset = |name: &str, expires: chrono::DateTime<chrono::Utc>| {
+            let mut p: Preset = toml::from_str(&format!(
+                r#"
+                name = "{name}"
+                type = "http"
+                description = "x"
+                base_url = "https://api.example.com"
+                allowed_methods = ["GET"]
+                approval = "prompt"
+                "#
+            ))
+            .unwrap();
+            p.expires_at = Some(expires);
+            p
+        };
+        let now = chrono::Utc::now();
+        let presets = mcp_warden_core::presets::frozen::FrozenSource::new(vec![
+            preset("old", now - chrono::Duration::minutes(1)),
+            preset("live", now + chrono::Duration::hours(1)),
+        ]);
+        let server = WardenServer::new(Arc::new(presets), executor);
+
+        let listed = server.list_presets().await.unwrap().0.presets;
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].name, "live");
+        assert!(listed[0].expires_at.is_some());
+
+        let err = server
+            .proxy_http(Parameters(ProxyHttpArgs {
+                preset_name: "old".into(),
+                path: "/x".into(),
+                method: "GET".into(),
+                body: None,
+                query: None,
+            }))
+            .await
+            .err()
+            .expect("expired preset must be refused");
+        assert!(err.message.contains("expired"), "{}", err.message);
+        let e = &audit.recent(1).unwrap()[0];
+        assert_eq!(e.preset, "old");
         assert_eq!(e.decision, Some(AuditDecision::Refused));
     }
 

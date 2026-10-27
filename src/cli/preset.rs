@@ -18,6 +18,12 @@ pub enum PresetCmd {
     /// given a request — say whether that call would be allowed and why,
     /// without sending it (`preset test gh GET /user`, `--command`, …).
     Test(TestArgs),
+    /// Give time-limited access to a preset: calls are refused once the
+    /// window ends. Takes effect when the MCP server next starts.
+    Grant(GrantArgs),
+    /// End access to a preset now. Takes effect when the MCP server next
+    /// starts; `mcp-warden lock` stops running servers immediately.
+    Revoke { name: String },
     /// Generate a preset from a built-in template for common APIs
     /// (github-read, notion-read, openai-chat, …). Use `--list` to see
     /// available templates.
@@ -155,6 +161,8 @@ pub async fn run(cmd: PresetCmd, config_path: &Path, kc: &dyn KeychainStore) -> 
         PresetCmd::AddQuery(args) => add_query(args, config_path, kc),
         PresetCmd::List => list(config_path),
         PresetCmd::Test(args) => test_preset(args, config_path, kc),
+        PresetCmd::Grant(args) => grant(args, config_path),
+        PresetCmd::Revoke { name } => revoke(&name, config_path),
         PresetCmd::Scaffold(args) => scaffold(args, config_path),
         PresetCmd::FromOpenapi(args) => from_openapi(args, config_path).await,
     }
@@ -381,6 +389,7 @@ fn add(args: AddArgs, config_path: &Path, kc: &dyn KeychainStore) -> Result<()> 
         sftp_allowed_paths: args.sftp_allowed_paths,
         database: args.database,
         queries: vec![],
+        expires_at: None,
     };
     if let Some(w) = unrestricted_paths_warning(&preset) {
         eprintln!("warning: {w}");
@@ -501,6 +510,116 @@ fn add_query(args: AddQueryArgs, config_path: &Path, kc: &dyn KeychainStore) -> 
 }
 
 #[derive(Debug, Args)]
+pub struct GrantArgs {
+    /// Preset to grant access to.
+    pub name: String,
+    /// How long access lasts: `90s`, `30m`, `1h`, `2h30m`, `7d` (at most 30d).
+    #[arg(
+        long = "for",
+        value_name = "DURATION",
+        required_unless_present = "permanent",
+        conflicts_with = "permanent"
+    )]
+    pub duration: Option<String>,
+    /// Remove the time limit instead.
+    #[arg(long)]
+    pub permanent: bool,
+}
+
+/// Longest access window `preset grant` hands out.
+const MAX_GRANT_SECONDS: i64 = 30 * 86_400;
+
+/// Parse a duration like `90s`, `30m`, `1h`, `2h30m` or `7d`.
+fn parse_duration(s: &str) -> Result<chrono::Duration> {
+    let bad = || {
+        WardenError::Validation(format!(
+            "duration '{s}': expected e.g. 90s, 30m, 1h, 2h30m or 7d"
+        ))
+    };
+    let mut total: i64 = 0;
+    let mut digits = String::new();
+    for c in s.trim().chars() {
+        if c.is_ascii_digit() {
+            digits.push(c);
+            continue;
+        }
+        let unit = match c {
+            's' => 1,
+            'm' => 60,
+            'h' => 3_600,
+            'd' => 86_400,
+            _ => return Err(bad()),
+        };
+        let n: i64 = digits.parse().map_err(|_| bad())?;
+        digits.clear();
+        total = n
+            .checked_mul(unit)
+            .and_then(|secs| total.checked_add(secs))
+            .ok_or_else(bad)?;
+    }
+    if !digits.is_empty() || total == 0 {
+        return Err(bad());
+    }
+    if total > MAX_GRANT_SECONDS {
+        return Err(WardenError::Validation(format!(
+            "duration '{s}' is longer than the 30d maximum"
+        )));
+    }
+    Ok(chrono::Duration::seconds(total))
+}
+
+/// Read-modify-write a preset's `expires_at`, like `mcp-warden approval`.
+fn set_expiry(
+    config_path: &Path,
+    name: &str,
+    expires_at: Option<chrono::DateTime<chrono::Utc>>,
+) -> Result<()> {
+    let raw = fs::read_to_string(config_path).map_err(WardenError::Io)?;
+    let mut cfg: Config = toml::from_str(&raw).map_err(|e| WardenError::Config(e.to_string()))?;
+    let p = cfg
+        .preset
+        .iter_mut()
+        .find(|p| p.name == name)
+        .ok_or_else(|| WardenError::PresetNotFound(name.into()))?;
+    p.expires_at = expires_at;
+    let toml_str = toml::to_string_pretty(&cfg).map_err(|e| WardenError::Config(e.to_string()))?;
+    fs::write(config_path, toml_str).map_err(WardenError::Io)
+}
+
+fn now_secs() -> chrono::DateTime<chrono::Utc> {
+    use chrono::SubsecRound;
+    chrono::Utc::now().trunc_subsecs(0)
+}
+
+fn grant(args: GrantArgs, config_path: &Path) -> Result<()> {
+    let Some(duration) = args.duration.as_deref() else {
+        set_expiry(config_path, &args.name, None)?;
+        eprintln!(
+            "Access to '{}' no longer has a time limit. Restart the MCP server for it to take effect.",
+            args.name
+        );
+        return Ok(());
+    };
+    let until = now_secs() + parse_duration(duration)?;
+    set_expiry(config_path, &args.name, Some(until))?;
+    eprintln!(
+        "Access to '{}' now ends at {}. Restart the MCP server for it to take effect.",
+        args.name,
+        until.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)
+    );
+    Ok(())
+}
+
+fn revoke(name: &str, config_path: &Path) -> Result<()> {
+    set_expiry(config_path, name, Some(now_secs()))?;
+    eprintln!(
+        "Access to '{name}' has ended. Running MCP servers keep it until they restart; \
+         `mcp-warden lock` stops them now."
+    );
+    Ok(())
+}
+
+#[derive(Debug, Args)]
 pub struct TestArgs {
     /// Preset to test.
     pub name: String,
@@ -566,7 +685,7 @@ fn test_preset(args: TestArgs, config_path: &Path, kc: &dyn KeychainStore) -> Re
     let p = cfg
         .find(&args.name)
         .ok_or_else(|| WardenError::PresetNotFound(args.name.clone()))?;
-    let verdict = simulate(p, &request);
+    let verdict = simulate(p, &request, chrono::Utc::now());
     let allowed = matches!(verdict, Verdict::Allowed { .. });
     if args.format == "json" {
         println!("{}", verdict_json(p, &request, &verdict));
@@ -658,6 +777,33 @@ base_url = "https://api.github.com"
 auth = { type = "bearer", secret = "gh_pat" }
 allowed_methods = ["GET"]
 "#;
+
+    #[test]
+    fn parse_duration_accepts_units_and_combinations() {
+        let secs = |s: &str| parse_duration(s).unwrap().num_seconds();
+        assert_eq!(secs("90s"), 90);
+        assert_eq!(secs("30m"), 1_800);
+        assert_eq!(secs("1h"), 3_600);
+        assert_eq!(secs("2h30m"), 9_000);
+        assert_eq!(secs("7d"), 604_800);
+        assert_eq!(secs("30d"), 2_592_000);
+    }
+
+    #[test]
+    fn parse_duration_rejects_bad_input() {
+        for s in [
+            "",
+            "1",
+            "h",
+            "1x",
+            "0m",
+            "1h-5m",
+            "31d",
+            "99999999999999999d",
+        ] {
+            assert!(parse_duration(s).is_err(), "{s:?}");
+        }
+    }
 
     #[test]
     fn open_paths_warning_names_preset_and_base_url() {
