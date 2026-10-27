@@ -122,16 +122,20 @@ impl ActionExecutor {
 
         let decision = if force_prompt {
             self.prompt(preset, action, summary, /* offer_window = */ false)
-                .await?
+                .await
         } else {
             match preset.approval {
-                ApprovalPolicy::Auto => ApprovalDecision::Approved,
-                ApprovalPolicy::Deny => ApprovalDecision::Denied,
+                ApprovalPolicy::Auto => Ok(ApprovalDecision::Approved),
+                ApprovalPolicy::Deny => Ok(ApprovalDecision::Denied),
                 ApprovalPolicy::Prompt => {
                     let offer_window = preset.approval_window_seconds.is_some_and(|n| n > 0);
-                    self.prompt(preset, action, summary, offer_window).await?
+                    self.prompt(preset, action, summary, offer_window).await
                 }
             }
+        };
+        let decision = match decision {
+            Ok(d) => d,
+            Err(e) => return Err(self.prompt_failed(event_id, e)?),
         };
 
         // If the user approved for the window, register it BEFORE recording
@@ -181,6 +185,25 @@ impl ActionExecutor {
                 Err(WardenError::ApprovalTimeout)
             }
         }
+    }
+
+    /// Record a prompt the transport could not show and build the error the
+    /// agent gets. Nobody approved, so the call is refused: errors fail closed
+    /// and never become approvals. The transport error holds no secret —
+    /// credentials are only read after authorisation (invariant 1).
+    fn prompt_failed(&self, event_id: i64, err: WardenError) -> Result<WardenError> {
+        let message = clip(&err.to_string(), MAX_REFUSED_TEXT);
+        self.audit
+            .record_decision(event_id, AuditDecision::Failed)?;
+        self.audit.record_outcome(
+            event_id,
+            AuditOutcome::Err {
+                message: message.clone(),
+            },
+        )?;
+        Ok(WardenError::Executor(format!(
+            "approval prompt could not be shown ({message}); the action did not run"
+        )))
     }
 
     /// Record a request refused before `authorise` — it failed validation,
@@ -800,5 +823,89 @@ mod tests {
             2,
             "no window must be cached when the preset disables windowing"
         );
+    }
+
+    /// A transport that cannot show its prompt at all (no display, no tty, …).
+    struct FailingApproval;
+
+    #[async_trait]
+    impl ApprovalTransport for FailingApproval {
+        async fn request(
+            &self,
+            _r: ApprovalRequest,
+        ) -> mcp_warden_core::error::Result<ApprovalDecision> {
+            Err(WardenError::Io(std::io::Error::other(
+                "Device not configured",
+            )))
+        }
+    }
+
+    /// The newest audit event must be a `failed` record whose outcome names
+    /// the transport error, and the agent must get an error that says the
+    /// action did not run.
+    fn assert_failed(exec: &ActionExecutor, err: &WardenError) {
+        let msg = err.to_string();
+        assert!(matches!(err, WardenError::Executor(_)), "{err:?}");
+        assert!(msg.contains("approval prompt could not be shown"), "{msg}");
+        assert!(msg.contains("Device not configured"), "{msg}");
+        let recent = exec.audit.recent(10).unwrap();
+        assert_eq!(recent.len(), 1);
+        assert_eq!(recent[0].decision, Some(AuditDecision::Failed));
+        match &recent[0].outcome {
+            Some(AuditOutcome::Err { message }) => {
+                assert!(message.contains("Device not configured"), "{message}")
+            }
+            other => panic!("expected an Err outcome, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn transport_error_is_audited_as_failed() {
+        let (exec, _dir) = exec_with(Arc::new(FailingApproval), None);
+        let err = exec
+            .authorise(
+                &preset(ApprovalPolicy::Prompt),
+                "proxy_http",
+                "GET /users",
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert_failed(&exec, &err);
+    }
+
+    #[tokio::test]
+    async fn fallback_error_after_primary_timeout_is_audited_as_failed() {
+        let primary = Arc::new(CountingApproval {
+            decision: ApprovalDecision::Timeout,
+            calls: AtomicUsize::new(0),
+        });
+        let (exec, _dir) = exec_with(primary.clone(), Some(Arc::new(FailingApproval)));
+        let err = exec
+            .authorise(
+                &preset(ApprovalPolicy::Prompt),
+                "proxy_http",
+                "GET /users",
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert_eq!(primary.calls.load(Ordering::SeqCst), 1);
+        assert_failed(&exec, &err);
+    }
+
+    #[tokio::test]
+    async fn forced_prompt_transport_error_is_audited_as_failed() {
+        let (exec, _dir) = exec_with(Arc::new(FailingApproval), None);
+        let err = exec
+            .authorise(
+                &preset(ApprovalPolicy::Auto),
+                "get_secret_for_env",
+                "reveal k",
+                true,
+            )
+            .await
+            .unwrap_err();
+        assert_failed(&exec, &err);
     }
 }
