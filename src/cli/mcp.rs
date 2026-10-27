@@ -1,4 +1,7 @@
-use crate::approval::{desktop::DesktopApproval, telegram::TelegramApproval, tui::TuiApproval};
+use crate::approval::{
+    desktop::DesktopApproval, osascript::OsascriptApproval, telegram::TelegramApproval,
+    tui::TuiApproval,
+};
 use crate::executor::ActionExecutor;
 use crate::mcp::server::WardenServer;
 use mcp_warden_core::approval::ApprovalTransport;
@@ -75,7 +78,7 @@ fn build_approval(cfg: &Config, kc: &dyn KeychainStore) -> Result<ApprovalTransp
 
     if env_choice.as_deref() == Some("desktop") {
         return Ok((
-            Arc::new(DesktopApproval),
+            desktop_transport(),
             Some(Arc::new(TuiApproval::from_stderr())),
         ));
     }
@@ -115,7 +118,17 @@ fn build_approval(cfg: &Config, kc: &dyn KeychainStore) -> Result<ApprovalTransp
     }
 
     Ok((
-        Arc::new(DesktopApproval),
+        desktop_transport(),
         Some(Arc::new(TuiApproval::from_stderr())),
     ))
+}
+
+/// The native desktop prompt: a dialog on macOS, where notifications have no
+/// buttons, and a notification with Approve / Deny actions elsewhere.
+fn desktop_transport() -> Arc<dyn ApprovalTransport> {
+    if cfg!(target_os = "macos") {
+        Arc::new(OsascriptApproval::new())
+    } else {
+        Arc::new(DesktopApproval)
+    }
 }

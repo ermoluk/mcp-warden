@@ -37,12 +37,7 @@ impl ApprovalTransport for DesktopApproval {
             {
                 n.action("approve", "Approve once");
                 if let Some(secs) = window_seconds {
-                    let label = if secs >= 60 && secs % 60 == 0 {
-                        format!("Approve for {} min", secs / 60)
-                    } else {
-                        format!("Approve for {secs} s")
-                    };
-                    n.action("approve_window", &label);
+                    n.action("approve_window", &super::window_label(secs));
                 }
                 n.action("deny", "Deny");
                 let handle = n.show().map_err(|e| WardenError::Executor(e.to_string()))?;

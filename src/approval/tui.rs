@@ -122,11 +122,7 @@ fn run_dialog(
 
 /// Format an "Approve for Nm" / "Approve for Ns" string.
 fn format_window_label(seconds: u64) -> String {
-    if seconds >= 60 && seconds % 60 == 0 {
-        format!("[ W ] Approve for {} min", seconds / 60)
-    } else {
-        format!("[ W ] Approve for {seconds} s")
-    }
+    format!("[ W ] {}", super::window_label(seconds))
 }
 
 fn draw(
