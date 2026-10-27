@@ -71,10 +71,10 @@ pub fn validate_request(preset: &Preset, method: &str, path: &str) -> Result<()>
         if pat == &*decoded {
             return Ok(());
         }
-        if let Ok(rx) = mcp_warden_core::config::anchored_regex(pat) {
-            if rx.is_match(&decoded) {
-                return Ok(());
-            }
+        if let Ok(rx) = mcp_warden_core::config::anchored_regex(pat)
+            && rx.is_match(&decoded)
+        {
+            return Ok(());
         }
     }
     Err(WardenError::Validation(format!(

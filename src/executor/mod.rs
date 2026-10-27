@@ -152,10 +152,11 @@ impl ActionExecutor {
         // If the user approved for the window, register it BEFORE recording
         // audit so a race that observed audit decided=approved can already
         // see the window. force_prompt callers never register a window.
-        if !force_prompt && matches!(decision, ApprovalDecision::ApprovedForWindow) {
-            if let Some(cap) = preset.approval_window_seconds.filter(|n| *n > 0) {
-                self.register_window(&preset.name, action, cap).await;
-            }
+        if !force_prompt
+            && matches!(decision, ApprovalDecision::ApprovedForWindow)
+            && let Some(cap) = preset.approval_window_seconds.filter(|n| *n > 0)
+        {
+            self.register_window(&preset.name, action, cap).await;
         }
 
         let audit_label = if !force_prompt && preset.approval == ApprovalPolicy::Auto {

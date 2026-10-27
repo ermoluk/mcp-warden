@@ -89,26 +89,26 @@ fn run_dialog(
                 .map_err(WardenError::Io)?;
 
             // Poll briefly so the countdown refreshes.
-            if event::poll(Duration::from_millis(200)).map_err(WardenError::Io)? {
-                if let Event::Key(key) = event::read().map_err(WardenError::Io)? {
-                    if key.kind != KeyEventKind::Press {
-                        continue;
+            if event::poll(Duration::from_millis(200)).map_err(WardenError::Io)?
+                && let Event::Key(key) = event::read().map_err(WardenError::Io)?
+            {
+                if key.kind != KeyEventKind::Press {
+                    continue;
+                }
+                match key.code {
+                    KeyCode::Char('a' | 'A' | 'y' | 'Y') | KeyCode::Enter => {
+                        decision = Some(ApprovalDecision::Approved);
+                        break;
                     }
-                    match key.code {
-                        KeyCode::Char('a' | 'A' | 'y' | 'Y') | KeyCode::Enter => {
-                            decision = Some(ApprovalDecision::Approved);
-                            break;
-                        }
-                        KeyCode::Char('w' | 'W') if window_seconds.is_some() => {
-                            decision = Some(ApprovalDecision::ApprovedForWindow);
-                            break;
-                        }
-                        KeyCode::Char('d' | 'D' | 'n' | 'N') | KeyCode::Esc => {
-                            decision = Some(ApprovalDecision::Denied);
-                            break;
-                        }
-                        _ => {}
+                    KeyCode::Char('w' | 'W') if window_seconds.is_some() => {
+                        decision = Some(ApprovalDecision::ApprovedForWindow);
+                        break;
                     }
+                    KeyCode::Char('d' | 'D' | 'n' | 'N') | KeyCode::Esc => {
+                        decision = Some(ApprovalDecision::Denied);
+                        break;
+                    }
+                    _ => {}
                 }
             }
         }

@@ -13,7 +13,7 @@ pub mod tui;
 /// Button text for the approve-for-window choice: whole minutes when the
 /// window is a multiple of 60 s, seconds otherwise.
 pub fn window_label(seconds: u64) -> String {
-    if seconds >= 60 && seconds % 60 == 0 {
+    if seconds >= 60 && seconds.is_multiple_of(60) {
         format!("Approve for {} min", seconds / 60)
     } else {
         format!("Approve for {seconds} s")
