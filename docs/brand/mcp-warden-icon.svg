@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="512" height="512">
+  <!-- mcp-warden mark: a brass key tag with a keyhole cut through it -->
+  <defs>
+    <mask id="cut">
+      <rect width="64" height="64" fill="#fff"/>
+      <circle cx="19" cy="32" r="3.6" fill="#000"/>
+      <circle cx="38" cy="27" r="6" fill="#000"/>
+      <path d="M35 30 H41 L43 44 H33 Z" fill="#000"/>
+    </mask>
+  </defs>
+  <path d="M10 22 L22 10 H54 V54 H22 L10 42 Z" fill="#d4a548" mask="url(#cut)"/>
+</svg>
