@@ -41,17 +41,20 @@ pub fn run(
     launch(cmd, &server.command)
 }
 
-/// Read every secret the server needs. A missing one fails loudly before
-/// anything starts, naming the variable and the keychain entry only.
+/// Read every secret the server needs from its own keychain entries
+/// (`server/<name>/<VAR>`), never from entries the config names, so editing
+/// the config cannot hand a preset's secret to a command. A missing one
+/// fails loudly before anything starts, naming the entry only.
 fn resolve_env(server: &WrappedServer, kc: &dyn KeychainStore) -> Result<Vec<(String, Secret)>> {
     server
         .env
         .iter()
-        .map(|(var, secret)| {
-            let value = kc.get(secret)?.ok_or_else(|| {
+        .map(|var| {
+            let entry = server.secret_name(var);
+            let value = kc.get(&entry)?.ok_or_else(|| {
                 WardenError::Validation(format!(
-                    "server '{}': keychain has no '{secret}' for {var}; add it with \
-                     `mcp-warden secret add {secret}`",
+                    "server '{}': keychain has no '{entry}'; set it with \
+                     `mcp-warden secret add {entry}`",
                     server.name
                 ))
             })?;
@@ -100,34 +103,47 @@ mod tests {
             name = "github"
             command = "npx"
             args = ["-y", "@modelcontextprotocol/server-github"]
-            env = { GITHUB_PERSONAL_ACCESS_TOKEN = "github_pat", OTHER = "other" }
+            env = ["GITHUB_PERSONAL_ACCESS_TOKEN", "OTHER"]
             "#,
         )
         .unwrap()
     }
 
     #[test]
-    fn resolve_env_maps_variables_to_keychain_values() {
+    fn resolve_env_reads_only_the_servers_own_entries() {
         let kc = InMemoryKeychain::new();
-        kc.set("github_pat", Secret::new("ghp_test".into()))
+        kc.set(
+            "server/github/GITHUB_PERSONAL_ACCESS_TOKEN",
+            Secret::new("server value".into()),
+        )
+        .unwrap();
+        kc.set("server/github/OTHER", Secret::new("x".into()))
             .unwrap();
-        kc.set("other", Secret::new("x".into())).unwrap();
+        // A preset's secret under another name is never used.
+        kc.set("github_pat", Secret::new("preset value".into()))
+            .unwrap();
         let env = resolve_env(&server(), &kc).unwrap();
         let got: Vec<(&str, &str)> = env.iter().map(|(k, v)| (k.as_str(), v.expose())).collect();
         assert_eq!(
             got,
-            [("GITHUB_PERSONAL_ACCESS_TOKEN", "ghp_test"), ("OTHER", "x")]
+            [
+                ("GITHUB_PERSONAL_ACCESS_TOKEN", "server value"),
+                ("OTHER", "x")
+            ]
         );
     }
 
     #[test]
     fn missing_secret_names_the_entry_not_a_value() {
         let kc = InMemoryKeychain::new();
-        kc.set("github_pat", Secret::new("ghp_test".into()))
-            .unwrap();
+        kc.set(
+            "server/github/GITHUB_PERSONAL_ACCESS_TOKEN",
+            Secret::new("server value".into()),
+        )
+        .unwrap();
         let err = resolve_env(&server(), &kc).unwrap_err().to_string();
-        assert!(err.contains("'other'") && err.contains("OTHER"), "{err}");
-        assert!(!err.contains("ghp_test"));
+        assert!(err.contains("'server/github/OTHER'"), "{err}");
+        assert!(!err.contains("server value"));
     }
 
     #[test]

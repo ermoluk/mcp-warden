@@ -486,24 +486,19 @@ fn server_add_list_remove() {
     let dir = tmp.path();
     cmd()
         .env("MCP_WARDEN_CONFIG_DIR", dir)
-        .args([
-            "server",
-            "add",
-            "github",
-            "--env",
-            "GITHUB_TOKEN=github_pat",
-            "--",
-        ])
+        .args(["server", "add", "github", "--env", "GITHUB_TOKEN", "--"])
         .args(["npx", "-y", "@modelcontextprotocol/server-github"])
+        .write_stdin("test-value\n")
         .assert()
         .success()
         .stderr(predicate::str::contains("\"args\": [\"run\", \"github\"]"))
-        .stderr(predicate::str::contains("secret add github_pat"));
+        .stderr(predicate::str::contains("test-value").not());
     let cfg = fs::read_to_string(dir.join("config.toml")).unwrap();
     assert!(
-        cfg.contains("[[server]]") && cfg.contains("GITHUB_TOKEN = \"github_pat\""),
+        cfg.contains("[[server]]") && cfg.contains("env = [\"GITHUB_TOKEN\"]"),
         "{cfg}"
     );
+    assert!(!cfg.contains("test-value"));
 
     cmd()
         .env("MCP_WARDEN_CONFIG_DIR", dir)
@@ -515,7 +510,7 @@ fn server_add_list_remove() {
         .args(["server", "list"])
         .assert()
         .success()
-        .stdout(predicate::str::contains("GITHUB_TOKEN←github_pat"));
+        .stdout(predicate::str::contains("[GITHUB_TOKEN]"));
     cmd()
         .env("MCP_WARDEN_CONFIG_DIR", dir)
         .args(["server", "remove", "github"])
@@ -526,6 +521,31 @@ fn server_add_list_remove() {
             .unwrap()
             .contains("[[server]]")
     );
+}
+
+/// The value of a server key never goes on the command line, and the
+/// config can't point a server at another keychain entry.
+#[test]
+fn server_add_refuses_values_and_foreign_entries() {
+    let tmp = tempfile::tempdir().unwrap();
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["server", "add", "evil", "--env", "X=github_pat", "--", "sh"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("pass only the variable name"));
+    // The old `VAR = "entry"` mapping is not a valid config any more.
+    fs::write(
+        tmp.path().join("config.toml"),
+        "[[server]]\nname = \"evil\"\ncommand = \"sh\"\nenv = { X = \"github_pat\" }\n",
+    )
+    .unwrap();
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["run", "evil"])
+        .assert()
+        .failure()
+        .stdout("");
 }
 
 #[cfg(unix)]
@@ -551,7 +571,7 @@ fn run_refuses_missing_secret_unknown_server_and_lock_without_stdout() {
     let tmp = tempfile::tempdir().unwrap();
     fs::write(
         tmp.path().join("config.toml"),
-        "[[server]]\nname = \"gh\"\ncommand = \"/bin/sh\"\nenv = { TOKEN = \"gh_pat\" }\n",
+        "[[server]]\nname = \"gh\"\ncommand = \"/bin/sh\"\nenv = [\"TOKEN\"]\n",
     )
     .unwrap();
     let run = |name: &str| {
@@ -563,7 +583,7 @@ fn run_refuses_missing_secret_unknown_server_and_lock_without_stdout() {
             .stdout("")
     };
     run("gh").stderr(predicate::str::contains(
-        "keychain has no 'gh_pat' for TOKEN",
+        "keychain has no 'server/gh/TOKEN'",
     ));
     run("nope").stderr(predicate::str::contains("no [[server]] named 'nope'"));
     cmd()

@@ -28,18 +28,28 @@ pub struct Config {
     pub server: Vec<WrappedServer>,
 }
 
-/// An MCP server `mcp-warden run <name>` launches. The command is fixed here
-/// so nobody — the agent included — can have a secret injected into a
-/// command of their choosing.
+/// An MCP server `mcp-warden run <name>` launches.
+///
+/// Its keys live in keychain entries of their own, `server/<name>/<VAR>`
+/// (see `secret_name`): the config only lists variable names, so no edit to
+/// it can point a server — or a command of someone's choosing — at a
+/// preset's secret.
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct WrappedServer {
     pub name: String,
     pub command: String,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub args: Vec<String>,
-    /// Environment variable → name of the keychain entry that holds its value.
-    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
-    pub env: std::collections::BTreeMap<String, String>,
+    /// Environment variables `run` sets from this server's keychain entries.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub env: Vec<String>,
+}
+
+impl WrappedServer {
+    /// The keychain entry that holds `var` for this server.
+    pub fn secret_name(&self, var: &str) -> String {
+        format!("server/{}/{var}", self.name)
+    }
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -369,10 +379,20 @@ impl Config {
     pub fn validate_servers(&self) -> Result<()> {
         let mut seen = std::collections::HashSet::new();
         for s in &self.server {
-            if s.name.is_empty() || s.command.is_empty() {
+            if s.command.is_empty() {
                 return Err(WardenError::Validation(
                     "every [[server]] needs a name and a command".into(),
                 ));
+            }
+            let name_ok = !s.name.is_empty()
+                && s.name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.'));
+            if !name_ok {
+                return Err(WardenError::Validation(format!(
+                    "server name '{}': use letters, digits, '_', '-' or '.'",
+                    s.name
+                )));
             }
             if !seen.insert(s.name.as_str()) {
                 return Err(WardenError::Validation(format!(
@@ -380,7 +400,14 @@ impl Config {
                     s.name
                 )));
             }
-            for (var, secret) in &s.env {
+            let mut vars = std::collections::HashSet::new();
+            for var in &s.env {
+                if !vars.insert(var.as_str()) {
+                    return Err(WardenError::Validation(format!(
+                        "server '{}' lists {var} twice",
+                        s.name
+                    )));
+                }
                 let mut chars = var.chars();
                 let valid = chars
                     .next()
@@ -389,12 +416,6 @@ impl Config {
                 if !valid {
                     return Err(WardenError::Validation(format!(
                         "server '{}': '{var}' is not a valid environment variable name",
-                        s.name
-                    )));
-                }
-                if secret.is_empty() {
-                    return Err(WardenError::Validation(format!(
-                        "server '{}': {var} names no keychain entry",
                         s.name
                     )));
                 }
@@ -430,14 +451,17 @@ mod tests {
             name = "github"
             command = "npx"
             args = ["-y", "@modelcontextprotocol/server-github"]
-            env = { GITHUB_PERSONAL_ACCESS_TOKEN = "github_pat" }
+            env = ["GITHUB_PERSONAL_ACCESS_TOKEN"]
             "#,
         )
         .unwrap();
         cfg.validate_servers().unwrap();
         let s = cfg.find_server("github").unwrap();
         assert_eq!(s.args.len(), 2);
-        assert_eq!(s.env["GITHUB_PERSONAL_ACCESS_TOKEN"], "github_pat");
+        assert_eq!(
+            s.secret_name("GITHUB_PERSONAL_ACCESS_TOKEN"),
+            "server/github/GITHUB_PERSONAL_ACCESS_TOKEN"
+        );
     }
 
     #[test]
@@ -453,11 +477,16 @@ mod tests {
         assert!(servers(dup).is_err());
         assert!(servers("[[server]]\nname = \"a\"\ncommand = \"\"").is_err());
         for var in ["1ABC", "A-B", "A B", ""] {
-            let t =
-                format!("[[server]]\nname = \"a\"\ncommand = \"x\"\nenv = {{ \"{var}\" = \"s\" }}");
+            let t = format!("[[server]]\nname = \"a\"\ncommand = \"x\"\nenv = [\"{var}\"]");
             assert!(servers(&t).is_err(), "{var:?}");
         }
-        assert!(servers("[[server]]\nname = \"a\"\ncommand = \"x\"\nenv = { A = \"\" }").is_err());
+        assert!(
+            servers("[[server]]\nname = \"a\"\ncommand = \"x\"\nenv = [\"A\", \"A\"]").is_err()
+        );
+        for name in ["", "a/b", "../x", "a b"] {
+            let t = format!("[[server]]\nname = \"{name}\"\ncommand = \"x\"");
+            assert!(servers(&t).is_err(), "{name:?}");
+        }
     }
 
     use super::*;

@@ -24,9 +24,17 @@ pub fn run(cmd: SecretCmd, store: &dyn KeychainStore) -> Result<()> {
 }
 
 fn add(name: String, store: &dyn KeychainStore) -> Result<()> {
+    store.set(&name, read_value(&name)?)?;
+    eprintln!("Stored '{}'.", name);
+    Ok(())
+}
+
+/// Read one secret value from stdin — prompting on a terminal — so it never
+/// appears in shell history or the process list.
+pub(crate) fn read_value(label: &str) -> Result<Secret> {
     let stdin = std::io::stdin();
     if stdin.is_terminal() {
-        eprint!("Value for '{}': ", name);
+        eprint!("Value for '{}': ", label);
         std::io::stderr().flush().ok();
     }
     let mut buf = String::new();
@@ -35,9 +43,7 @@ fn add(name: String, store: &dyn KeychainStore) -> Result<()> {
     if value.is_empty() {
         return Err(WardenError::Validation("empty secret".into()));
     }
-    store.set(&name, Secret::new(value))?;
-    eprintln!("Stored '{}'.", name);
-    Ok(())
+    Ok(Secret::new(value))
 }
 
 fn list(store: &dyn KeychainStore) -> Result<()> {

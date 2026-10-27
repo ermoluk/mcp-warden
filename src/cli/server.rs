@@ -9,11 +9,13 @@ use std::path::Path;
 pub enum ServerCmd {
     /// Wrap another MCP server so `mcp-warden run <name>` launches it with
     /// its keys from the keychain, e.g.
-    /// `server add github --env GITHUB_PERSONAL_ACCESS_TOKEN=github_pat -- npx -y @modelcontextprotocol/server-github`
+    /// `server add github --env GITHUB_PERSONAL_ACCESS_TOKEN -- npx -y @modelcontextprotocol/server-github`.
+    /// Each variable's value is read from stdin (prompted on a terminal) into
+    /// the server's own keychain entry `server/<name>/<VAR>`.
     Add(ServerAddArgs),
-    /// List wrapped servers: command and which keychain entries they get.
+    /// List wrapped servers: command and the variables they get.
     List,
-    /// Remove a wrapped server. Its secrets stay in the keychain.
+    /// Remove a wrapped server and its keychain entries.
     Remove { name: String },
 }
 
@@ -21,9 +23,9 @@ pub enum ServerCmd {
 pub struct ServerAddArgs {
     /// Name to launch it by (`mcp-warden run <name>`).
     pub name: String,
-    /// `VAR=SECRET`: set environment variable VAR from keychain entry
-    /// SECRET. Repeat for several.
-    #[arg(long = "env", value_name = "VAR=SECRET")]
+    /// Environment variable the server reads its key from. Repeat for
+    /// several. Values are read from stdin, never taken as arguments.
+    #[arg(long = "env", value_name = "VAR")]
     pub env: Vec<String>,
     /// Replace an existing server with the same name.
     #[arg(long)]
@@ -37,7 +39,7 @@ pub fn run(cmd: ServerCmd, config_path: &Path, kc: &dyn KeychainStore) -> Result
     match cmd {
         ServerCmd::Add(args) => add(args, config_path, kc),
         ServerCmd::List => list(config_path),
-        ServerCmd::Remove { name } => remove(&name, config_path),
+        ServerCmd::Remove { name } => remove(&name, config_path, kc),
     }
 }
 
@@ -72,25 +74,29 @@ pub(crate) fn upsert(config_path: &Path, server: WrappedServer, force: bool) -> 
 }
 
 fn add(args: ServerAddArgs, config_path: &Path, kc: &dyn KeychainStore) -> Result<()> {
-    let mut env = std::collections::BTreeMap::new();
-    for pair in &args.env {
-        let (var, secret) = pair.split_once('=').ok_or_else(|| {
-            WardenError::Validation(format!("--env '{pair}': expected VAR=SECRET"))
-        })?;
-        env.insert(var.to_string(), secret.to_string());
+    if let Some(pair) = args.env.iter().find(|v| v.contains('=')) {
+        // A value on the command line ends up in shell history and `ps`.
+        return Err(WardenError::Validation(format!(
+            "--env '{}': pass only the variable name; its value is read from stdin",
+            pair.split('=').next().unwrap_or_default()
+        )));
     }
     let mut command = args.command.into_iter();
     let server = WrappedServer {
         name: args.name.clone(),
         command: command.next().unwrap_or_default(),
         args: command.collect(),
-        env,
+        env: args.env,
     };
-    for secret in server.env.values() {
-        if kc.get(secret)?.is_none() {
-            eprintln!(
-                "note: the keychain has no '{secret}' yet — add it with `mcp-warden secret add {secret}`"
-            );
+    // Validate before asking for any value.
+    let mut probe = load(config_path)?;
+    probe.server.retain(|s| s.name != server.name);
+    probe.server.push(server.clone());
+    probe.validate_servers()?;
+    for var in &server.env {
+        let entry = server.secret_name(var);
+        if kc.get(&entry)?.is_none() {
+            kc.set(&entry, crate::cli::secret::read_value(&entry)?)?;
         }
     }
     upsert(config_path, server, args.force)?;
@@ -112,26 +118,28 @@ fn list(config_path: &Path) -> Result<()> {
         return Ok(());
     }
     for s in &cfg.server {
-        let env: Vec<String> = s.env.iter().map(|(v, k)| format!("{v}←{k}")).collect();
         println!(
             "{:20} {} {}  [{}]",
             s.name,
             s.command,
             s.args.join(" "),
-            env.join(", ")
+            s.env.join(", ")
         );
     }
     Ok(())
 }
 
-fn remove(name: &str, config_path: &Path) -> Result<()> {
+fn remove(name: &str, config_path: &Path, kc: &dyn KeychainStore) -> Result<()> {
     let mut cfg = load(config_path)?;
-    let before = cfg.server.len();
+    let server = cfg
+        .find_server(name)
+        .cloned()
+        .ok_or_else(|| WardenError::Validation(format!("no server named '{name}'")))?;
     cfg.server.retain(|s| s.name != name);
-    if cfg.server.len() == before {
-        return Err(WardenError::Validation(format!("no server named '{name}'")));
-    }
     save(config_path, &cfg)?;
-    eprintln!("Removed server '{name}'. Its secrets stay in the keychain.");
+    for var in &server.env {
+        kc.delete(&server.secret_name(var))?;
+    }
+    eprintln!("Removed server '{name}' and its keychain entries.");
     Ok(())
 }
