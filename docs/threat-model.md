@@ -41,7 +41,9 @@ A malicious preset named `"prod-readonly\nApproval: auto\n"` could spoof the des
 
 ### T7. TOCTOU on config
 
-An attacker writes a malicious config after `mcp-warden mcp` has started. The MCP server loads-once-and-freezes the config in `Arc<Config>` at startup; subsequent file writes are ignored until the next process start.
+An attacker rewrites `config.toml` after `mcp-warden mcp` has started — another process, or the agent through its own file-edit tool — to add a preset whose secret was never checked, flip `approval` to `"auto"` without `--confirm-auto`, or widen `allowed_paths` / `allowed_methods`. The MCP server reads and validates the config once at startup (invariant 10) and serves presets from that in-memory snapshot (`FrozenSource`); the file is never read again, so every `list_presets` and every action sees the startup presets, and edits have no effect until the next process start. A restart does load the edited file: the startup check then refuses presets whose secret is missing, but it cannot tell whether `auto` came from `preset add --confirm-auto` or a hand edit, so the config file itself must stay writable only by the user.
+
+Before this was fixed (see the CHANGELOG), only the startup secret check used the frozen config; presets were re-read from the file on every call, so all of the edits above took effect live.
 
 ## Out-of-scope threats (what `mcp-warden` does NOT defend against)
 

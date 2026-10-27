@@ -125,6 +125,7 @@ See `docs/web-ui.md` for the web UI design notes.
 - Secrets in the OS keychain only — never on disk in plaintext, never in logs.
 - Allow-list validation runs **before** credential injection.
 - Default approval policy is `prompt`; `auto` requires `--confirm-auto` at preset creation.
+- The MCP server loads and validates `config.toml` once at startup and never re-reads it: restart the server after editing presets.
 - Audit log is append-only — the trait surface itself contains no `delete` / `clear` method.
 - Stdout is the MCP protocol channel; all logs go to stderr.
 

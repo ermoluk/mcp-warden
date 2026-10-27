@@ -4,6 +4,10 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### Security
+
+- **`mcp-warden mcp` re-read `config.toml` on every tool call.** Only the startup secret check used the config loaded at startup; `list_presets` and every action looked presets up in the file again. A preset added after startup was therefore served without that check, and an edit to `approval = "auto"` or a wider `allowed_paths` / `allowed_methods` took effect live — skipping `--confirm-auto`, and possible from any process, including the agent's own file-edit tool. The server now serves exactly the presets it validated at startup and never re-reads the file (invariant 10). **Behaviour change:** edits to `config.toml` take effect only after the MCP server restarts (in Claude Code: restart it, or reconnect the server from `/mcp`).
+
 ### Fixed
 
 - **`prompt` presets could not be approved on macOS.** macOS notifications have no buttons, so approval fell through to the TUI prompt — which cannot run when an MCP client launches the server. With no terminal (Claude Desktop) it failed with `io: Device not configured`, in a terminal (Claude Code CLI) with `io: Failed to initialize input reader`, both within a fraction of a second, so every `prompt` call was refused unless Telegram was configured. The call failed closed: nothing ran and no credential was read.
