@@ -144,6 +144,7 @@ See `docs/web-ui.md` for the web UI design notes.
 `mcp-warden`'s threat model and security invariants live in [`docs/threat-model.md`](docs/threat-model.md). At a glance:
 
 - Secrets in the OS keychain only — never on disk in plaintext, never in logs.
+- A credential the upstream echoes back in a `proxy_http` response (an echo endpoint, an error that quotes the token) is replaced with `[redacted by mcp-warden]` before the agent sees it. The rest of the response is untrusted upstream data and is passed through as is.
 - Allow-list validation runs **before** credential injection.
 - Default approval policy is `prompt`; `auto` requires `--confirm-auto` at preset creation.
 - The MCP server loads and validates `config.toml` once at startup and never re-reads it: restart the server after editing presets.

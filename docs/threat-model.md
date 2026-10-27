@@ -57,7 +57,11 @@ If the OS keychain has been read by malware running with the user's UID, `mcp-wa
 
 ### N3. Side-channels via `proxy_http` responses
 
-If a preset allows `GET /me`, the response body might contain the user's email or other PII. `mcp-warden` does not redact response bodies — that's the upstream service's contract.
+Response bodies are upstream data and stay untrusted: apart from the credential (below), they reach the agent as the service sent them, and text in them can still try to steer the agent. `mcp-warden` does not redact PII — if a preset allows `GET /me`, the body might contain the user's email; that's the upstream service's contract.
+
+The credential itself is the exception. An upstream that reflects the request — httpbin-style `/headers` or `/anything`, a debug or echo endpoint, an error payload such as `{"error": "invalid token …"}` — would hand the agent the secret it never saw, and a prompt injection could steer the agent to such an endpoint whenever `allowed_paths` permits one. So before the body is returned, every key, string and number in it is searched for each form the credential was sent in — the raw value, `<prefix><value>` for header auth, `base64(username:value)` (padded or not) for Basic auth, and any percent-encoding of these, `+` for a space included — and each occurrence is replaced with `[redacted by mcp-warden]` (invariants 1–2). One stderr warning names the preset and the number of replacements, never the value. A body without the credential is returned unchanged. Non-JSON bodies are returned as `null` and response headers not at all, so neither can carry it.
+
+Known limits: a credential that comes back truncated, split across fields, hashed, embedded in a larger encoded blob or otherwise transformed cannot be detected. Only `proxy_http` bodies are scrubbed — `ssh_exec` output and `db_query` rows come back as is, so a named query that reads the password back (Redis `CONFIG GET requirepass`) returns it. Keep echo endpoints out of `allowed_paths`.
 
 ### N4. Insider threat (the user themselves)
 

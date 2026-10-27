@@ -7,6 +7,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
+pub mod credential_echo;
 pub mod db;
 pub mod http;
 pub mod known_hosts;
