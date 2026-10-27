@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file. The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **`mcp-warden mcp` re-read `config.toml` on every tool call.** Only the startup secret check used the config loaded at startup; `list_presets` and every action looked presets up in the file again. A preset added after startup was therefore served without that check, and an edit to `approval = "auto"` or a wider `allowed_paths` / `allowed_methods` took effect live — skipping `--confirm-auto`, and possible from any process, including the agent's own file-edit tool. The server now serves exactly the presets it validated at startup and never re-reads the file (invariant 10). **Behaviour change:** edits to `config.toml` take effect only after the MCP server restarts (in Claude Code: restart it, or reconnect the server from `/mcp`).
+
 ## [0.4.3]
 
 ### Security

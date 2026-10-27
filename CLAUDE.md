@@ -76,7 +76,7 @@ Cloud Approval Relay, Compliance) attach as alternate implementations.
 | `KeychainStore`      | `SystemKeychain`      | HSM, 1Password Connect, Vault           |
 | `ApprovalTransport`  | `DesktopApproval` + `TuiApproval` | Telegram, mobile push, web UI |
 | `AuditSink`          | `LocalSqlite`         | Cloud audit log, SIEM forwarding        |
-| `PresetSource`       | `TomlSource`          | Org-managed central preset registry     |
+| `PresetSource`       | `TomlSource` + `FrozenSource` (MCP server) | Org-managed central preset registry |
 
 Do **not** delete or weaken these traits when you only have one impl. The
 abstraction is the product.
