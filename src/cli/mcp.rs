@@ -6,7 +6,7 @@ use mcp_warden_core::audit::{AuditSink, sqlite_sink::LocalSqlite};
 use mcp_warden_core::config::Config;
 use mcp_warden_core::error::{Result, WardenError};
 use mcp_warden_core::keychain::KeychainStore;
-use mcp_warden_core::presets::toml_source::TomlSource;
+use mcp_warden_core::presets::frozen::FrozenSource;
 use rmcp::{ServiceExt, transport::stdio};
 use std::path::Path;
 use std::sync::Arc;
@@ -31,8 +31,10 @@ pub async fn cmd(config_dir: &Path) -> Result<()> {
     // Spec §9.10 — refuse to start if any preset references a missing secret.
     let cfg = Config::load_and_validate(&config_path, keychain.as_ref())?;
 
+    // Serve exactly the presets validated above; the file is never re-read,
+    // so edits made after startup need a restart (and pass validation then).
     let presets: Arc<dyn mcp_warden_core::presets::PresetSource> =
-        Arc::new(TomlSource::new(config_path.clone()));
+        Arc::new(FrozenSource::new(cfg.preset.clone()));
     let (approval, approval_fallback) = build_approval(&cfg, keychain.as_ref())?;
     let audit: Arc<dyn AuditSink> = Arc::new(LocalSqlite::open(&audit_path)?);
 
