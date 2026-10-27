@@ -6,9 +6,9 @@ asks a human before running the action. *How* it asks is the job of an
 
 | Transport  | How it asks                                                                 | Good for                                   |
 |------------|-----------------------------------------------------------------------------|--------------------------------------------|
-| `desktop`  | macOS: native dialog. Linux: notification with Approve / Deny actions       | The default on macOS and Linux desktops    |
+| `desktop`  | macOS and Windows: native dialog. Linux: notification with Approve / Deny actions | The default on desktops                    |
 | `tui`      | Full-screen prompt drawn on the terminal (stderr)                           | Running `mcp-warden mcp` by hand in a terminal |
-| `telegram` | Bot message with inline Approve / Deny buttons                              | Approving from your phone; Windows; machines without a desktop |
+| `telegram` | Bot message with inline Approve / Deny buttons; `/lock` from the chat       | Approving from your phone; machines without a desktop; an out-of-band kill switch |
 
 Every decision — `approved`, `denied`, `timeout`, `windowed`, plus `refused`
 (the allow-list turned the call away before anyone was asked) and `failed`
@@ -30,11 +30,11 @@ The fallback is asked only when the primary **times out** — nobody answered,
 or (for Telegram) polling kept failing until the deadline — so it has to be a
 prompt you can actually see:
 
-| Primary    | Fallback on macOS | Fallback on Linux / Windows                      |
-|------------|-------------------|--------------------------------------------------|
-| `desktop`  | none              | `tui`, only if the server's stderr is a terminal |
-| `telegram` | the native dialog | `tui`, only if the server's stderr is a terminal |
-| `tui`      | none              | none                                             |
+| Primary    | Fallback on macOS / Windows | Fallback on Linux                                |
+|------------|-----------------------------|--------------------------------------------------|
+| `desktop`  | none                        | `tui`, only if the server's stderr is a terminal |
+| `telegram` | the native dialog           | `tui`, only if the server's stderr is a terminal |
+| `tui`      | none                        | none                                             |
 
 An MCP client (Claude Code, Cursor, …) captures the server's stderr and feeds
 JSON-RPC through its stdin, so a TUI prompt there can't be seen — and on
@@ -80,7 +80,18 @@ A local dialog is only as trustworthy as the screen it is on: an agent that
 can drive your desktop (computer-use tools) could click it. If you give an
 agent screen control, approve through Telegram instead.
 
-Windows has no native dialog yet; use Telegram there.
+## Windows dialog
+
+On Windows the `desktop` transport is a small window drawn with Windows
+Forms by the system Windows PowerShell — the same buttons and rules as on
+macOS: Deny is both the accept (Enter) and cancel (Esc) button, closing the
+window denies, and it gives up after 60 s. The script is a fixed constant
+passed with `-EncodedCommand`; the request text reaches it only through
+environment variables, sanitised. No extra permissions are needed.
+
+This dialog is new and has been checked only by CI on `windows-latest` and
+with a stand-in helper, not by hand on a desktop. If it misbehaves, use
+Telegram and please open an issue.
 
 ## Telegram
 
@@ -141,10 +152,38 @@ button — or the prompt times out — the message is edited to show the outcome
   at 600 characters. Secrets are never part of the summary.
 - **Timeout means no.** If nobody answers within `timeout_seconds`, the
   decision is `timeout` and the action does not run.
+- **Answers can't be forged locally.** Each button carries its own random
+  128-bit token as its callback data, and the token *is* the answer. When
+  one server process receives a press meant for another (see below), it
+  leaves only "this button was pressed" in `telegram/inbox/<token>`; the
+  owner knows which of its tokens means Approve, and that token never
+  touches the disk — so whoever can write to the inbox, the agent included,
+  can't turn a Deny into an Approve or invent one.
 
-Note that the Telegram transport polls `getUpdates`. Don't point it at a bot
-that another process also polls or has a webhook set — Telegram delivers
-each update to only one consumer.
+### Check the setup
+
+```bash
+mcp-warden approval telegram-test
+```
+
+checks the token (`getMe`), sends a test prompt to `chat_id`, and tells you
+which button you pressed — or what to fix if no press arrives.
+
+### `/lock` from your phone
+
+Send `/lock` (optionally `/lock <reason>`) to the bot from the configured
+chat and mcp-warden locks, exactly like `mcp-warden lock`: every MCP server
+refuses every call from its next one on, and the bot confirms. Unlocking
+still needs `mcp-warden unlock` on the computer. `/lock` from any other chat
+is ignored.
+
+For `/lock` to arrive when nothing is asking, every `mcp-warden mcp` with
+`[approval.telegram]` listens in the background. Telegram hands each update
+to one `getUpdates` caller, so the servers — one per Claude session — take
+turns through a file lock (`<config dir>/telegram/poll.lock`) and share the
+offset (`telegram/offset`); whoever polls handles `/lock` and passes button
+presses to the server that asked. Don't point the bot at another program
+that also polls it or has a webhook set.
 
 ## Writing your own transport
 

@@ -7,9 +7,10 @@ use mcp_warden_core::error::{Result, WardenError};
 /// Desktop-notification approval transport.
 ///
 /// On Linux the notification carries Approve / Deny actions via DBus.
-/// Windows notifications have no actions: the notification fires so the
-/// user knows something is asking, and the transport returns `Timeout`.
-/// macOS uses `OsascriptApproval` instead (see `cli::mcp::desktop_transport`).
+/// Elsewhere notifications have no actions: the notification fires and the
+/// transport returns `Timeout`. macOS and Windows use their native dialogs
+/// instead (`OsascriptApproval`, `PowerShellApproval`; see
+/// `cli::mcp::desktop_transport`).
 pub struct DesktopApproval;
 
 #[async_trait]

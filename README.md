@@ -8,7 +8,7 @@ The agent calls high-level tools (`proxy_http`); `mcp-warden` injects the secret
 [![crates.io](https://img.shields.io/crates/v/mcp-warden.svg)](https://crates.io/crates/mcp-warden)
 [![License: Apache-2.0](https://img.shields.io/badge/License-Apache_2.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
 
-![mcp-warden demo: the agent calls the GitHub API through a preset without seeing the token, a prompt-injected DELETE is refused before any request is sent, and an SSH deploy runs after approval in Telegram](docs/demo.gif)
+![mcp-warden demo: the agent calls the GitHub API through a preset without seeing the token, a prompt-injected DELETE is refused before any request is sent and lands in the audit log as refused, an SSH deploy runs after approval in Telegram, and `mcp-warden scan` finds a plaintext key in ~/.claude.json that `import` moves into the keychain](docs/demo.gif)
 
 ## How it works
 
@@ -17,7 +17,7 @@ The agent calls high-level tools (`proxy_http`); `mcp-warden` injects the secret
 3. The AI agent connects to `mcp-warden` as an MCP server (stdio).
 4. When the agent wants to act, it calls `proxy_http` with a preset name and a path/method.
 5. `mcp-warden` validates the request against the preset's allow-list, injects the credential, executes, and returns only the response.
-6. Sensitive presets trigger an approval prompt: a native dialog on macOS, a desktop notification with Approve / Deny on Linux, or a Telegram message on any OS (the option for Windows). Opt in to **time-boxed approvals** per preset so one OK can cover a short burst of follow-up calls without re-prompt spam.
+6. Sensitive presets trigger an approval prompt: a native dialog on macOS and Windows, a desktop notification with Approve / Deny on Linux, or a Telegram message on any OS — where `/lock` also works as a kill switch from your phone. Opt in to **time-boxed approvals** per preset so one OK can cover a short burst of follow-up calls without re-prompt spam.
 7. Every action lands in a local SQLite audit log — including a `windowed` decision for calls authorised by an active approval window, a `refused` decision (with the raw requested path or command) for calls the allow-list turned away, and a `failed` decision when the approval prompt could not be shown.
 
 The agent's context window contains zero secrets.
@@ -81,7 +81,8 @@ mcp-warden run github               # what the rewired entry runs: the server, w
 | `mcp-warden preset test <name> GET /path`  | Policy simulator: would this call be allowed, and why? Sends nothing (`--command`, `--get`/`--put`, `--query` for other tools) |
 | `mcp-warden preset grant <name> --for 1h`  | Time-limited access: calls are refused after the window (`--permanent` clears it) |
 | `mcp-warden preset revoke <name>`          | End access to a preset now (next server start; `lock` for immediately) |
-| `mcp-warden lock [--reason …]`             | Kill switch: every MCP server refuses every call from its next one on |
+| `mcp-warden lock [--reason …]`             | Kill switch: every MCP server refuses every call from its next one on (or send `/lock` to the Telegram bot) |
+| `mcp-warden approval telegram-test`        | Check the Telegram setup: token, chat, a test prompt you answer |
 | `mcp-warden unlock`                        | Remove the lock after a human approves it in the dialog / Telegram |
 | `mcp-warden scan`                          | Find plaintext keys in MCP client configs and `.env` files (never prints values) |
 | `mcp-warden import`                        | Move the keys `scan` found into the keychain and point the client at `mcp-warden run` |

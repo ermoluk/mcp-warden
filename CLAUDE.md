@@ -74,7 +74,7 @@ Cloud Approval Relay, Compliance) attach as alternate implementations.
 | Trait                | OSS impl              | Future paid impl ideas                  |
 |----------------------|-----------------------|-----------------------------------------|
 | `KeychainStore`      | `SystemKeychain`      | HSM, 1Password Connect, Vault           |
-| `ApprovalTransport`  | `DesktopApproval` + `TuiApproval` | Telegram, mobile push, web UI |
+| `ApprovalTransport`  | desktop (macOS / Windows dialog, Linux notification), `TuiApproval`, `TelegramApproval` | mobile push, web UI |
 | `AuditSink`          | `LocalSqlite`         | Cloud audit log, SIEM forwarding        |
 | `PresetSource`       | `TomlSource` + `FrozenSource` (MCP server) | Org-managed central preset registry |
 

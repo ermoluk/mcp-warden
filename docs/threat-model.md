@@ -75,9 +75,9 @@ Known limits: a credential that comes back truncated, split across fields, hashe
 
 ## Residual risks (known, accepted in MVP)
 
-### R1. Local approval prompts trust the local screen; Windows has none
+### R1. Local approval prompts trust the local screen
 
-On macOS approval is a native dialog shown with `osascript` (`src/approval/osascript.rs`). Deny is the default and the cancel button, so Return and Esc deny and approving takes a click; the dialog gives up after the request timeout (`timeout`). Request text reaches the fixed AppleScript as arguments, never as script source, and is sanitised as in T5. On Linux `notify-rust` shows a notification with Approve / Deny actions over DBus. Windows notifications have no actions and there is no native dialog yet, so `prompt` presets on Windows need the Telegram transport.
+On macOS approval is a native dialog shown with `osascript` (`src/approval/osascript.rs`). Deny is the default and the cancel button, so Return and Esc deny and approving takes a click; the dialog gives up after the request timeout (`timeout`). Request text reaches the fixed AppleScript as arguments, never as script source, and is sanitised as in T5. On Windows it is a Windows Forms window shown by the system Windows PowerShell (`src/approval/powershell.rs`) under the same rules; its script is a fixed `-EncodedCommand` and the request text reaches it only through environment variables. On Linux `notify-rust` shows a notification with Approve / Deny actions over DBus.
 
 A local prompt is only as trustworthy as the screen it is on: an agent that can drive the desktop (computer-use tools) could click Approve. Users who give an agent screen control should approve through Telegram, which is out of band.
 
@@ -150,6 +150,8 @@ What it does guarantee:
 - **`unlock`** removes the file only after a human approves it through the approval transport, so an agent can't talk its way past it with the CLI.
 - **Deleting the file by hand** cannot reopen a server that saw the lock. A server *started after* the deletion does start unlocked, though. Restarting MCP servers is the client's job, not the agent's, but users who want the lock to survive tampering should also revoke the upstream credentials.
 - **Screen control.** As in R1, an agent that can click on the user's screen could approve the unlock dialog. Use Telegram if the agent has screen control.
+- **Telegram `/lock`** from the configured chat writes the same lock file, from whichever server is polling at that moment. It works only while at least one MCP server with `[approval.telegram]` runs. Telegram cannot unlock.
+- **The Telegram inbox.** Servers hand button presses to each other through `telegram/inbox/<button token>` files. Each button carries its own random 128-bit token, and only the asking server knows which token means Approve. Someone who can write the inbox can delete an answer, which makes the prompt time out (fail closed). They cannot forge an answer or flip one.
 
 ### R14. `preset grant` windows and frozen presets
 

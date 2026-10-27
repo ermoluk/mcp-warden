@@ -17,6 +17,10 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- **`/lock` from Telegram.** With `[approval.telegram]`, sending `/lock [reason]` to the bot from the configured chat locks mcp-warden like `mcp-warden lock`, and the bot confirms; unlocking still needs `mcp-warden unlock` on the computer. Every MCP server now listens in the background, and servers take turns polling through a file lock with a shared offset, so several Claude sessions no longer steal each other's updates; a press for another server's prompt is handed over through `telegram/inbox/`. Each button now carries its own random 128-bit token, which is the answer — so a local process can't forge or flip an answer through the inbox.
+- **`mcp-warden approval telegram-test`** checks the Telegram setup end to end: the token works, a test prompt reaches the chat, and it reports which button you pressed (or what to fix).
+- **Native approval dialog on Windows** — a Windows Forms window shown by the system Windows PowerShell, with the same buttons and rules as the macOS dialog (Deny on Enter / Esc / close, give-up timeout, request text passed as environment variables, never as script). Windows notifications have no buttons, so before this `prompt` presets on Windows needed Telegram. New and so far tested only in CI and with a stand-in helper.
+- **The demo** shows the refused call landing in the audit log, and a new scene in which the agent runs `mcp-warden scan` (seeing only `ghp_…, 40 chars`) and `import` moves the key into the keychain.
 - **Response limits for `proxy_http`** (per preset, opt-in). `max_response_bytes` reads no more than N bytes of the decoded body; a larger one is not returned — the agent gets the status, `body: null` and a `notice`. `response_fields = ["id", "owner.login", "items[].title"]` returns only those fields, keeping the body's shape; picked after the credential echo is scrubbed. `preset add --max-response-bytes / --response-fields`. The `proxy_http` description now tells the agent the body is untrusted data, never instructions, and its output gains an optional `notice`.
 - **The audit log names the MCP client and session.** Every event records the client's `name version` (from `initialize`, sanitised) and a random per-process session id, shown by `mcp-warden audit` and the web UI. Existing `audit.db` files are migrated in place; old rows are kept.
 - **Five more `preset scaffold` templates:** `gitlab-read`, `linear`, `jira-read`, `slack-read`, `vercel-read` — all `prompt`, with allow-lists that keep secret-bearing endpoints (GitLab CI variables, Vercel project env) out of reach.
@@ -32,6 +36,7 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Changed
 
+- **Minimum Rust version is now 1.89** (for `File::try_lock`). CI also builds and tests on `windows-latest`.
 - **The TUI is a fallback only where it can be seen.** On macOS the dialog has no fallback, and it is itself the fallback when a Telegram prompt times out. On Linux and Windows the TUI is asked after a timeout only when the server's stderr is a terminal — under an MCP client it was invisible. `MCP_WARDEN_APPROVAL_TRANSPORT=tui` still selects it explicitly.
 - Docs, the `proxy_http` tool description and the plugin skill no longer say the approval prompt appears as a TUI in the MCP client's output panel.
 
