@@ -22,6 +22,24 @@ pub struct Config {
     /// selects the Telegram transport over the default desktop prompt.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub approval: Option<ApprovalConfig>,
+    /// Other MCP servers that `mcp-warden run <name>` launches with their
+    /// keys injected from the keychain instead of written in a client config.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub server: Vec<WrappedServer>,
+}
+
+/// An MCP server `mcp-warden run <name>` launches. The command is fixed here
+/// so nobody — the agent included — can have a secret injected into a
+/// command of their choosing.
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct WrappedServer {
+    pub name: String,
+    pub command: String,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Environment variable → name of the keychain entry that holds its value.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub env: std::collections::BTreeMap<String, String>,
 }
 
 #[derive(Debug, Clone, Default, Deserialize, Serialize)]
@@ -155,6 +173,7 @@ impl Config {
     }
 
     pub fn validate(&self, kc: &dyn KeychainStore) -> Result<()> {
+        self.validate_servers()?;
         for p in &self.preset {
             if p.name.is_empty() {
                 return Err(WardenError::Validation("preset name empty".into()));
@@ -343,6 +362,50 @@ impl Config {
     pub fn find(&self, name: &str) -> Option<&Preset> {
         self.preset.iter().find(|p| p.name == name)
     }
+
+    /// Check the shape of every `[[server]]` entry. Their secrets are not
+    /// looked up here: they belong to `mcp-warden run`, which checks them
+    /// when it launches the server.
+    pub fn validate_servers(&self) -> Result<()> {
+        let mut seen = std::collections::HashSet::new();
+        for s in &self.server {
+            if s.name.is_empty() || s.command.is_empty() {
+                return Err(WardenError::Validation(
+                    "every [[server]] needs a name and a command".into(),
+                ));
+            }
+            if !seen.insert(s.name.as_str()) {
+                return Err(WardenError::Validation(format!(
+                    "two [[server]] entries are named '{}'",
+                    s.name
+                )));
+            }
+            for (var, secret) in &s.env {
+                let mut chars = var.chars();
+                let valid = chars
+                    .next()
+                    .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+                    && chars.all(|c| c.is_ascii_alphanumeric() || c == '_');
+                if !valid {
+                    return Err(WardenError::Validation(format!(
+                        "server '{}': '{var}' is not a valid environment variable name",
+                        s.name
+                    )));
+                }
+                if secret.is_empty() {
+                    return Err(WardenError::Validation(format!(
+                        "server '{}': {var} names no keychain entry",
+                        s.name
+                    )));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub fn find_server(&self, name: &str) -> Option<&WrappedServer> {
+        self.server.iter().find(|s| s.name == name)
+    }
 }
 
 pub fn config_path() -> PathBuf {
@@ -353,6 +416,50 @@ pub fn config_path() -> PathBuf {
 
 #[cfg(test)]
 mod tests {
+
+    fn servers(toml: &str) -> Result<()> {
+        let cfg: Config = toml::from_str(toml).unwrap();
+        cfg.validate_servers()
+    }
+
+    #[test]
+    fn server_entries_parse_and_validate() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [[server]]
+            name = "github"
+            command = "npx"
+            args = ["-y", "@modelcontextprotocol/server-github"]
+            env = { GITHUB_PERSONAL_ACCESS_TOKEN = "github_pat" }
+            "#,
+        )
+        .unwrap();
+        cfg.validate_servers().unwrap();
+        let s = cfg.find_server("github").unwrap();
+        assert_eq!(s.args.len(), 2);
+        assert_eq!(s.env["GITHUB_PERSONAL_ACCESS_TOKEN"], "github_pat");
+    }
+
+    #[test]
+    fn server_entries_reject_bad_shapes() {
+        let dup = r#"
+            [[server]]
+            name = "a"
+            command = "x"
+            [[server]]
+            name = "a"
+            command = "y"
+        "#;
+        assert!(servers(dup).is_err());
+        assert!(servers("[[server]]\nname = \"a\"\ncommand = \"\"").is_err());
+        for var in ["1ABC", "A-B", "A B", ""] {
+            let t =
+                format!("[[server]]\nname = \"a\"\ncommand = \"x\"\nenv = {{ \"{var}\" = \"s\" }}");
+            assert!(servers(&t).is_err(), "{var:?}");
+        }
+        assert!(servers("[[server]]\nname = \"a\"\ncommand = \"x\"\nenv = { A = \"\" }").is_err());
+    }
+
     use super::*;
     use crate::keychain::KeychainStore;
     use crate::keychain::memory::InMemoryKeychain;
@@ -564,6 +671,7 @@ mod tests {
     fn approval_window_seconds_round_trips_through_toml() {
         let cfg = Config {
             approval: None,
+            server: vec![],
             preset: vec![Preset {
                 name: "p".into(),
                 preset_type: PresetType::Http,

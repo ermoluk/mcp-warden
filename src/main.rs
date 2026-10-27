@@ -35,6 +35,12 @@ async fn main() -> anyhow::Result<()> {
             cli::lock::lock(&config_dir, reason, &audit)?
         }
         cli::Command::Unlock => cli::lock::unlock_cmd(&config_dir, store, &audit_db).await?,
+        cli::Command::Run { name } => {
+            std::fs::create_dir_all(&config_dir)?;
+            let audit = mcp_warden_core::audit::sqlite_sink::LocalSqlite::open(&audit_db)?;
+            cli::run::run(&name, &config_dir, store.as_ref(), &audit)?
+        }
+        cli::Command::Server { cmd } => cli::server::run(cmd, &config_path, store.as_ref())?,
     }
     Ok(())
 }

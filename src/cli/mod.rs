@@ -11,7 +11,9 @@ pub mod mcp;
 pub mod openapi;
 pub mod preset;
 pub mod preset_templates;
+pub mod run;
 pub mod secret;
+pub mod server;
 pub mod web;
 
 #[derive(Debug, Parser)]
@@ -48,6 +50,18 @@ pub enum Command {
     /// Print a diagnostic summary of the current configuration. Pass
     /// `--deep` to additionally run safe read-only probes for each preset.
     Doctor(doctor::DoctorArgs),
+    /// Launch a wrapped MCP server (`[[server]]` in the config) with its keys
+    /// injected from the keychain. Use it as the server's command in your
+    /// MCP client config instead of writing the key there.
+    Run {
+        /// The `[[server]]` entry to launch.
+        name: String,
+    },
+    /// Manage wrapped MCP servers for `mcp-warden run`.
+    Server {
+        #[command(subcommand)]
+        cmd: server::ServerCmd,
+    },
     /// Kill switch: every MCP server refuses every call from its next one on.
     Lock {
         /// Why — shown by `unlock` and recorded in the audit log.

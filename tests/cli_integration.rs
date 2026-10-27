@@ -479,3 +479,97 @@ fn preset_grant_and_revoke_set_and_clear_expiry() {
         .assert()
         .failure();
 }
+
+#[test]
+fn server_add_list_remove() {
+    let tmp = tempfile::tempdir().unwrap();
+    let dir = tmp.path();
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", dir)
+        .args([
+            "server",
+            "add",
+            "github",
+            "--env",
+            "GITHUB_TOKEN=github_pat",
+            "--",
+        ])
+        .args(["npx", "-y", "@modelcontextprotocol/server-github"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("\"args\": [\"run\", \"github\"]"))
+        .stderr(predicate::str::contains("secret add github_pat"));
+    let cfg = fs::read_to_string(dir.join("config.toml")).unwrap();
+    assert!(
+        cfg.contains("[[server]]") && cfg.contains("GITHUB_TOKEN = \"github_pat\""),
+        "{cfg}"
+    );
+
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", dir)
+        .args(["server", "add", "github", "--", "true"])
+        .assert()
+        .failure();
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", dir)
+        .args(["server", "list"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("GITHUB_TOKEN←github_pat"));
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", dir)
+        .args(["server", "remove", "github"])
+        .assert()
+        .success();
+    assert!(
+        !fs::read_to_string(dir.join("config.toml"))
+            .unwrap()
+            .contains("[[server]]")
+    );
+}
+
+#[cfg(unix)]
+#[test]
+fn run_execs_the_server_with_stdio_passed_through() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(
+        tmp.path().join("config.toml"),
+        "[[server]]\nname = \"echo\"\ncommand = \"/bin/sh\"\nargs = [\"-c\", \"read line; echo got:$line\"]\n",
+    )
+    .unwrap();
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["run", "echo"])
+        .write_stdin("ping\n")
+        .assert()
+        .success()
+        .stdout("got:ping\n");
+}
+
+#[test]
+fn run_refuses_missing_secret_unknown_server_and_lock_without_stdout() {
+    let tmp = tempfile::tempdir().unwrap();
+    fs::write(
+        tmp.path().join("config.toml"),
+        "[[server]]\nname = \"gh\"\ncommand = \"/bin/sh\"\nenv = { TOKEN = \"gh_pat\" }\n",
+    )
+    .unwrap();
+    let run = |name: &str| {
+        cmd()
+            .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+            .args(["run", name])
+            .assert()
+            .failure()
+            .stdout("")
+    };
+    run("gh").stderr(predicate::str::contains(
+        "keychain has no 'gh_pat' for TOKEN",
+    ));
+    run("nope").stderr(predicate::str::contains("no [[server]] named 'nope'"));
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["lock"])
+        .assert()
+        .success();
+    run("gh").stderr(predicate::str::contains("locked"));
+}
