@@ -3,7 +3,7 @@
   "name": "io.github.ermoluk/mcp-warden",
   "title": "mcp-warden",
   "description": "Local credential broker: agents call APIs, SSH and DBs via scoped presets; secrets stay in keychain.",
-  "version": "0.5.0",
+  "version": "0.5.1",
   "repository": {
     "url": "https://github.com/ermoluk/mcp-warden",
     "source": "github"
@@ -12,7 +12,7 @@
     {
       "registryType": "cargo",
       "identifier": "mcp-warden",
-      "version": "0.5.0",
+      "version": "0.5.1",
       "transport": { "type": "stdio" },
       "packageArguments": [
         { "type": "positional", "value": "mcp" }

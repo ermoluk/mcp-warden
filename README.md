@@ -118,6 +118,10 @@ Restart Claude Code and run `/mcp-warden:setup`. If you previously added the ser
 
 Other MCP clients: see [`docs/claude-code-setup.md`](docs/claude-code-setup.md) and [`docs/cursor-setup.md`](docs/cursor-setup.md) for manual setup.
 
+## What's new in v0.5.1
+
+- **`cargo install mcp-warden` builds again.** 0.5.0 failed to compile without `--locked` because a minor release of the `keyring` crate removed the function it used. mcp-warden now talks to the OS keychain stores directly, and secrets saved by earlier versions stay readable. Install with `cargo install --locked mcp-warden`.
+
 ## What's new in v0.5.0
 
 - **Approvals work on every desktop.** `prompt` presets now ask in a native dialog on macOS and Windows: Deny by default, Return / Esc deny, and it auto-denies after 60 s. In 0.4.x a `prompt` preset on macOS could not be approved at all under an MCP client unless Telegram was set up. A prompt that can't be shown is refused and audited as `failed`.
