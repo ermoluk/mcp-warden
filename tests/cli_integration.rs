@@ -246,3 +246,56 @@ fn scaffold_github_read_warns_when_writing_config() {
             "warning: {OPEN_PATHS_WARNING}"
         )));
 }
+
+fn seed_refused_event(dir: &Path, summary: &str) {
+    use mcp_warden_core::audit::{AuditDecision, AuditOutcome, AuditSink};
+    let sink =
+        mcp_warden_core::audit::sqlite_sink::LocalSqlite::open(&dir.join("audit.db")).unwrap();
+    let id = sink
+        .record_pending("github-read", "proxy_http", summary)
+        .unwrap();
+    sink.record_decision(id, AuditDecision::Refused).unwrap();
+    sink.record_outcome(
+        id,
+        AuditOutcome::Err {
+            message: "validation error: path not allowed".into(),
+        },
+    )
+    .unwrap();
+}
+
+#[test]
+fn audit_prints_what_the_agent_asked_for() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_refused_event(tmp.path(), "DELETE /repos/me/app");
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .arg("audit")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("DELETE /repos/me/app"))
+        .stdout(predicate::str::contains("Refused"));
+}
+
+#[test]
+fn audit_truncates_long_summaries_and_strips_control_chars() {
+    let tmp = tempfile::tempdir().unwrap();
+    let summary = format!("GET /\u{1b}[2J{}TAIL", "a".repeat(500));
+    seed_refused_event(tmp.path(), &summary);
+    let out = cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .arg("audit")
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let out = String::from_utf8(out).unwrap();
+    assert!(out.contains("GET /[2Jaaa"), "summary missing: {out}");
+    assert!(out.contains('…'), "long summary not marked as cut: {out}");
+    assert!(!out.contains("TAIL"), "long summary not truncated: {out}");
+    assert!(
+        !out.contains('\u{1b}'),
+        "control chars reach the terminal: {out}"
+    );
+}

@@ -1,7 +1,12 @@
 use clap::Args;
-use mcp_warden_core::audit::{AuditSink, sqlite_sink::LocalSqlite};
+use mcp_warden_core::approval::sanitise_for_prompt;
+use mcp_warden_core::audit::{AuditOutcome, AuditSink, clip, sqlite_sink::LocalSqlite};
 use mcp_warden_core::error::{Result, WardenError};
 use std::path::Path;
+
+const PRESET_WIDTH: usize = 40;
+const SUMMARY_WIDTH: usize = 80;
+const MESSAGE_WIDTH: usize = 120;
 
 #[derive(Debug, Args)]
 pub struct AuditArgs {
@@ -32,15 +37,29 @@ pub fn run(args: AuditArgs, db_path: &Path) -> Result<()> {
         return Ok(());
     }
     for e in events {
+        let outcome = e.outcome.map(|o| match o {
+            AuditOutcome::Err { message } => AuditOutcome::Err {
+                message: for_terminal(&message, MESSAGE_WIDTH),
+            },
+            ok => ok,
+        });
         println!(
-            "{} [{}] {:24} {} → {:?} {:?}",
+            "{} [{}] {:24} {} {} → {:?} {:?}",
             e.created_at.to_rfc3339(),
             e.id,
-            e.preset,
+            for_terminal(&e.preset, PRESET_WIDTH),
             e.action,
+            for_terminal(&e.summary, SUMMARY_WIDTH),
             e.decision,
-            e.outcome,
+            outcome,
         );
     }
     Ok(())
+}
+
+/// Preset names, summaries and errors can be agent-supplied (refused calls
+/// record them verbatim): strip control characters so they cannot drive the
+/// terminal, and cap the width so one event stays one readable line.
+fn for_terminal(s: &str, max_chars: usize) -> String {
+    clip(&sanitise_for_prompt(s, usize::MAX), max_chars)
 }
