@@ -36,7 +36,9 @@ The returned value MUST NOT be quoted back into your reasoning trace.";
 pub const SSH_EXEC_DESCRIPTION: &str = "\
 Run a shell command on the preset's SSH host. The command must match \
 one of the preset's `allowed_commands` regexes (anchored ^...$). \
-Returns stdout, stderr, and exit_code. Key-based auth only; host key is \
+Words are separated by single spaces and may contain only letters, digits \
+and `- _ . / : = @ , + %`; quotes, `$`, backticks, globs, redirections and \
+other shell syntax are refused. Returns stdout, stderr, and exit_code. Key-based auth only; host key is \
 verified against the user's known_hosts file. Sensitive presets trigger \
 the approval prompt. If the user previously approved a time-boxed window \
 for this preset+action, the call proceeds without a new prompt and is \

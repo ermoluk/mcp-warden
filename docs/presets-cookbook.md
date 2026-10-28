@@ -97,6 +97,13 @@ approval = "prompt"
 timeout_seconds = 300
 ```
 
+The remote shell runs the command, so `ssh_exec` refuses shell syntax whatever
+the patterns say: words are separated by single spaces and may contain only
+letters, digits and `- _ . / : = @ , + %`. Quotes, `$`, backticks, globs and
+redirections never reach the host, so don't write patterns that need them.
+Still keep each argument tight (`[a-z0-9_-]+`, `\d+`) — a loose `.*` lets
+the agent add options of its own.
+
 ## SSH + SFTP — Log fetcher
 
 ```toml

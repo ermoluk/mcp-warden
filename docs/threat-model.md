@@ -95,7 +95,11 @@ The SQLite file is `0600`-permissioned and rejects symlinks at open time, but ro
 
 ### R4. SSH command-injection via careless regex (v0.2.0)
 
-`ssh_exec` runs the agent-supplied command via `russh`'s exec channel — a single string sent to the remote shell. We anchor each `allowed_commands` entry as `^(?:...)$` — the group keeps alternations anchored, so `uptime|df -h` cannot match `rm -rf / ; df -h` (fixed in v0.4.1; earlier versions anchored as `^...$`). So a typical pattern like `^docker compose (pull|up -d|ps)$` is safe. **A careless regex** like `git pull.*` allows `git pull; rm -rf /`. Preset authors must terminate or constrain patterns explicitly. Pitfalls verified by `tests::rejects_injection_attempts` and `tests::alternation_in_pattern_stays_anchored`. The same anchoring applies to HTTP `allowed_paths` patterns.
+`ssh_exec` runs the agent-supplied command via `russh`'s exec channel — a single string that sshd runs with the remote user's login shell (`$SHELL -c`). We anchor each `allowed_commands` entry as `^(?:...)$` — the group keeps alternations anchored, so `uptime|df -h` cannot match `rm -rf / ; df -h` (fixed in v0.4.1; earlier versions anchored as `^...$`). The same anchoring applies to HTTP `allowed_paths` patterns.
+
+Anchoring alone left shell syntax to the pattern: `git checkout \S+` also matched `git checkout $(curl …|sh)`, which the remote shell expands. Since v0.5.2 every command is checked before its pattern (invariant 5): words are separated by single spaces and may contain only letters, digits and `- _ . / : = @ , + %`, and none may start with `=` (zsh's `=cmd`). `$`, backticks, `;`, `|`, `&`, `<`, `>`, parentheses, quotes, `\`, globs, `{}`, `~`, `!`, `#`, newlines and other control characters are refused whatever the pattern says, so the shell runs exactly the words the allow-list matched. Verified by `tests::refuses_shell_syntax_whatever_the_pattern`.
+
+What remains is the pattern's own scope. **A careless regex** like `git pull.*` still allows extra options made of permitted characters, such as `git pull --upload-pack=/tmp/x`. Preset authors must terminate or constrain patterns explicitly — `^docker compose (pull|up -d|ps)$`, `[a-z0-9._-]+` for an argument.
 
 ### R5. SFTP local path leakage (v0.2.0)
 
