@@ -63,6 +63,15 @@ pub fn validate_request(preset: &Preset, method: &str, path: &str) -> Result<()>
             "path '{path}' contains dot segments, encoded dots or backslashes"
         )));
     }
+    // Patterns see the path decoded once, but an upstream may decode twice
+    // (a proxy in front of an app), turning `%252e%252e` into `..` and
+    // `%252F` into `/`. A second pass can only find an escape whose `%`
+    // came out of the first, and that `%` is always a `%25`.
+    if path.contains("%25") {
+        return Err(WardenError::Validation(format!(
+            "path '{path}' contains an encoded '%' (%25); double percent-encoding is refused"
+        )));
+    }
     let decoded = decode_path(path)?;
     if preset.allowed_paths.is_empty() {
         return Ok(());
@@ -339,6 +348,27 @@ mod tests {
                 validate_request(&q, "GET", evil).is_err(),
                 "should reject: {evil}"
             );
+        }
+    }
+
+    #[test]
+    fn rejects_double_percent_encoding() {
+        // One decode pass leaves `%2e%2e` / `%2F`, which the allow-list
+        // takes for ordinary characters; an upstream that decodes twice
+        // (a proxy in front of an app) sees `..` or `/`.
+        let mut q = p();
+        q.allowed_paths = vec!["/users/.*".into(), "/repos/o/[^/]+".into()];
+        for evil in [
+            "/users/%252e%252e/admin",
+            "/users/%252E%252E/admin",
+            "/users/%25%32%65%25%32%65/admin",
+            "/users/%25252e%25252e/admin",
+            "/repos/o/x%252Fcollaborators",
+            // A literal `%` is refused too: it can't be told apart.
+            "/users/100%25",
+        ] {
+            let err = validate_request(&q, "GET", evil).unwrap_err();
+            assert!(err.to_string().contains("%25"), "{evil}: {err}");
         }
     }
 

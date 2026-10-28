@@ -199,6 +199,7 @@ mod tests {
             ("DELETE", "/repos/o/r"),
             ("GET", "/repos/o/r/collaborators"),
             ("GET", "/repos/o/x%2Fcollaborators"),
+            ("GET", "/repos/o/x%252Fcollaborators"),
             ("GET", "/repos/o/../admin"),
         ] {
             let req = Request::Http { method, path };
