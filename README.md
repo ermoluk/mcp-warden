@@ -118,6 +118,10 @@ Restart Claude Code and run `/mcp-warden:setup`. If you previously added the ser
 
 Other MCP clients: see [`docs/claude-code-setup.md`](docs/claude-code-setup.md) and [`docs/cursor-setup.md`](docs/cursor-setup.md) for manual setup.
 
+## What's new in v0.5.2
+
+- **Two allow-list bypasses closed.** `proxy_http` refuses double percent-encoded paths (`%252e%252e`, `%252F`), which an upstream that decodes twice would turn into `..` or `/`. `ssh_exec` refuses shell syntax (`$( )`, backticks, `;`, `|`, quotes, globs, …) in every command, even where a broad pattern such as `\S+` would match it. A literal `%` in an HTTP path, and SSH patterns that relied on quotes or globs, stop working. Details in the [changelog](CHANGELOG.md).
+
 ## What's new in v0.5.1
 
 - **`cargo install mcp-warden` builds again.** 0.5.0 failed to compile without `--locked` because a minor release of the `keyring` crate removed the function it used. mcp-warden now talks to the OS keychain stores directly, and secrets saved by earlier versions stay readable. Install with `cargo install --locked mcp-warden`.

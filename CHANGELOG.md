@@ -2,6 +2,13 @@
 
 All notable changes to this project will be documented in this file. The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.2]
+
+### Security
+
+- **HTTP path allow-list bypass via double percent-encoding.** `allowed_paths` are matched against the path decoded once, so `/users/%252e%252e/admin` became `/users/%2e%2e/admin` — an ordinary segment to the allow-list, which `/users/.*` or `[^/]+` matched — and was sent as `%252e%252e`. An upstream that decodes twice (a proxy in front of an app that decodes again) sees `..` and routes outside the allow-list; `%252F` likewise becomes a separator the allow-list never saw. Any path containing `%25` is now refused before the credential is read: a second decode pass can only find an escape whose `%` came out of the first, and that `%` is always a `%25` (invariants 3 and 6). **Behaviour change:** a literal `%` in a request path is refused with it.
+- **`ssh_exec` passed shell syntax that a broad pattern allowed.** sshd runs the command with the remote user's login shell, and `allowed_commands` regexes were the only check, so `git checkout \S+` also matched `git checkout $(curl …|sh)`, which that shell expands. Every command is now checked before its pattern with a per-word character allow-list (invariant 5): words are separated by single spaces and may contain only letters, digits and `- _ . / : = @ , + %`, and none may start with `=`. `$`, backticks, `;`, `|`, `&`, `<`, `>`, parentheses, quotes, `\`, globs, `{}`, `~`, `!`, `#`, newlines and other control characters are refused whatever the pattern says. The `ssh_exec` description tells the agent the rule, and `preset test --command` applies it too. **Behaviour change:** patterns that relied on quotes, globs or other shell syntax no longer match anything.
+
 ## [0.5.1]
 
 ### Fixed
