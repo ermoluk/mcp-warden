@@ -118,51 +118,25 @@ Restart Claude Code and run `/mcp-warden:setup`. If you previously added the ser
 
 Other MCP clients: see [`docs/claude-code-setup.md`](docs/claude-code-setup.md) and [`docs/cursor-setup.md`](docs/cursor-setup.md) for manual setup.
 
-## What's new in v0.5.2
+## How it compares
 
-- **Two allow-list bypasses closed.** `proxy_http` refuses double percent-encoded paths (`%252e%252e`, `%252F`), which an upstream that decodes twice would turn into `..` or `/`. `ssh_exec` refuses shell syntax (`$( )`, backticks, `;`, `|`, quotes, globs, …) in every command, even where a broad pattern such as `\S+` would match it. A literal `%` in an HTTP path, and SSH patterns that relied on quotes or globs, stop working. Details in the [changelog](CHANGELOG.md).
+Other MCP credential brokers make different trade-offs:
 
-## What's new in v0.5.1
+| | mcp-warden | [Keyward](https://github.com/arturayupov/keyward) | [Wundervault](https://github.com/wundervault/wundervault-mcp) | [Janee](https://github.com/rsdouglas/janee) |
+|---|---|---|---|---|
+| Secret stays out of the agent's context | Yes, except `get_secret_for_env`, which always asks first | Not returned to the agent; written into a project file such as `.env` | Yes, no tool returns a value | Yes |
+| What the agent can do | HTTP, SSH commands, SFTP, named SQL / Redis queries | Have a key written into a project file | HTTP, SSH commands / rsync, x402 payments, signing | HTTP (incl. AWS SigV4 / OAuth 1.0a signing), CLI tools with injected env vars |
+| Per-call allow-lists | HTTP method + path, SSH command regex, SFTP paths, named DB queries | Not yet (per-key policy is on its roadmap) | Allowed SSH hosts per key; an approval is bound to the HTTP destination, method and path | HTTP method + path rules, allowed executables |
+| Human approval | Native dialog (macOS, Windows), notification (Linux) or Telegram; on by default | Native OS dialog per request, once or for the session | Passkey, for secrets marked "ask me first" | ? |
+| Where secrets live | OS keychain | `age`-encrypted file, master key in the OS keystore | End-to-end encrypted hosted vault, used by a local broker | Encrypted file in `~/.janee/`, master key in the OS keychain or a file |
+| No cloud account or background service | Yes | Yes | No: needs a wundervault.com vault and a broker installed with admin rights | Yes (stdio; HTTP mode for containers) |
+| Audit log | Local SQLite, append-only, includes refused calls | Local JSONL of decisions | On your computer, tamper-evident | Local JSONL of requests |
+| Kill switch | `mcp-warden lock`, or `/lock` in Telegram | ? | Revoke an agent in the vault | Revoke a session (`janee revoke`) |
+| Works with any MCP client | Yes | Yes | Yes | Yes |
+| License | Apache-2.0 | MIT | AGPL-3.0 (the hosted vault is not open source) | MIT |
+| Install | `cargo install`, or binaries for macOS / Linux | Homebrew, Scoop, `go install`, binaries | npm plus a broker installer, free account | npm or Docker |
 
-- **`cargo install mcp-warden` builds again.** 0.5.0 failed to compile without `--locked` because a minor release of the `keyring` crate removed the function it used. mcp-warden now talks to the OS keychain stores directly, and secrets saved by earlier versions stay readable. Install with `cargo install --locked mcp-warden`.
-
-## What's new in v0.5.0
-
-- **Approvals work on every desktop.** `prompt` presets now ask in a native dialog on macOS and Windows: Deny by default, Return / Esc deny, and it auto-denies after 60 s. In 0.4.x a `prompt` preset on macOS could not be approved at all under an MCP client unless Telegram was set up. A prompt that can't be shown is refused and audited as `failed`.
-- **Kill switch.** `mcp-warden lock` makes every running MCP server refuse every call from its next one on. A server that has seen the lock stays locked until it restarts. `mcp-warden unlock` needs your approval in the dialog or Telegram. With Telegram configured, `/lock` from your phone does the same.
-- **Find and fix plaintext keys.** `mcp-warden scan` finds API keys pasted into MCP client configs and `.env` files; it never prints a value. `mcp-warden import` moves them into the keychain, and `mcp-warden run <name>` launches the server with its key injected (see [Find and fix plaintext keys](#find-and-fix-plaintext-keys)).
-- **Time-limited access and a policy simulator.** `preset grant <name> --for 1h` and `preset revoke <name>` limit how long a preset works. `preset test <name> GET /path` tells you whether a call would be allowed, and why, without sending anything.
-- **Tighter responses.** A credential the upstream echoes back is scrubbed before the agent sees it. Per preset, `max_response_bytes` caps a response body and `response_fields` returns only the fields you list.
-- **Better audit trail.** Every event names the MCP client and session that made it.
-- **Telegram for several sessions.** Several Claude sessions share one bot: they take turns polling it, so button presses no longer get lost. `mcp-warden approval telegram-test` checks the setup end to end.
-- **Five more templates:** `gitlab-read`, `linear`, `jira-read`, `slack-read`, `vercel-read`.
-- **Behaviour changes:**
-  - the MCP server reads `config.toml` once at startup, so restart it after editing presets;
-  - the minimum Rust version is now 1.89.
-
-Full list: [CHANGELOG.md](CHANGELOG.md#050).
-
-## What's new in v0.4.0
-
-- **Workspace split.** The project is now two crates: `mcp-warden-core` (library — trait surfaces + shared types) and `mcp-warden` (binary — CLI, MCP server, executor, web UI, concrete approval transports). Alternate implementations of `KeychainStore`, `ApprovalTransport`, `AuditSink`, or `PresetSource` now depend only on `mcp-warden-core` and don't drag the binary's GUI/runtime stack.
-- **Telegram approval transport wired in.** The impl already existed in v0.3.0; v0.4.0 makes it actually selectable. Add to your config file (`mcp-warden doctor` prints its path: `~/.config/mcp-warden/` on Linux, `~/Library/Application Support/io.mcp-warden.mcp-warden/` on macOS):
-  ```toml
-  [approval.telegram]
-  bot_token_secret = "tg_bot_token"   # name of the keychain entry, not the token value
-  chat_id = 123456789                  # your numeric Telegram chat id
-  timeout_seconds = 120                # optional
-  ```
-  then `mcp-warden secret add tg_bot_token` (pastes the bot token into the keychain). `prompt`-policy presets now send Approve / Deny inline-button messages to that chat; if the Telegram prompt times out, macOS asks again in the native dialog (see [`docs/approval-transports.md`](docs/approval-transports.md)). Override at runtime with `MCP_WARDEN_APPROVAL_TRANSPORT={telegram|desktop|tui}`.
-
-## What's new in v0.3.0
-
-- **`preset scaffold`** — 8 built-in templates for the most common APIs (`github-read`, `github-write`, `notion-read`, `stripe-read`, `openai-chat`, `anthropic-messages`, `gitea-read`, `cloudflare-dns`). Generate a working preset in one command instead of copy-pasting from the cookbook.
-- **`preset from-openapi <url-or-file>`** — point it at an OpenAPI 3.0/3.1 JSON or YAML spec and it derives `base_url`, `allowed_paths`, `allowed_methods`, and the auth scheme (Bearer or APIKey-Header). Filter by HTTP method or tag.
-- **`doctor --deep`** — for each HTTP preset, runs a safe read-only probe (GET against base URL or first literal allowed path), reports ok / auth_failed / auth_ok_404 / network_error / tls_error / skipped, with elapsed time and a redacted body snippet. Skips `prompt`-policy presets unless `--include-prompt` is passed.
-- **`web`** — a small local-only web UI (binds `127.0.0.1`, hardcoded) for browsing presets and the audit log without spawning a TUI. Read-only in this release; approval over WebSocket is on the roadmap.
-- **Telegram approval transport** — new `ApprovalTransport` impl that sends approval prompts to a Telegram chat with inline Approve / Deny / Approve-for-window buttons. Bot token lives in the OS keychain. Foreign-chat callbacks are rejected. Message uses `protect_content: true`. Selected automatically when `[approval.telegram]` is configured.
-
-See `docs/web-ui.md` for the web UI design notes.
+Compared with Keyward 0.1.1, Wundervault MCP server 2.0.1 and Janee 0.16.0, from each project's README and docs as of October 2026. `?` means not documented there. If something here is wrong or out of date, please open an issue.
 
 ## Security model
 
@@ -182,6 +156,7 @@ See `docs/web-ui.md` for the web UI design notes.
 ## Links
 
 - crates.io: [`mcp-warden`](https://crates.io/crates/mcp-warden)
+- Release notes: [CHANGELOG.md](CHANGELOG.md)
 - MCP Registry name: `mcp-name: io.github.ermoluk/mcp-warden`
 
 ## License

@@ -129,8 +129,15 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
-- **Workspace split.** New `mcp-warden-core` library crate ships the open-core trait surfaces (`KeychainStore`, `ApprovalTransport`, `AuditSink`, `PresetSource`) and shared types (`WardenError`, `Secret`, `Config`). The binary now depends on it; alternate implementations can attach to core without pulling the binary's full dep stack.
-- **Telegram approval transport wired into the runtime.** Add `[approval.telegram]` to `config.toml` (or set `MCP_WARDEN_APPROVAL_TRANSPORT=telegram`) and `mcp-warden mcp` selects Telegram as the active transport with TUI as fallback. Validates the bot-token keychain entry at startup.
+- **Workspace split.** New `mcp-warden-core` library crate ships the open-core trait surfaces (`KeychainStore`, `ApprovalTransport`, `AuditSink`, `PresetSource`) and shared types (`WardenError`, `Secret`, `Config`). The binary keeps the CLI, MCP server, executor, web UI and concrete approval transports, and now depends on core; alternate implementations can attach to core without pulling the binary's full dep stack.
+- **Telegram approval transport wired into the runtime.** The transport shipped in 0.3.0; this release makes it selectable. Add `[approval.telegram]` to `config.toml` (or set `MCP_WARDEN_APPROVAL_TRANSPORT=telegram`) and `mcp-warden mcp` selects Telegram as the active transport with TUI as fallback: `prompt`-policy presets send Approve / Deny inline-button messages to that chat. `MCP_WARDEN_APPROVAL_TRANSPORT` also accepts `desktop` and `tui`. Validates the bot-token keychain entry at startup. Setup:
+  ```toml
+  [approval.telegram]
+  bot_token_secret = "tg_bot_token"   # name of the keychain entry, not the token value
+  chat_id = 123456789                  # your numeric Telegram chat id
+  timeout_seconds = 120                # optional
+  ```
+  then `mcp-warden secret add tg_bot_token` stores the bot token in the keychain.
 
 ### Changed
 
@@ -147,9 +154,9 @@ All notable changes to this project will be documented in this file. The format 
 ### Added
 
 - **`preset scaffold <template>`** — 8 built-in templates for common APIs (`github-read`, `github-write`, `notion-read`, `stripe-read`, `openai-chat`, `anthropic-messages`, `gitea-read`, `cloudflare-dns`). `--list` discovers, `--dry-run` previews, `--force` overwrites.
-- **`preset from-openapi <source>`** — bootstrap a preset from an OpenAPI 3.0/3.1 JSON/YAML spec (URL or file). Derives `base_url`, `allowed_paths`, `allowed_methods`, and the auth scheme. `--method-filter` and `--tag-filter` narrow the surface. 50 MB spec size cap; file paths must resolve under `$HOME` or `/tmp/`.
-- **`doctor --deep`** — for each HTTP preset, runs a safe read-only probe (GET) and reports per-preset status. Redacts body snippets matching common credential patterns (Bearer, token, password, api_key, …). Skips `prompt`-policy presets unless `--include-prompt`. `--format json` for machine output.
-- **`web [--port N]`** — local-only read-only web UI (binds `127.0.0.1` hardcoded). Routes: dashboard, presets table, preset detail, audit log. CSP / X-Frame-Options / X-Content-Type-Options set on every response. All dynamic values HTML-escaped. Default port 7077.
+- **`preset from-openapi <source>`** — bootstrap a preset from an OpenAPI 3.0/3.1 JSON/YAML spec (URL or file). Derives `base_url`, `allowed_paths`, `allowed_methods`, and the auth scheme (Bearer or API-key header). `--method-filter` and `--tag-filter` narrow the surface. 50 MB spec size cap; file paths must resolve under `$HOME` or `/tmp/`.
+- **`doctor --deep`** — for each HTTP preset, runs a safe read-only probe (GET against the base URL or the first literal allowed path) and reports per-preset status — `ok`, `auth_failed`, `auth_ok_404`, `network_error`, `tls_error` or `skipped` — with elapsed time and a body snippet. Redacts body snippets matching common credential patterns (Bearer, token, password, api_key, …). Skips `prompt`-policy presets unless `--include-prompt`. `--format json` for machine output.
+- **`web [--port N]`** — local-only read-only web UI (binds `127.0.0.1` hardcoded) for browsing presets and the audit log without a TUI. Routes: dashboard, presets table, preset detail, audit log. CSP / X-Frame-Options / X-Content-Type-Options set on every response. All dynamic values HTML-escaped. Default port 7077. Approval over WebSocket is on the roadmap; design notes in `docs/web-ui.md`.
 - **Telegram approval transport** (`approval/telegram.rs`) — new `ApprovalTransport` impl that sends prompts to a Telegram chat with inline Approve / Deny / Approve-for-window buttons. Bot token lives in the OS keychain; foreign-chat callbacks are rejected; `protect_content: true` prevents message forwarding. Wiring into `cli/mcp.rs` (selecting Telegram over Desktop / TUI) is intentionally a small follow-up.
 
 ### Changed
