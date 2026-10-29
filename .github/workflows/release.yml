@@ -2,61 +2,227 @@ name: release
 on:
   push:
     tags: ['v*']
-  # Manual run builds and packages every target without publishing a release.
+  # A manual run builds, packages and checks every target and package
+  # without publishing anything; the result is a workflow artifact.
   workflow_dispatch:
 
 permissions:
-  contents: write
+  contents: read
 
 jobs:
   build:
+    name: build ${{ matrix.target }}
     strategy:
       fail-fast: false
       matrix:
         include:
           - os: macos-latest
-            target: x86_64-apple-darwin
-            name: mcp-warden-x86_64-apple-darwin
-          - os: macos-latest
             target: aarch64-apple-darwin
-            name: mcp-warden-aarch64-apple-darwin
+          - os: macos-latest
+            target: x86_64-apple-darwin
+          # Kept so existing links keep working (Glama builds from the latest
+          # -gnu archive). Packages use the static musl builds below.
           - os: ubuntu-latest
             target: x86_64-unknown-linux-gnu
-            name: mcp-warden-x86_64-unknown-linux-gnu
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            musl: true
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-musl
+            musl: true
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v5
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: ${{ matrix.target }}
-      - name: Linux deps
+      - name: musl toolchain
+        if: matrix.musl
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+      - name: Build
+        shell: bash
+        run: cargo build --release --locked --target ${{ matrix.target }}
+      - name: Check the binary
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          bin="target/$TARGET/release/mcp-warden"
+          [ -f "$bin.exe" ] && bin="$bin.exe"
+          size=$(wc -c <"$bin")
+          echo "$TARGET: $size bytes"
+          # CLAUDE.md: the binary stays under ~20 MB.
+          [ "$size" -lt 20000000 ] || { echo "::error::$size bytes is over the 20 MB budget"; exit 1; }
+          if [ "$TARGET" = x86_64-apple-darwin ]; then
+            echo "cross-compiled on an arm64 runner; not run"
+          else
+            "$bin" --version
+          fi
+          case "$TARGET" in
+          *-linux-musl)
+            file "$bin"
+            file "$bin" | grep -Eq 'statically linked|static-pie linked' || { echo "::error::$TARGET is not static"; exit 1; }
+            ;;
+          esac
+      # The OS keychain on Linux is the kernel keyring, reached through raw
+      # syscalls (linux-keyutils): this checks it works from a static musl
+      # binary as well as from the glibc one.
+      - name: Kernel keyring round trip
         if: runner.os == 'Linux'
-        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
-      - run: cargo build --release --target ${{ matrix.target }} --locked
+        shell: bash
+        env:
+          TARGET: ${{ matrix.target }}
+        run: |
+          bin="target/$TARGET/release/mcp-warden"
+          export MCP_WARDEN_CONFIG_DIR="$RUNNER_TEMP/warden-smoke"
+          mkdir -p "$MCP_WARDEN_CONFIG_DIR"
+          printf 'smoke-value\n' | "$bin" secret add warden-smoke
+          "$bin" secret list | grep -qx warden-smoke
+          "$bin" secret remove warden-smoke
+          if "$bin" secret list | grep -qx warden-smoke; then
+            echo "::error::secret still listed after removal"
+            exit 1
+          fi
+      - uses: actions/upload-artifact@v4
+        with:
+          name: bin-${{ matrix.target }}
+          path: |
+            target/${{ matrix.target }}/release/mcp-warden
+            target/${{ matrix.target }}/release/mcp-warden.exe
+          if-no-files-found: error
+
+  package:
+    needs: build
+    runs-on: ubuntu-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: bin-*
+          path: bins
+      - name: Version
+        id: version
+        run: |
+          version=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "$GITHUB_REF_TYPE" = tag ] && [ "${GITHUB_REF_NAME#v}" != "$version" ]; then
+            echo "::error::tag $GITHUB_REF_NAME does not match Cargo.toml version $version"
+            exit 1
+          fi
+          echo "version=$version" >>"$GITHUB_OUTPUT"
       - name: Package
         env:
-          ASSET_NAME: ${{ matrix.name }}
-          TARGET: ${{ matrix.target }}
-        shell: bash
+          VERSION: ${{ steps.version.outputs.version }}
         run: |
-          mkdir -p dist
-          cp "target/$TARGET/release/mcp-warden" dist/
-          cp README.md LICENSE dist/
-          tar -czf "$ASSET_NAME.tar.gz" -C dist .
-          shasum -a 256 "$ASSET_NAME.tar.gz" > "$ASSET_NAME.tar.gz.sha256"
+          for d in bins/bin-*; do mv "$d" "bins/${d#bins/bin-}"; done
+          packaging/package.sh "$VERSION" bins dist
+          ls -l dist
+          test "$(ls dist/*.tar.gz dist/*.zip | wc -l)" -eq 6
+          test "$(ls dist/*.mcpb | wc -l)" -eq 5
+      - name: Check the scripts
+        run: shellcheck install.sh packaging/package.sh packaging/render.sh packaging/npm/pack.sh
+      - name: Check the MCPB bundles
+        run: |
+          for bundle in dist/*.mcpb; do
+            dir=$(mktemp -d)
+            unzip -q "$bundle" -d "$dir"
+            (cd "$dir" && npx --yes @anthropic-ai/mcpb@2.1.2 validate manifest.json)
+          done
+      - name: Check the install script
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          MCP_WARDEN_DOWNLOAD_URL="file://$PWD/dist" MCP_WARDEN_INSTALL_DIR="$RUNNER_TEMP/bin" sh install.sh
+          "$RUNNER_TEMP/bin/mcp-warden" --version | grep -qx "mcp-warden $VERSION"
+      - name: Render the package manifests
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          packaging/render.sh "$VERSION" dist/SHA256SUMS out/manifests
+          ruby -c out/manifests/homebrew/mcp-warden.rb
+          jq empty out/manifests/scoop/mcp-warden.json out/manifests/server.json
+          for f in out/manifests/winget/manifests/e/ermoluk/mcp-warden/"$VERSION"/*.yaml; do yq e . "$f" >/dev/null; done
+      - name: Check the AUR package
+        run: |
+          docker run --rm -v "$PWD/out/manifests/aur:/pkg:ro" archlinux:latest bash -ec '
+            useradd -m builder
+            cp -r /pkg /home/builder/pkg
+            chown -R builder /home/builder/pkg
+            su builder -c "cd ~/pkg && makepkg --printsrcinfo" | diff -u /pkg/.SRCINFO -'
+      - name: Check the npm packages
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          packaging/npm/pack.sh "$VERSION" dist out/npm
+          test "$(ls out/npm/*.tgz | wc -l)" -eq 6
+          mkdir "$RUNNER_TEMP/npx" && cd "$RUNNER_TEMP/npx" && npm init -y >/dev/null
+          npm install --no-audit --no-fund \
+            "$GITHUB_WORKSPACE/out/npm/mcp-warden-linux-x64-$VERSION.tgz" \
+            "$GITHUB_WORKSPACE/out/npm/mcp-warden-cli-$VERSION.tgz"
+          npx --no-install mcp-warden --version | grep -qx "mcp-warden $VERSION"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ steps.version.outputs.version }}
+          path: |
+            dist/
+            out/
+          if-no-files-found: error
+
+  publish:
+    needs: package
+    if: github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      id-token: write
+      attestations: write
+    env:
+      VERSION: ${{ needs.package.outputs.version }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: actions/download-artifact@v4
+        with:
+          name: release-${{ needs.package.outputs.version }}
+          path: release
+      - uses: actions/attest-build-provenance@v4
+        with:
+          subject-path: |
+            release/dist/*.tar.gz
+            release/dist/*.zip
+            release/dist/*.mcpb
+            release/dist/install.sh
+            release/dist/install.ps1
       - name: Release notes from CHANGELOG
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: bash
         run: |
-          ver="${GITHUB_REF_NAME#v}"
-          awk -v v="$ver" '$0 ~ "^## \\[" v "\\]" {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md > RELEASE_NOTES.md
+          awk -v v="$VERSION" '$0 ~ "^## \\[" v "\\]" {f=1; next} /^## \[/ {f=0} f' CHANGELOG.md >RELEASE_NOTES.md
           test -s RELEASE_NOTES.md
       - uses: softprops/action-gh-release@v2
-        if: startsWith(github.ref, 'refs/tags/')
         with:
           body_path: RELEASE_NOTES.md
-          files: |
-            ${{ matrix.name }}.tar.gz
-            ${{ matrix.name }}.tar.gz.sha256
+          files: release/dist/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      - name: Update the Homebrew tap
+        env:
+          TAP_TOKEN: ${{ secrets.HOMEBREW_TAP_TOKEN }}
+        run: |
+          if [ -z "$TAP_TOKEN" ]; then
+            echo "::notice::HOMEBREW_TAP_TOKEN is not set; update ermoluk/homebrew-tap by hand"
+            exit 0
+          fi
+          git clone --depth 1 "https://x-access-token:${TAP_TOKEN}@github.com/ermoluk/homebrew-tap.git" tap
+          mkdir -p tap/Formula
+          cp release/out/manifests/homebrew/mcp-warden.rb tap/Formula/mcp-warden.rb
+          cd tap
+          git config user.name ermoluk
+          git config user.email 88516629+ermoluk@users.noreply.github.com
+          git add Formula/mcp-warden.rb
+          if git diff --cached --quiet; then
+            echo "formula unchanged"
+            exit 0
+          fi
+          git commit -m "mcp-warden $VERSION"
+          git push origin HEAD
