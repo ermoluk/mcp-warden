@@ -42,6 +42,50 @@ pub enum AuditDecision {
     Failed,
 }
 
+impl AuditDecision {
+    /// Every decision, in declaration order.
+    pub const ALL: [AuditDecision; 7] = [
+        AuditDecision::Approved,
+        AuditDecision::Denied,
+        AuditDecision::Auto,
+        AuditDecision::Timeout,
+        AuditDecision::Windowed,
+        AuditDecision::Refused,
+        AuditDecision::Failed,
+    ];
+
+    /// The name stored in the log and typed by users: `approved`,
+    /// `windowed`, … (the same as its serde form).
+    pub fn as_str(self) -> &'static str {
+        match self {
+            AuditDecision::Approved => "approved",
+            AuditDecision::Denied => "denied",
+            AuditDecision::Auto => "auto",
+            AuditDecision::Timeout => "timeout",
+            AuditDecision::Windowed => "windowed",
+            AuditDecision::Refused => "refused",
+            AuditDecision::Failed => "failed",
+        }
+    }
+
+    /// The decision named `name`, if any.
+    pub fn from_name(name: &str) -> Option<Self> {
+        Self::ALL.into_iter().find(|d| d.as_str() == name)
+    }
+}
+
+/// Which events `AuditSink::query` returns. Empty or `None` fields don't
+/// filter; the fields that are set must all match.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AuditFilter {
+    /// Only events with one of these decisions.
+    pub decisions: Vec<AuditDecision>,
+    /// Only events recorded at or after this time.
+    pub since: Option<DateTime<Utc>>,
+    /// At most this many events, the newest.
+    pub limit: Option<usize>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "lowercase")]
 pub enum AuditOutcome {
@@ -58,6 +102,14 @@ pub trait AuditSink: Send + Sync {
     fn record_outcome(&self, event_id: i64, outcome: AuditOutcome) -> Result<()>;
     fn recent(&self, limit: usize) -> Result<Vec<AuditEvent>>;
     fn since(&self, ts: DateTime<Utc>) -> Result<Vec<AuditEvent>>;
+    /// Events matching `filter`, newest first. Read-only. The filter belongs
+    /// in the store's own query; a sink that can't filter there returns an
+    /// error instead of fetching everything and filtering afterwards.
+    fn query(&self, _filter: &AuditFilter) -> Result<Vec<AuditEvent>> {
+        Err(crate::error::WardenError::Audit(
+            "this audit sink does not support filtered queries".into(),
+        ))
+    }
     /// Tag events recorded from now on with this session id. Sinks that
     /// don't store sessions may ignore it.
     fn set_session(&self, _id: &str) {}
@@ -245,6 +297,105 @@ mod tests {
         let summary = redact(&format!("Authorization: Bearer {secret}"), &[secret]);
         assert!(!summary.contains("supersecret"));
         assert!(summary.contains("***"));
+    }
+
+    /// One event per decision, in `AuditDecision::ALL` order, then one
+    /// pending event without a decision.
+    fn seeded() -> (tempfile::TempDir, sqlite_sink::LocalSqlite) {
+        let dir = tempdir().unwrap();
+        let sink = sqlite_sink::LocalSqlite::open(&dir.path().join("audit.db")).unwrap();
+        for d in AuditDecision::ALL {
+            let id = sink.record_pending("p", "proxy_http", d.as_str()).unwrap();
+            sink.record_decision(id, d).unwrap();
+        }
+        sink.record_pending("p", "proxy_http", "pending").unwrap();
+        (dir, sink)
+    }
+
+    #[test]
+    fn decisions_round_trip_through_their_names() {
+        for d in AuditDecision::ALL {
+            assert_eq!(AuditDecision::from_name(d.as_str()), Some(d));
+            assert_eq!(
+                serde_json::to_string(&d).unwrap(),
+                format!("\"{}\"", d.as_str())
+            );
+        }
+        assert_eq!(AuditDecision::from_name("nope"), None);
+    }
+
+    #[test]
+    fn query_filters_by_decision() {
+        let (_dir, sink) = seeded();
+        let filter = AuditFilter {
+            decisions: vec![AuditDecision::Refused, AuditDecision::Failed],
+            ..Default::default()
+        };
+        let got: Vec<_> = sink.query(&filter).unwrap();
+        let summaries: Vec<_> = got.iter().map(|e| e.summary.as_str()).collect();
+        assert_eq!(summaries, ["failed", "refused"], "newest first");
+
+        let all = sink.query(&AuditFilter::default()).unwrap();
+        assert_eq!(
+            all.len(),
+            AuditDecision::ALL.len() + 1,
+            "no filter, no limit"
+        );
+    }
+
+    #[test]
+    fn query_combines_decision_since_and_limit() {
+        let (_dir, sink) = seeded();
+        let filter = AuditFilter {
+            decisions: AuditDecision::ALL.to_vec(),
+            limit: Some(2),
+            ..Default::default()
+        };
+        let got = sink.query(&filter).unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].decision, Some(AuditDecision::Failed));
+
+        let later = AuditFilter {
+            since: Some(Utc::now() + chrono::Duration::hours(1)),
+            ..Default::default()
+        };
+        assert!(sink.query(&later).unwrap().is_empty());
+    }
+
+    #[test]
+    fn query_treats_decision_values_as_data() {
+        // The filter is bound as parameters, never spliced into the SQL.
+        let (_dir, sink) = seeded();
+        let id = sink.record_pending("p", "proxy_http", "x").unwrap();
+        sink.record_decision(id, AuditDecision::Denied).unwrap();
+        let filter = AuditFilter {
+            decisions: vec![AuditDecision::Denied],
+            ..Default::default()
+        };
+        assert_eq!(sink.query(&filter).unwrap().len(), 2);
+    }
+
+    #[test]
+    fn sinks_without_filtering_refuse_rather_than_filter_in_memory() {
+        struct Plain;
+        impl AuditSink for Plain {
+            fn record_pending(&self, _: &str, _: &str, _: &str) -> Result<i64> {
+                Ok(1)
+            }
+            fn record_decision(&self, _: i64, _: AuditDecision) -> Result<()> {
+                Ok(())
+            }
+            fn record_outcome(&self, _: i64, _: AuditOutcome) -> Result<()> {
+                Ok(())
+            }
+            fn recent(&self, _: usize) -> Result<Vec<AuditEvent>> {
+                Ok(vec![])
+            }
+            fn since(&self, _: DateTime<Utc>) -> Result<Vec<AuditEvent>> {
+                Ok(vec![])
+            }
+        }
+        assert!(Plain.query(&AuditFilter::default()).is_err());
     }
 
     // The append-only invariant (spec §9.7) is enforced by the trait

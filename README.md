@@ -91,7 +91,7 @@ mcp-warden run github               # what the rewired entry runs: the server, w
 | `mcp-warden preset scaffold <template>` *(v0.3.0)* | Generate a preset from a built-in template (`--list` to discover) |
 | `mcp-warden preset from-openapi <src>` *(v0.3.0)* | Bootstrap a preset from an OpenAPI 3.x spec (URL or file) |
 | `mcp-warden approval <preset> <policy> [--window N]` | Set approval policy; `--window N` (sec) enables time-boxed approvals for `prompt` |
-| `mcp-warden audit [--last N \| --since T]` | Read-only view of the audit log (append-only by design), with what the agent asked for — including refused calls — and which MCP client and session made each call |
+| `mcp-warden audit [--last N \| --since T] [--decision D]…` | Read-only view of the audit log (append-only by design), with what the agent asked for — including refused calls — and which MCP client and session made each call. `--decision refused --decision failed` shows only those decisions |
 | `mcp-warden doctor [--deep]` *(v0.3.0 for `--deep`)* | Diagnostic summary; `--deep` runs safe read-only HTTP probes per preset |
 | `mcp-warden web [--port N]` *(v0.3.0)*     | Local read-only web UI (binds 127.0.0.1 only)            |
 | `mcp-warden mcp`                           | Run the MCP server over stdio (consumed by the AI agent) |

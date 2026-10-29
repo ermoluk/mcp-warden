@@ -65,7 +65,7 @@ third choice: **Approve for 10 min: every proxy_http call linear-read allows
 runs without asking until 14:32** (the time the window ends, fixed when the
 prompt appears). Subsequent `proxy_http` calls on `linear-read` inside the
 window proceed without re-prompting and are recorded with
-`decision = "windowed"` in the audit log (`mcp-warden audit`).
+`decision = "windowed"` — `mcp-warden audit --decision windowed` lists them.
 Restart `mcp-warden mcp` to clear all active windows.
 
 Set or change the cap from the CLI:

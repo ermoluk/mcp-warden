@@ -13,6 +13,7 @@ All notable changes to this project will be documented in this file. The format 
 ### Added
 
 - **Hostile-input corpus in CI.** `tests/corpus/paths.txt` and `tests/corpus/commands.txt` list every path and command an allow-list bypass has used — the encodings from 0.4.1, 0.4.3 and 0.5.2, this release's `%uXXXX` and compatibility forms, shell syntax and over-limit inputs — one per line with what it tests and the release that first refused it. A test runs each one through the policy check the server and `preset test` share, with presets that allow every path and every command, and fails if any is allowed. New bypasses go there.
+- **`mcp-warden audit --decision <approved|denied|auto|timeout|windowed|refused|failed>`**, repeatable, shows only events with those decisions — `--decision refused --decision failed` for what was turned away. `mcp-warden web` has the same filter as checkboxes on the audit page (`/audit?decision=refused&decision=failed`). Both filter in SQL. `mcp-warden-core` gains `AuditFilter`, `AuditSink::query` (read-only; its default implementation returns an error rather than filtering in memory) and `AuditDecision::{ALL, as_str, from_name}`. Thanks to claudio-rootedlogic for the idea.
 
 ### Changed
 
