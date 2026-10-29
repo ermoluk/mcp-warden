@@ -6,17 +6,42 @@
 use chrono::{DateTime, SecondsFormat, Utc};
 use mcp_warden_core::config::{ApprovalPolicy, Preset, PresetType};
 use mcp_warden_core::error::{Result, WardenError};
+use serde_json::Value;
+use std::collections::BTreeMap;
 
 /// A call as the agent would make it.
 #[derive(Debug, Clone, Copy)]
 pub enum Request<'a> {
-    Http { method: &'a str, path: &'a str },
-    Ssh { command: &'a str },
-    Sftp { remote: &'a str, local: &'a str },
-    Db { query: &'a str, params: usize },
+    Http {
+        method: &'a str,
+        path: &'a str,
+        query: Option<&'a BTreeMap<String, String>>,
+        body: Option<&'a Value>,
+    },
+    Ssh {
+        command: &'a str,
+    },
+    Sftp {
+        remote: &'a str,
+        local: &'a str,
+    },
+    Db {
+        query: &'a str,
+        params: &'a [Value],
+    },
 }
 
-impl Request<'_> {
+impl<'a> Request<'a> {
+    /// A `proxy_http` call without query parameters or body.
+    pub fn http(method: &'a str, path: &'a str) -> Self {
+        Request::Http {
+            method,
+            path,
+            query: None,
+            body: None,
+        }
+    }
+
     /// The MCP tool that makes this call.
     pub fn tool(&self) -> &'static str {
         match self {
@@ -48,9 +73,11 @@ impl Request<'_> {
     }
 }
 
-/// Check a request against the preset's kind and allow-lists. Runs before
-/// any credential is touched (invariant 3).
+/// Check a request against the input limits, the preset's kind and its
+/// allow-lists, in that order. Runs before any credential is touched
+/// (invariant 3).
 pub fn check_request(preset: &Preset, req: &Request) -> Result<()> {
+    super::limits::check(req)?;
     if !req.fits(preset.preset_type) {
         return Err(WardenError::Validation(format!(
             "preset '{}' is not an {} preset; {} needs one",
@@ -60,12 +87,14 @@ pub fn check_request(preset: &Preset, req: &Request) -> Result<()> {
         )));
     }
     match *req {
-        Request::Http { method, path } => {
+        Request::Http { method, path, .. } => {
             super::http::validated_url(preset, &method.to_uppercase(), path).map(drop)
         }
         Request::Ssh { command } => super::ssh::validate_command(preset, command),
         Request::Sftp { remote, local } => super::sftp::validate_transfer(preset, remote, local),
-        Request::Db { query, params } => super::db::find_query(preset, query, params).map(drop),
+        Request::Db { query, params } => {
+            super::db::find_query(preset, query, params.len()).map(drop)
+        }
     }
 }
 
@@ -185,10 +214,7 @@ mod tests {
 
     #[test]
     fn http_allowed_path_and_method() {
-        let req = Request::Http {
-            method: "get",
-            path: "/repos/o/r",
-        };
+        let req = Request::http("get", "/repos/o/r");
         assert!(check_request(&http(ApprovalPolicy::Auto), &req).is_ok());
     }
 
@@ -202,7 +228,7 @@ mod tests {
             ("GET", "/repos/o/x%252Fcollaborators"),
             ("GET", "/repos/o/../admin"),
         ] {
-            let req = Request::Http { method, path };
+            let req = Request::http(method, path);
             assert!(check_request(&p, &req).is_err(), "{method} {path}");
         }
     }
@@ -244,33 +270,28 @@ mod tests {
     #[test]
     fn db_checks_query_name_and_param_count() {
         let p = db();
+        let one = [Value::from(7)];
         let ok = Request::Db {
             query: "user_by_id",
-            params: 1,
+            params: &one,
         };
         assert!(check_request(&p, &ok).is_ok());
-        for (query, params) in [("drop_all", 0), ("user_by_id", 2)] {
+        let two = [Value::from(7), Value::from(8)];
+        for (query, params) in [("drop_all", &[][..]), ("user_by_id", &two[..])] {
             assert!(check_request(&p, &Request::Db { query, params }).is_err());
         }
     }
 
     #[test]
     fn wrong_preset_kind_is_refused() {
-        let err = check_request(
-            &ssh(),
-            &Request::Http {
-                method: "GET",
-                path: "/",
-            },
-        )
-        .unwrap_err();
+        let err = check_request(&ssh(), &Request::http("GET", "/")).unwrap_err();
         assert!(err.to_string().contains("not an http preset"), "{err}");
         assert!(
             check_request(
                 &http(ApprovalPolicy::Auto),
                 &Request::Db {
                     query: "q",
-                    params: 0
+                    params: &[]
                 }
             )
             .is_err()
@@ -279,10 +300,7 @@ mod tests {
 
     #[test]
     fn simulate_reports_policy_after_the_request_passes() {
-        let req = Request::Http {
-            method: "GET",
-            path: "/repos/o/r",
-        };
+        let req = Request::http("GET", "/repos/o/r");
         assert_eq!(
             simulate(&http(ApprovalPolicy::Auto), &req, Utc::now()),
             Verdict::Allowed {
@@ -313,10 +331,7 @@ mod tests {
         let err = check_expiry(&p, now).unwrap_err().to_string();
         assert!(err.contains("access to preset 'gh' expired"), "{err}");
         assert!(err.contains("preset grant gh"), "{err}");
-        let req = Request::Http {
-            method: "DELETE",
-            path: "/nope",
-        };
+        let req = Request::http("DELETE", "/nope");
         match simulate(&p, &req, now) {
             Verdict::Refused(why) => assert!(why.contains("expired"), "{why}"),
             other => panic!("{other:?}"),
@@ -331,10 +346,7 @@ mod tests {
 
     #[test]
     fn simulate_reports_validation_before_policy() {
-        let req = Request::Http {
-            method: "DELETE",
-            path: "/repos/o/r",
-        };
+        let req = Request::http("DELETE", "/repos/o/r");
         match simulate(&http(ApprovalPolicy::Deny), &req, Utc::now()) {
             Verdict::Refused(why) => assert!(why.contains("DELETE"), "{why}"),
             other => panic!("{other:?}"),

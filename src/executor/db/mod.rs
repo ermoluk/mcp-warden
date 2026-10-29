@@ -40,7 +40,7 @@ pub async fn run(
     );
     let request = super::policy::Request::Db {
         query: &query_name,
-        params: params.len(),
+        params: &params,
     };
     let nq = super::policy::check_request(preset, &request)
         .and_then(|()| find_query(preset, &query_name, params.len()))

@@ -11,6 +11,7 @@ pub mod credential_echo;
 pub mod db;
 pub mod http;
 pub mod known_hosts;
+pub mod limits;
 pub mod lock;
 pub mod policy;
 pub mod response;
@@ -817,6 +818,36 @@ mod tests {
             "db postgres → drop_users (0 param)",
             &err,
         );
+    }
+
+    #[tokio::test]
+    async fn oversized_input_is_refused_and_audited_whatever_the_allow_list() {
+        // Allow-lists that permit everything: only the input limits stand
+        // between these calls and the approval prompt.
+        let approval = never_called();
+        let (exec, _dir) = exec_with(approval.clone(), None);
+        let mut ssh = ssh_preset();
+        ssh.allowed_commands = vec![".*".into()];
+        let long = "a".repeat(limits::MAX_SSH_COMMAND_BYTES + 1);
+        let err = ssh::run(&exec, &ssh, long).await.unwrap_err();
+        assert!(err.to_string().contains("ssh_exec command"), "{err}");
+        let recent = exec.audit.recent(1).unwrap();
+        assert_eq!(recent[0].decision, Some(AuditDecision::Refused));
+
+        let req = http::HttpRequest {
+            preset_name: "p".into(),
+            path: format!("/{}", "a".repeat(limits::MAX_HTTP_PATH_BYTES)),
+            method: "GET".into(),
+            body: None,
+            query: None,
+        };
+        let mut open = preset(ApprovalPolicy::Prompt);
+        open.allowed_paths = vec![];
+        let err = http::execute(&exec, &open, req).await.unwrap_err();
+        assert!(err.to_string().contains("proxy_http path"), "{err}");
+        let recent = exec.audit.recent(1).unwrap();
+        assert_eq!(recent[0].decision, Some(AuditDecision::Refused));
+        assert_eq!(approval.calls.load(Ordering::SeqCst), 0);
     }
 
     #[tokio::test]

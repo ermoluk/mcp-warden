@@ -386,7 +386,7 @@ mod tests {
     fn allows(name: &str, method: &str, path: &str) -> bool {
         let t = find(name).unwrap();
         let p = (t.build)(t.name, t.default_secret_name);
-        check_request(&p, &Request::Http { method, path }).is_ok()
+        check_request(&p, &Request::http(method, path)).is_ok()
     }
 
     #[test]

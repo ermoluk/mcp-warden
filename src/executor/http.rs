@@ -191,6 +191,8 @@ pub async fn execute(
     let request = Request::Http {
         method: &method_upper,
         path: &req.path,
+        query: req.query.as_ref(),
+        body: req.body.as_ref(),
     };
     let mut url = check_request(preset, &request)
         .and_then(|()| validated_url(preset, &method_upper, &req.path))
