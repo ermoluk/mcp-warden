@@ -130,19 +130,11 @@ Then, in this order:
    mcp-publisher login github   # if the stored token has expired
    mcp-publisher publish
    ```
-10. **Smithery.** Smithery takes local stdio servers as MCPB bundles. With Node 20+:
 
-    ```bash
-    npm install -g smithery@latest
-    smithery auth login
-    gh release download vVERSION -p 'mcp-warden-aarch64-apple-darwin.mcpb' -D /tmp/mcp-warden-VERSION
-    smithery mcp publish /tmp/mcp-warden-VERSION/mcp-warden-aarch64-apple-darwin.mcpb -n ermoluk/mcp-warden
-    ```
-
-    Smithery's docs (October 2026) don't say how bundles for several platforms
-    map to one listing. Publish the macOS arm64 bundle first, check how the
-    listing offers it, and use their dashboard or support to attach the others.
-11. **Check what users get:**
+   PulseMCP picks servers up from the registry. Smithery is not a channel: it
+   stopped accepting new servers in October 2026, and its API and CLI end on
+   31 October 2026.
+10. **Check what users get:**
     - `cargo binstall mcp-warden`;
     - `npx -y @mcp-warden/cli --version`;
     - `curl -fsSL https://github.com/ermoluk/mcp-warden/releases/latest/download/install.sh | sh`;
