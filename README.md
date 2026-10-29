@@ -150,6 +150,7 @@ Compared with Keyward 0.1.1, Wundervault MCP server 2.0.1 and Janee 0.16.0, from
 - Audit log is append-only — the trait surface itself contains no `delete` / `clear` method.
 - `mcp-warden lock` stops every running server at its next call; a server that has seen the lock stays locked until it restarts, and `unlock` needs a human to approve it.
 - Presets can cap and trim what `proxy_http` hands the agent (`max_response_bytes`, `response_fields`); a credential the upstream echoes back is always scrubbed.
+- `ssh_exec` refuses shell syntax whatever the preset's patterns allow, because sshd runs every command through the remote login shell. For a second allow-list on the server — a dedicated account, `command=` / `ForceCommand` and a gate script — see [`docs/ssh-hardening.md`](docs/ssh-hardening.md).
 - Wrapped servers (`mcp-warden run`) only get keys stored for them (`server/<name>/<VAR>`), never a preset's secret, and their command is fixed in the config. The key is still visible to the process it is handed to.
 - Stdout is the MCP protocol channel; all logs go to stderr.
 

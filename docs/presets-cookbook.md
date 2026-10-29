@@ -106,6 +106,11 @@ redirections never reach the host, so don't write patterns that need them.
 Still keep each argument tight (`[a-z0-9_-]+`, `\d+`) — a loose `.*` lets
 the agent add options of its own.
 
+On the server, give the key its own account and a second allow-list — a
+forced command in `authorized_keys` or `ForceCommand` — so a pattern that is
+too broad or a leaked key still can't run anything else. Step by step, with a
+working gate script: [`docs/ssh-hardening.md`](ssh-hardening.md).
+
 ## SSH + SFTP — Log fetcher
 
 ```toml

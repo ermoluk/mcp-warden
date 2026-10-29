@@ -121,7 +121,7 @@ The SQLite file is `0600`-permissioned and rejects symlinks at open time, but ro
 
 Anchoring alone left shell syntax to the pattern: `git checkout \S+` also matched `git checkout $(curl …|sh)`, which the remote shell expands. Since v0.5.2 every command is checked before its pattern (invariant 5): words are separated by single spaces and may contain only letters, digits and `- _ . / : = @ , + %`, and none may start with `=` (zsh's `=cmd`). `$`, backticks, `;`, `|`, `&`, `<`, `>`, parentheses, quotes, `\`, globs, `{}`, `~`, `!`, `#`, newlines and other control characters are refused whatever the pattern says, so the shell runs exactly the words the allow-list matched. Verified by `tests/corpus/commands.txt`, every line of which CI runs against a preset with `allowed_commands = [".*"]`.
 
-What remains is the pattern's own scope. **A careless regex** like `git pull.*` still allows extra options made of permitted characters, such as `git pull --upload-pack=/tmp/x`. Preset authors must terminate or constrain patterns explicitly — `^docker compose (pull|up -d|ps)$`, `[a-z0-9._-]+` for an argument.
+What remains is the pattern's own scope. **A careless regex** like `git pull.*` still allows extra options made of permitted characters, such as `git pull --upload-pack=/tmp/x`. Preset authors must terminate or constrain patterns explicitly — `^docker compose (pull|up -d|ps)$`, `[a-z0-9._-]+` for an argument. A second allow-list on the server — a dedicated account whose key is pinned to a gate script with `command=` / `ForceCommand` — holds even when a pattern is too broad or the key leaks: [`docs/ssh-hardening.md`](ssh-hardening.md).
 
 ### R5. SFTP local path leakage (v0.2.0)
 
