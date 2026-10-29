@@ -7,7 +7,8 @@ use std::path::Path;
 use std::sync::Mutex;
 
 /// The columns `row_to_event` reads, in its order.
-const COLUMNS: &str = "id, created_at, preset, action, summary, decision, outcome_kind, outcome_data, client, session";
+const COLUMNS: &str = "id, created_at, preset, action, summary, decision, outcome_kind, \
+                       outcome_data, client, session, via_event";
 
 pub struct LocalSqlite {
     conn: Mutex<Connection>,
@@ -38,7 +39,8 @@ impl LocalSqlite {
                 outcome_kind TEXT,
                 outcome_data TEXT,
                 client TEXT,
-                session TEXT
+                session TEXT,
+                via_event INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);",
         )
@@ -56,8 +58,8 @@ impl LocalSqlite {
     }
 }
 
-/// Databases created before sessions were recorded lack the `client` and
-/// `session` columns. Adding a column keeps every existing row (the log
+/// Older databases lack columns added since: `client` and `session` (0.5.0),
+/// `via_event` (0.5.3). Adding a column keeps every existing row (the log
 /// stays append-only, invariant 7).
 fn add_missing_columns(conn: &Connection) -> Result<()> {
     let audit = |e: rusqlite::Error| WardenError::Audit(e.to_string());
@@ -67,9 +69,13 @@ fn add_missing_columns(conn: &Connection) -> Result<()> {
         .map_err(audit)?
         .collect::<std::result::Result<_, _>>()
         .map_err(audit)?;
-    for column in ["client", "session"] {
+    for (column, kind) in [
+        ("client", "TEXT"),
+        ("session", "TEXT"),
+        ("via_event", "INTEGER"),
+    ] {
         if !columns.iter().any(|c| c == column) {
-            conn.execute_batch(&format!("ALTER TABLE events ADD COLUMN {column} TEXT"))
+            conn.execute_batch(&format!("ALTER TABLE events ADD COLUMN {column} {kind}"))
                 .map_err(audit)?;
         }
     }
@@ -158,6 +164,10 @@ impl AuditSink for LocalSqlite {
             clauses.push("created_at >= ?".into());
             args.push(Value::Text(ts.to_rfc3339()));
         }
+        if let Some(id) = filter.window {
+            clauses.push("(id = ? OR via_event = ?)".into());
+            args.extend([Value::Integer(id), Value::Integer(id)]);
+        }
         let mut sql = format!("SELECT {COLUMNS} FROM events");
         if !clauses.is_empty() {
             sql.push_str(" WHERE ");
@@ -177,6 +187,18 @@ impl AuditSink for LocalSqlite {
             .map_err(|e| WardenError::Audit(e.to_string()))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| WardenError::Audit(e.to_string()))
+    }
+
+    fn record_windowed(&self, id: i64, via_event_id: i64) -> Result<()> {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE events SET decision = ?1, via_event = ?2 WHERE id = ?3",
+                params![AuditDecision::Windowed.as_str(), via_event_id, id],
+            )
+            .map_err(|e| WardenError::Audit(e.to_string()))?;
+        Ok(())
     }
 
     fn set_session(&self, id: &str) {
@@ -213,5 +235,6 @@ fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<AuditEvent> {
         },
         client: row.get(8)?,
         session: row.get(9)?,
+        via_event: row.get(10)?,
     })
 }

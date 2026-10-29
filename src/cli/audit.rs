@@ -23,6 +23,10 @@ pub struct AuditArgs {
     /// Show only events with this decision. Repeat to show several.
     #[arg(long = "decision", value_enum, value_name = "DECISION")]
     pub decisions: Vec<Decision>,
+    /// Show approval #N and every call that ran inside the window it opened,
+    /// oldest first.
+    #[arg(long, value_name = "N", conflicts_with_all = ["since", "last"])]
+    pub window: Option<i64>,
 }
 
 /// `AuditDecision`, as typed on the command line.
@@ -59,9 +63,12 @@ pub fn run(args: AuditArgs, db_path: &Path) -> Result<()> {
     let sink = LocalSqlite::open(db_path)?;
     let mut filter = AuditFilter {
         decisions: args.decisions.into_iter().map(Into::into).collect(),
+        window: args.window,
         ..Default::default()
     };
-    if let Some(s) = args.since {
+    if args.window.is_some() {
+        // The whole window, however long.
+    } else if let Some(s) = args.since {
         let ts = chrono::DateTime::parse_from_rfc3339(&s)
             .map_err(|e| WardenError::Validation(e.to_string()))?
             .with_timezone(&chrono::Utc);
@@ -69,12 +76,24 @@ pub fn run(args: AuditArgs, db_path: &Path) -> Result<()> {
     } else {
         filter.limit = Some(args.last);
     }
-    let events = sink.query(&filter)?;
+    let mut events = sink.query(&filter)?;
+    if let Some(n) = args.window {
+        if !events.iter().any(|e| e.id == n) {
+            println!("(no event #{n})");
+            return Ok(());
+        }
+        // The approval, then the calls it let through, in order.
+        events.reverse();
+    }
     if events.is_empty() {
         println!("(no events)");
         return Ok(());
     }
     for e in events {
+        let via = e
+            .via_event
+            .map(|n| format!(" via approval #{n}"))
+            .unwrap_or_default();
         let outcome = e.outcome.map(|o| match o {
             AuditOutcome::Err { message } => AuditOutcome::Err {
                 message: for_terminal(&message, MESSAGE_WIDTH),
@@ -88,7 +107,7 @@ pub fn run(args: AuditArgs, db_path: &Path) -> Result<()> {
             (None, None) => String::new(),
         };
         println!(
-            "{} [{}] {:24} {} {} → {:?} {:?}{who}",
+            "{} [{}] {:24} {} {} → {:?}{via} {:?}{who}",
             e.created_at.to_rfc3339(),
             e.id,
             for_terminal(&e.preset, PRESET_WIDTH),

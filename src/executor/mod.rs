@@ -35,6 +35,13 @@ pub trait Clock: Send + Sync {
     }
 }
 
+/// An active approval window: when it ends, and the approval that opened it.
+#[derive(Debug, Clone, Copy)]
+struct OpenWindow {
+    expires: Instant,
+    approval_event: i64,
+}
+
 pub struct SystemClock;
 impl Clock for SystemClock {
     fn now(&self) -> Instant {
@@ -50,7 +57,9 @@ impl Clock for SystemClock {
 /// returns either an authorised event-id or a structured error.
 ///
 /// `approval_windows` is an in-process cache of active time-boxed approvals.
-/// Each entry maps `(preset_name, action)` to its expiry instant. The cache
+/// Each entry maps `(preset_name, action)` to its expiry instant and the id
+/// of the `approved` audit event that opened it, which every call it lets
+/// through records as `via_event`. The cache
 /// is intentionally **never** persisted: a process restart clears every
 /// window, by design (spec: time-boxed approvals).
 pub struct ActionExecutor {
@@ -59,7 +68,7 @@ pub struct ActionExecutor {
     pub approval_fallback: Option<Arc<dyn ApprovalTransport>>,
     pub audit: Arc<dyn AuditSink>,
     pub clock: Arc<dyn Clock>,
-    approval_windows: tokio::sync::Mutex<HashMap<(String, String), Instant>>,
+    approval_windows: tokio::sync::Mutex<HashMap<(String, String), OpenWindow>>,
     /// The kill switch (`mcp-warden lock`), checked before every call.
     lock: lock::LockState,
 }
@@ -125,10 +134,9 @@ impl ActionExecutor {
         // Active window short-circuit (only for non-forced prompt-policy calls).
         if !force_prompt
             && preset.approval == ApprovalPolicy::Prompt
-            && self.window_is_active(&preset.name, action).await
+            && let Some(approval_event) = self.active_window(&preset.name, action).await
         {
-            self.audit
-                .record_decision(event_id, AuditDecision::Windowed)?;
+            self.audit.record_windowed(event_id, approval_event)?;
             return Ok(event_id);
         }
 
@@ -157,7 +165,8 @@ impl ActionExecutor {
             && matches!(decision, ApprovalDecision::ApprovedForWindow)
             && let Some(ends) = window_ends
         {
-            self.register_window(&preset.name, action, ends).await;
+            self.register_window(&preset.name, action, ends, event_id)
+                .await;
         }
 
         let audit_label = if !force_prompt && preset.approval == ApprovalPolicy::Auto {
@@ -270,22 +279,33 @@ impl ActionExecutor {
         }
     }
 
-    /// Check whether a non-expired window exists for `(preset, action)`.
-    /// Opportunistically GCs expired entries while the lock is held.
-    async fn window_is_active(&self, preset: &str, action: &str) -> bool {
+    /// The approval event behind a non-expired window for `(preset, action)`,
+    /// if there is one. Opportunistically GCs expired entries while the lock
+    /// is held.
+    async fn active_window(&self, preset: &str, action: &str) -> Option<i64> {
         let now = self.clock.now();
         let mut guard = self.approval_windows.lock().await;
-        guard.retain(|_, expires| *expires > now);
+        guard.retain(|_, w| w.expires > now);
         guard
             .get(&(preset.to_string(), action.to_string()))
-            .is_some_and(|expires| *expires > now)
+            .filter(|w| w.expires > now)
+            .map(|w| w.approval_event)
     }
 
-    async fn register_window(&self, preset: &str, action: &str, expires: Instant) {
-        self.approval_windows
-            .lock()
-            .await
-            .insert((preset.to_string(), action.to_string()), expires);
+    async fn register_window(
+        &self,
+        preset: &str,
+        action: &str,
+        expires: Instant,
+        approval_event: i64,
+    ) {
+        self.approval_windows.lock().await.insert(
+            (preset.to_string(), action.to_string()),
+            OpenWindow {
+                expires,
+                approval_event,
+            },
+        );
     }
 
     /// Ask the human, and say when an approval window chosen in that prompt
@@ -602,6 +622,11 @@ mod tests {
         // Events come back newest-first.
         assert_eq!(recent[0].decision, Some(AuditDecision::Windowed));
         assert_eq!(recent[1].decision, Some(AuditDecision::Approved));
+        assert_eq!(
+            recent[0].via_event,
+            Some(recent[1].id),
+            "a windowed call names the approval that opened its window"
+        );
     }
 
     #[tokio::test]
@@ -981,7 +1006,7 @@ mod tests {
         let exec = exec.with_lock(lock_path.clone());
         let p = preset_with_window(Some(600));
         exec.authorise(&p, "proxy_http", "x", false).await.unwrap();
-        assert!(exec.window_is_active(&p.name, "proxy_http").await);
+        assert!(exec.active_window(&p.name, "proxy_http").await.is_some());
 
         exec.check_lock(&p.name, "proxy_http", "GET /x")
             .await
@@ -999,7 +1024,7 @@ mod tests {
             .await
             .unwrap_err();
         assert!(matches!(err, WardenError::Locked));
-        assert!(!exec.window_is_active(&p.name, "proxy_http").await);
+        assert!(exec.active_window(&p.name, "proxy_http").await.is_none());
         let e = &exec.audit.recent(1).unwrap()[0];
         assert_eq!(e.decision, Some(AuditDecision::Refused));
         assert_eq!(e.summary, "GET /x");

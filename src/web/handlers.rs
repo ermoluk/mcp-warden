@@ -481,7 +481,10 @@ pub async fn audit_log(State(state): State<Arc<AppState>>, RawQuery(raw): RawQue
             // values — credentials are read only after authorisation — but
             // they are untrusted, so they are HTML-escaped like everything else.
             summary = esc(&e.summary),
-            decision = esc(decision_label(e.decision)),
+            decision = esc(&match e.via_event {
+                Some(n) => format!("{} via #{n}", decision_label(e.decision)),
+                None => decision_label(e.decision).to_string(),
+            }),
             outcome = outcome_cell(&e.outcome),
             // Client name/version come from the MCP client: escaped too.
             client = esc(&match (&e.client, &e.session) {

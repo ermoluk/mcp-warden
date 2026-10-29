@@ -20,6 +20,10 @@ pub struct AuditEvent {
     /// recorded the event, so calls from one agent session group together.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub session: Option<String>,
+    /// For a `windowed` call: the id of the `approved` event whose
+    /// approve-for-window choice let it run without a prompt.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub via_event: Option<i64>,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
@@ -84,6 +88,9 @@ pub struct AuditFilter {
     pub since: Option<DateTime<Utc>>,
     /// At most this many events, the newest.
     pub limit: Option<usize>,
+    /// Only the event with this id and the `windowed` calls whose window it
+    /// opened (`AuditEvent::via_event`).
+    pub window: Option<i64>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -109,6 +116,15 @@ pub trait AuditSink: Send + Sync {
         Err(crate::error::WardenError::Audit(
             "this audit sink does not support filtered queries".into(),
         ))
+    }
+    /// Record that `event_id` ran inside the approval window that the
+    /// `approved` event `via_event_id` opened: decision `windowed`, linked to
+    /// that approval. Like `record_decision` it only fills in the row the
+    /// call created; nothing is changed or removed. A sink that doesn't
+    /// store the link records the decision alone.
+    fn record_windowed(&self, event_id: i64, via_event_id: i64) -> Result<()> {
+        let _ = via_event_id;
+        self.record_decision(event_id, AuditDecision::Windowed)
     }
     /// Tag events recorded from now on with this session id. Sinks that
     /// don't store sessions may ignore it.
@@ -376,6 +392,76 @@ mod tests {
     }
 
     #[test]
+    fn windowed_events_name_the_approval_that_opened_the_window() {
+        let (_dir, sink) = seeded();
+        let approval = sink.record_pending("p", "proxy_http", "GET /a").unwrap();
+        sink.record_decision(approval, AuditDecision::Approved)
+            .unwrap();
+        let other = sink
+            .record_pending("p", "proxy_http", "GET /other")
+            .unwrap();
+        sink.record_decision(other, AuditDecision::Approved)
+            .unwrap();
+        let mut inside = vec![];
+        for path in ["GET /b", "GET /c"] {
+            let id = sink.record_pending("p", "proxy_http", path).unwrap();
+            sink.record_windowed(id, approval).unwrap();
+            inside.push(id);
+        }
+        let events = sink.recent(2).unwrap();
+        for e in &events {
+            assert_eq!(e.decision, Some(AuditDecision::Windowed));
+            assert_eq!(e.via_event, Some(approval));
+        }
+
+        let window = sink
+            .query(&AuditFilter {
+                window: Some(approval),
+                ..Default::default()
+            })
+            .unwrap();
+        let ids: Vec<i64> = window.iter().map(|e| e.id).collect();
+        assert_eq!(ids, [inside[1], inside[0], approval], "newest first");
+        assert_eq!(window[2].via_event, None);
+    }
+
+    #[test]
+    fn databases_from_before_window_links_are_migrated() {
+        // A 0.5.x log: `client` and `session`, but no `via_event`.
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("audit.db");
+        {
+            let conn = rusqlite::Connection::open(&path).unwrap();
+            conn.execute_batch(
+                "CREATE TABLE events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    created_at TEXT NOT NULL,
+                    preset TEXT NOT NULL,
+                    action TEXT NOT NULL,
+                    summary TEXT NOT NULL,
+                    decision TEXT,
+                    outcome_kind TEXT,
+                    outcome_data TEXT,
+                    client TEXT,
+                    session TEXT
+                );
+                INSERT INTO events (created_at, preset, action, summary, decision, session)
+                VALUES ('2026-10-01T00:00:00Z', 'old', 'proxy_http', 'GET /x', 'windowed', 's0');",
+            )
+            .unwrap();
+        }
+        let sink = sqlite_sink::LocalSqlite::open(&path).unwrap();
+        let id = sink.record_pending("new", "proxy_http", "GET /y").unwrap();
+        sink.record_windowed(id, 1).unwrap();
+        let events = sink.recent(10).unwrap();
+        assert_eq!(events.len(), 2, "old rows are kept");
+        assert_eq!(events[1].via_event, None);
+        assert_eq!(events[1].session.as_deref(), Some("s0"));
+        assert_eq!(events[0].via_event, Some(1));
+        sqlite_sink::LocalSqlite::open(&path).unwrap();
+    }
+
+    #[test]
     fn sinks_without_filtering_refuse_rather_than_filter_in_memory() {
         struct Plain;
         impl AuditSink for Plain {
@@ -396,6 +482,9 @@ mod tests {
             }
         }
         assert!(Plain.query(&AuditFilter::default()).is_err());
+        // Without its own `record_windowed`, a sink still records the
+        // decision, just not the link.
+        Plain.record_windowed(2, 1).unwrap();
     }
 
     // The append-only invariant (spec §9.7) is enforced by the trait
