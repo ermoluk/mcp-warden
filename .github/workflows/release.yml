@@ -145,13 +145,16 @@ jobs:
           ruby -c out/manifests/homebrew/mcp-warden.rb
           jq empty out/manifests/scoop/mcp-warden.json out/manifests/server.json
           for f in out/manifests/winget/manifests/e/ermoluk/mcp-warden/"$VERSION"/*.yaml; do yq e . "$f" >/dev/null; done
+      # makepkg must reproduce the rendered .SRCINFO. The Arch base image has
+      # no diff, so the comparison runs on the runner.
       - name: Check the AUR package
         run: |
           docker run --rm -v "$PWD/out/manifests/aur:/pkg:ro" archlinux:latest bash -ec '
             useradd -m builder
             cp -r /pkg /home/builder/pkg
             chown -R builder /home/builder/pkg
-            su builder -c "cd ~/pkg && makepkg --printsrcinfo" | diff -u /pkg/.SRCINFO -'
+            su builder -c "cd ~/pkg && makepkg --printsrcinfo"' >"$RUNNER_TEMP/SRCINFO.makepkg"
+          diff -u out/manifests/aur/.SRCINFO "$RUNNER_TEMP/SRCINFO.makepkg"
       - name: Check the npm packages
         env:
           VERSION: ${{ steps.version.outputs.version }}
