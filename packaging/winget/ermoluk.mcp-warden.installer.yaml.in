@@ -1,0 +1,17 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.installer.1.9.0.schema.json
+PackageIdentifier: ermoluk.mcp-warden
+PackageVersion: @VERSION@
+InstallerType: zip
+NestedInstallerType: portable
+NestedInstallerFiles:
+  - RelativeFilePath: mcp-warden.exe
+    PortableCommandAlias: mcp-warden
+Commands:
+  - mcp-warden
+ReleaseDate: @DATE@
+Installers:
+  - Architecture: x64
+    InstallerUrl: https://github.com/ermoluk/mcp-warden/releases/download/v@VERSION@/mcp-warden-x86_64-pc-windows-msvc.zip
+    InstallerSha256: @SHA256_UPPER:mcp-warden-x86_64-pc-windows-msvc.zip@
+ManifestType: installer
+ManifestVersion: 1.9.0

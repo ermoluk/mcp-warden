@@ -1,6 +1,6 @@
-# Threat model — `mcp-warden` v0.1.0
+# Threat model — `mcp-warden`
 
-This document describes what `mcp-warden` defends against, what it does not, and where the residual risks lie. It complements (and does not replace) the security invariants in `CLAUDE.md` §"Security invariants — non-negotiable".
+Current as of v0.5.3. This document describes what `mcp-warden` defends against, what it does not, and where the residual risks lie. It complements (and does not replace) the security invariants in `CLAUDE.md` §"Security invariants — non-negotiable".
 
 ## Assumptions
 
@@ -41,11 +41,33 @@ A malicious preset named `"prod-readonly\nApproval: auto\n"` could spoof the des
 
 Patterns see the path decoded once, but an upstream may decode twice — a proxy in front of an app that decodes again — so `/users/%252e%252e/admin` (`%2e%2e` after one pass, an ordinary segment to the allow-list) would reach `/admin` there, and `%252F` a separator the allow-list never saw. Since v0.5.2 any path containing `%25` is refused: a second decode pass can only find an escape whose `%` came out of the first, and that `%` is always a `%25`. A literal `%` in a path is refused with it.
 
+Since v0.5.3 two more classes of path are refused before the allow-list sees them:
+
+- **Malformed escapes.** `percent_decode_str` decodes only `%` followed by two hex digits and leaves anything else as text. IIS and ASP.NET also decode the non-standard `%uXXXX` form, so `/users/%u005cadmin` — an ordinary segment to the allow-list — is `/users/\admin` to them, and `%u002e%u002e` is `..`. Every `%` must now start an escape of exactly two hex digits; `%u…`, `%zz` and a trailing `%` are refused.
+- **Unicode compatibility forms.** An upstream that applies NFKC normalisation after decoding turns `／` (U+FF0F) into `/`, `．．` (U+FF0E) into `..`, `＼` (U+FF3C) into `\`, and ligatures, superscripts or the Kelvin sign into plain letters and digits. A path is refused if NFKC would change its decoded form, so every upstream routes the characters the allow-list matched. Raw (unencoded) forms were already refused before sending — the URL parser re-encodes non-ASCII, and `build_url` refuses any path it rewrites — but the check now runs in the allow-list for both. Text NFKC leaves unchanged (Cyrillic, CJK, Hangul, accented letters in composed form) still passes; a decomposed accent (`й` written as `и` + U+0306) is refused and must be sent composed.
+
+Together with the earlier checks this gives three properties, tested with generated paths (`proptest`) in `src/executor/http.rs`: an accepted path decodes to the same string on a second pass, its decoded form is NFKC-stable, and neither pass yields a `.`/`..` segment, `\`, a control character or an empty segment. Every input that has bypassed the allow-list so far is kept in `tests/corpus/paths.txt`, and CI fails if any of them is allowed by a preset with `allowed_paths = [".*"]`.
+
 ### T7. TOCTOU on config
 
 An attacker rewrites `config.toml` after `mcp-warden mcp` has started — another process, or the agent through its own file-edit tool — to add a preset whose secret was never checked, flip `approval` to `"auto"` without `--confirm-auto`, or widen `allowed_paths` / `allowed_methods`. The MCP server reads and validates the config once at startup (invariant 10) and serves presets from that in-memory snapshot (`FrozenSource`); the file is never read again, so every `list_presets` and every action sees the startup presets, and edits have no effect until the next process start. A restart does load the edited file: the startup check then refuses presets whose secret is missing, but it cannot tell whether `auto` came from `preset add --confirm-auto` or a hand edit, so the config file itself must stay writable only by the user.
 
 Before this was fixed (see the CHANGELOG), only the startup secret check used the frozen config; presets were re-read from the file on every call, so all of the edits above took effect live.
+
+### T8. Oversized agent input
+
+Up to v0.5.2 nothing capped what an agent could send: a megabyte-long path or command went through the allow-list regexes, into the approval prompt (truncated for display only), into the audit log for approved calls and on to the upstream. Since v0.5.3 every call is checked against fixed limits first — in `policy::check_request`, before the preset kind, the patterns, percent-decoding or any credential (invariant 3). `mcp-warden preset test` applies the same limits. The constants are in `src/executor/limits.rs`:
+
+| Input | Limit | Why this size |
+|---|---|---|
+| `proxy_http` path | 2048 bytes | Common upstream URL limits are 2–8 KB, and real API paths are a few hundred bytes at most. |
+| `proxy_http` query | 64 parameters, 4096 bytes of keys and values | Room for filters and pagination, but not for a payload smuggled into the URL. |
+| `proxy_http` JSON body | 1 MiB, serialised | Enough for API writes such as issues, comments or file contents; measured with a writer that stops at the limit, so a larger body is never serialised in full. |
+| `ssh_exec` command | 1024 bytes | Allow-listed commands are short; longer ones are a sign of an injection attempt. |
+| `sftp_transfer` remote / local path | 1024 bytes each | macOS `PATH_MAX` is 1024. |
+| `db_query` parameters | 32 parameters, 16 KiB each | Named queries take a handful of values; 16 KiB leaves room for a text field. |
+
+A refused call returns an error naming the field and the limit, never the input, and is audited as `refused` like any other validation failure. Its agent-supplied text is still capped at 1024 characters in the audit log (T4).
 
 ## Out-of-scope threats (what `mcp-warden` does NOT defend against)
 
@@ -97,9 +119,9 @@ The SQLite file is `0600`-permissioned and rejects symlinks at open time, but ro
 
 `ssh_exec` runs the agent-supplied command via `russh`'s exec channel — a single string that sshd runs with the remote user's login shell (`$SHELL -c`). We anchor each `allowed_commands` entry as `^(?:...)$` — the group keeps alternations anchored, so `uptime|df -h` cannot match `rm -rf / ; df -h` (fixed in v0.4.1; earlier versions anchored as `^...$`). The same anchoring applies to HTTP `allowed_paths` patterns.
 
-Anchoring alone left shell syntax to the pattern: `git checkout \S+` also matched `git checkout $(curl …|sh)`, which the remote shell expands. Since v0.5.2 every command is checked before its pattern (invariant 5): words are separated by single spaces and may contain only letters, digits and `- _ . / : = @ , + %`, and none may start with `=` (zsh's `=cmd`). `$`, backticks, `;`, `|`, `&`, `<`, `>`, parentheses, quotes, `\`, globs, `{}`, `~`, `!`, `#`, newlines and other control characters are refused whatever the pattern says, so the shell runs exactly the words the allow-list matched. Verified by `tests::refuses_shell_syntax_whatever_the_pattern`.
+Anchoring alone left shell syntax to the pattern: `git checkout \S+` also matched `git checkout $(curl …|sh)`, which the remote shell expands. Since v0.5.2 every command is checked before its pattern (invariant 5): words are separated by single spaces and may contain only letters, digits and `- _ . / : = @ , + %`, and none may start with `=` (zsh's `=cmd`). `$`, backticks, `;`, `|`, `&`, `<`, `>`, parentheses, quotes, `\`, globs, `{}`, `~`, `!`, `#`, newlines and other control characters are refused whatever the pattern says, so the shell runs exactly the words the allow-list matched. Verified by `tests/corpus/commands.txt`, every line of which CI runs against a preset with `allowed_commands = [".*"]`.
 
-What remains is the pattern's own scope. **A careless regex** like `git pull.*` still allows extra options made of permitted characters, such as `git pull --upload-pack=/tmp/x`. Preset authors must terminate or constrain patterns explicitly — `^docker compose (pull|up -d|ps)$`, `[a-z0-9._-]+` for an argument.
+What remains is the pattern's own scope. **A careless regex** like `git pull.*` still allows extra options made of permitted characters, such as `git pull --upload-pack=/tmp/x`. Preset authors must terminate or constrain patterns explicitly — `^docker compose (pull|up -d|ps)$`, `[a-z0-9._-]+` for an argument. A second allow-list on the server — a dedicated account whose key is pinned to a gate script with `command=` / `ForceCommand` — holds even when a pattern is too broad or the key leaks: [`docs/ssh-hardening.md`](ssh-hardening.md).
 
 ### R5. SFTP local path leakage (v0.2.0)
 
@@ -119,13 +141,16 @@ The SQLite file is `0600`-permissioned and rejects symlinks at open time, but ro
 
 ### R9. Time-boxed approvals are convenience, not deeper trust
 
-When the user picks **Approve for window** in the approval prompt (dialog, notification, Telegram or TUI), the executor caches `(preset, action) → expires_at` in process memory and skips re-prompting for that pair until the window expires. Properties:
+When the user picks the approve-for-window choice in the approval prompt (dialog, notification, Telegram or TUI), the executor caches `(preset, action) → expires_at` in process memory and skips re-prompting for that pair until the window expires. Properties:
+
+- **The button says what it allows.** Since v0.5.3 every transport words it the same way — `Approve for 10 min: every proxy_http call github-read allows runs without asking until 14:32` — so a click can't be mistaken for "approve this one call". Preset and tool names in it are sanitised like the rest of the prompt (T5).
+- **It ends at the time shown.** The deadline is fixed when the prompt appears — `now + N`, rounded down to the minute for windows of 10 min or more and to the second otherwise — and the window is registered with exactly that deadline. A late click gets a slightly shorter window, never one that outlasts the button. A fallback prompt shown after the first one timed out gets its own deadline.
 
 - **In-process only.** The cache is a `tokio::sync::Mutex<HashMap<…, Instant>>` inside `ActionExecutor`. Restarting `mcp-warden mcp` clears every window — by design. There is no file or socket through which a different process can inject or read windows.
 - **Per `(preset, action)` keyed.** A window for `proxy_http` on `github-read` does **not** cover `ssh_exec` on the same preset. Each tool class requires its own approval.
 - **Capped by the preset.** `approval_window_seconds = N` in the preset is the maximum window length; no prompt can exceed it. Presets that omit the field disable the window option entirely — prompts show only Approve once / Deny.
 - **`get_secret_for_env` is never windowed.** Spec §6 mandates a fresh prompt every time a raw secret is revealed; the executor's `force_prompt = true` path bypasses the cache and never registers a window.
-- **Audited.** Calls that proceed via an active window are recorded with `decision = "windowed"` in `audit.db`. Reviewing recent activity makes it visible that the user did not see a fresh prompt; the initial approve-for-window decision is still recorded as `approved`.
+- **Audited.** Calls that proceed via an active window are recorded with `decision = "windowed"` in `audit.db`. Reviewing recent activity makes it visible that the user did not see a fresh prompt; the initial approve-for-window decision is still recorded as `approved`. Since v0.5.3 each windowed event also stores the id of that approval (`via_event`): `mcp-warden audit` prints `via approval #N`, and `mcp-warden audit --window N` shows the approval and every call it let through.
 
 The residual risk: an agent that has the user's attention long enough to coerce *one* Approve-for-window can then issue many calls of the same kind without prompts inside the window. Mitigation: keep windows short (10 minutes is the default cap, 30 minutes is generous), and only enable windowing on presets where this trade-off is acceptable. Production-destructive presets should leave the field unset.
 

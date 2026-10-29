@@ -539,7 +539,8 @@ impl ApprovalTransport for TelegramApproval {
             buttons.push((random_token()?, ApprovalDecision::ApprovedForWindow));
         }
         let body = render_body(&req);
-        let keyboard = build_inline_keyboard(&buttons);
+        let window = super::window_button(&req);
+        let keyboard = build_inline_keyboard(&buttons, window.as_deref());
         let sent = bot
             .send_message(&body, Some(&keyboard))
             .await
@@ -570,11 +571,13 @@ impl ApprovalTransport for TelegramApproval {
         };
         bot.forget(&prompt);
 
-        let label = match decision {
-            ApprovalDecision::Approved => "✓ Approved",
-            ApprovalDecision::ApprovedForWindow => "✓ Approved for window",
-            ApprovalDecision::Denied => "✗ Denied",
-            ApprovalDecision::Timeout => "⏱ Timeout",
+        let label = match (decision, &window) {
+            (ApprovalDecision::ApprovedForWindow, Some(window)) => format!("✓ {window}"),
+            (ApprovalDecision::Approved | ApprovalDecision::ApprovedForWindow, _) => {
+                "✓ Approved".into()
+            }
+            (ApprovalDecision::Denied, _) => "✗ Denied".into(),
+            (ApprovalDecision::Timeout, _) => "⏱ Timeout".into(),
         };
         let _ = bot
             .edit_message(sent.message_id, &format!("{body}\n\n{label}"))
@@ -597,29 +600,37 @@ fn render_body(req: &ApprovalRequest) -> String {
     let summary = sanitise_for_prompt(&req.summary, SUMMARY_MAX_CHARS);
     let mut out =
         format!("🔐 mcp-warden approval\n\nPreset: {preset}\nAction: {action}\n\n{summary}");
-    if let Some(secs) = req.window_seconds {
-        out.push_str(&format!(
-            "\n\n(Approve for window: allows follow-up calls for {secs}s)"
-        ));
+    // Buttons are cut short on narrow screens; the body has room.
+    if let Some(window) = super::window_button(req) {
+        out.push_str(&format!("\n\n⏱ {window}"));
     }
     out
 }
 
 /// One button per token; its callback data is the token and nothing else.
-fn build_inline_keyboard(buttons: &[(String, ApprovalDecision)]) -> serde_json::Value {
-    let row: Vec<serde_json::Value> = buttons
-        .iter()
-        .map(|(token, decision)| {
-            let text = match decision {
-                ApprovalDecision::Approved => "✓ Approve",
-                ApprovalDecision::Denied => "✗ Deny",
-                ApprovalDecision::ApprovedForWindow => "⏱ Approve for window",
-                ApprovalDecision::Timeout => "⏱ Timeout",
-            };
-            json!({ "text": text, "callback_data": token })
-        })
-        .collect();
-    json!({ "inline_keyboard": [row] })
+/// Approve and Deny share the first row; the window choice, whose text says
+/// what it covers, gets a row of its own.
+fn build_inline_keyboard(
+    buttons: &[(String, ApprovalDecision)],
+    window: Option<&str>,
+) -> serde_json::Value {
+    let mut rows: Vec<Vec<serde_json::Value>> = vec![vec![]];
+    for (token, decision) in buttons {
+        let text = match decision {
+            ApprovalDecision::Approved => "✓ Approve".to_string(),
+            ApprovalDecision::Denied => "✗ Deny".to_string(),
+            ApprovalDecision::ApprovedForWindow => {
+                let text = window.unwrap_or("Approve for window");
+                rows.push(vec![
+                    json!({ "text": format!("⏱ {text}"), "callback_data": token }),
+                ]);
+                continue;
+            }
+            ApprovalDecision::Timeout => "⏱ Timeout".to_string(),
+        };
+        rows[0].push(json!({ "text": text, "callback_data": token }));
+    }
+    json!({ "inline_keyboard": rows })
 }
 
 /// A button token: exactly 32 hex digits (also safe as a file name).
@@ -737,19 +748,51 @@ mod tests {
     }
 
     #[test]
-    fn render_body_mentions_window_when_set() {
-        let r = req().with_window(Some(120));
-        assert!(render_body(&r).contains("120"));
+    fn render_body_spells_out_the_window_when_set() {
+        let r = req().with_window(Some(600));
+        let body = render_body(&r);
+        let window = super::super::window_button(&r).unwrap();
+        assert!(body.ends_with(&format!("⏱ {window}")), "{body}");
+        assert!(window.starts_with("Approve for 10 min: every "), "{window}");
+        assert!(!render_body(&req()).contains("Approve for"));
+    }
+
+    #[test]
+    fn window_button_gets_its_own_row() {
+        let tokens = ["a", "d", "w"].map(|c| c.repeat(32));
+        let kb = build_inline_keyboard(
+            &[
+                (tokens[0].clone(), ApprovalDecision::Approved),
+                (tokens[1].clone(), ApprovalDecision::Denied),
+                (tokens[2].clone(), ApprovalDecision::ApprovedForWindow),
+            ],
+            Some(
+                "Approve for 10 min: every proxy_http call p allows runs without asking until 14:32",
+            ),
+        );
+        let rows = kb["inline_keyboard"].as_array().unwrap();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].as_array().unwrap().len(), 2);
+        assert_eq!(rows[1][0]["callback_data"], tokens[2]);
+        assert!(
+            rows[1][0]["text"]
+                .as_str()
+                .unwrap()
+                .starts_with("⏱ Approve for 10 min: every proxy_http call p")
+        );
     }
 
     #[test]
     fn keyboard_buttons_carry_only_their_token() {
         let approve = "a".repeat(32);
         let deny = "d".repeat(32);
-        let kb = build_inline_keyboard(&[
-            (approve.clone(), ApprovalDecision::Approved),
-            (deny.clone(), ApprovalDecision::Denied),
-        ]);
+        let kb = build_inline_keyboard(
+            &[
+                (approve.clone(), ApprovalDecision::Approved),
+                (deny.clone(), ApprovalDecision::Denied),
+            ],
+            None,
+        );
         let row = kb["inline_keyboard"][0].as_array().unwrap();
         assert_eq!(row.len(), 2);
         assert_eq!(row[0]["callback_data"], approve);

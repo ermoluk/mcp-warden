@@ -1,6 +1,6 @@
 {
   "name": "mcp-warden",
-  "version": "0.5.2",
+  "version": "0.5.3",
   "description": "Let Claude Code use your API keys, SSH keys and database passwords without ever seeing them. Bundles the mcp-warden MCP server config, a skill that teaches Claude to call it, and a guided /mcp-warden:setup.",
   "author": {
     "name": "ermoluk",

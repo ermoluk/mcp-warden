@@ -1,5 +1,5 @@
 use super::dialog::{self, DENY, TITLE};
-use super::window_label;
+use super::window_button;
 use async_trait::async_trait;
 use mcp_warden_core::approval::{ApprovalDecision, ApprovalRequest, ApprovalTransport};
 use mcp_warden_core::error::Result;
@@ -63,7 +63,7 @@ impl Default for OsascriptApproval {
 #[async_trait]
 impl ApprovalTransport for OsascriptApproval {
     async fn request(&self, req: ApprovalRequest) -> Result<ApprovalDecision> {
-        let window = req.window_seconds.map(window_label);
+        let window = window_button(&req);
         let mut cmd = tokio::process::Command::new(&self.program);
         cmd.args(&self.leading_args)
             .args(dialog_args(&req, window.as_deref()));
@@ -125,6 +125,18 @@ mod tests {
         )
     }
 
+    /// `req()` offering a 10-minute window that ends at 14:32 today.
+    fn windowed() -> ApprovalRequest {
+        let until = chrono::Local::now()
+            .with_time(chrono::NaiveTime::from_hms_opt(14, 32, 0).unwrap())
+            .earliest()
+            .unwrap();
+        req().with_window(Some(600)).with_window_until(until)
+    }
+
+    const WINDOW: &str = "Approve for 10 min: every proxy_http call github-read allows runs \
+                          without asking until 14:32";
+
     async fn reply(body: &str, req: ApprovalRequest) -> Result<ApprovalDecision> {
         let dir = tempfile::tempdir().unwrap();
         fake(dir.path(), body).request(req).await
@@ -156,21 +168,27 @@ mod tests {
 
     #[tokio::test]
     async fn window_button_approves_for_window_only_when_offered() {
-        let offered = req().with_window(Some(600));
-        let d = reply("echo 'Approve for 10 min'", offered).await.unwrap();
+        let echo = format!("echo '{WINDOW}'");
+        let d = reply(&echo, windowed()).await.unwrap();
         assert_eq!(d, ApprovalDecision::ApprovedForWindow);
 
         // Not offered: the same reply is unexpected and fails closed.
-        assert!(reply("echo 'Approve for 10 min'", req()).await.is_err());
+        assert!(reply(&echo, req()).await.is_err());
+        // Nor does a bare duration count.
+        assert!(
+            reply("echo 'Approve for 10 min'", windowed())
+                .await
+                .is_err()
+        );
     }
 
     #[tokio::test]
     async fn window_button_is_shown_only_when_offered() {
         let dir = tempfile::tempdir().unwrap();
         let t = fake(dir.path(), "echo Deny");
-        t.request(req().with_window(Some(600))).await.unwrap();
+        t.request(windowed()).await.unwrap();
         let buttons = saved_argv(dir.path()).split_off(SCRIPT.len() * 2 + 4);
-        assert_eq!(buttons, ["Approve for 10 min", "Approve once", "Deny"]);
+        assert_eq!(buttons, [WINDOW, "Approve once", "Deny"]);
 
         t.request(req()).await.unwrap();
         let buttons = saved_argv(dir.path()).split_off(SCRIPT.len() * 2 + 4);

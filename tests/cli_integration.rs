@@ -277,6 +277,117 @@ fn audit_prints_what_the_agent_asked_for() {
         .stdout(predicate::str::contains("Refused"));
 }
 
+fn seed_event(dir: &Path, summary: &str, decision: mcp_warden_core::audit::AuditDecision) {
+    use mcp_warden_core::audit::AuditSink;
+    let sink =
+        mcp_warden_core::audit::sqlite_sink::LocalSqlite::open(&dir.join("audit.db")).unwrap();
+    let id = sink
+        .record_pending("github-read", "proxy_http", summary)
+        .unwrap();
+    sink.record_decision(id, decision).unwrap();
+}
+
+#[test]
+fn audit_filters_by_decision_and_repeats_the_flag() {
+    use mcp_warden_core::audit::AuditDecision;
+    let tmp = tempfile::tempdir().unwrap();
+    seed_event(tmp.path(), "GET /approved", AuditDecision::Approved);
+    seed_event(tmp.path(), "GET /refused", AuditDecision::Refused);
+    seed_event(tmp.path(), "GET /failed", AuditDecision::Failed);
+    seed_event(tmp.path(), "GET /windowed", AuditDecision::Windowed);
+    let out = cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["audit", "--decision", "refused", "--decision", "failed"])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let out = String::from_utf8(out).unwrap();
+    assert!(
+        out.contains("GET /refused") && out.contains("GET /failed"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("GET /approved") && !out.contains("GET /windowed"),
+        "{out}"
+    );
+
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["audit", "--decision", "denied"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("(no events)"));
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["audit", "--decision", "maybe"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("approved"));
+}
+
+#[test]
+fn audit_shows_which_approval_let_a_windowed_call_through() {
+    use mcp_warden_core::audit::{AuditDecision, AuditSink};
+    let tmp = tempfile::tempdir().unwrap();
+    seed_event(tmp.path(), "GET /before", AuditDecision::Approved);
+    let sink = mcp_warden_core::audit::sqlite_sink::LocalSqlite::open(&tmp.path().join("audit.db"))
+        .unwrap();
+    let approval = sink
+        .record_pending("github-read", "proxy_http", "GET /open")
+        .unwrap();
+    sink.record_decision(approval, AuditDecision::Approved)
+        .unwrap();
+    for path in ["GET /in-1", "GET /in-2"] {
+        let id = sink
+            .record_pending("github-read", "proxy_http", path)
+            .unwrap();
+        sink.record_windowed(id, approval).unwrap();
+    }
+    seed_event(tmp.path(), "GET /after", AuditDecision::Refused);
+
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .arg("audit")
+        .assert()
+        .success()
+        .stdout(predicate::str::contains(format!(
+            "via approval #{approval}"
+        )));
+
+    let out = cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["audit", "--window", &approval.to_string()])
+        .assert()
+        .success()
+        .get_output()
+        .stdout
+        .clone();
+    let out = String::from_utf8(out).unwrap();
+    let lines: Vec<&str> = out.lines().collect();
+    assert_eq!(lines.len(), 3, "{out}");
+    assert!(
+        lines[0].contains("GET /open"),
+        "the approval comes first: {out}"
+    );
+    assert!(
+        lines[1].contains("GET /in-1") && lines[2].contains("GET /in-2"),
+        "{out}"
+    );
+    assert!(
+        !out.contains("GET /before") && !out.contains("GET /after"),
+        "{out}"
+    );
+
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["audit", "--window", "999"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no event #999"));
+}
+
 #[test]
 fn audit_truncates_long_summaries_and_strips_control_chars() {
     let tmp = tempfile::tempdir().unwrap();

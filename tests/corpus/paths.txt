@@ -1,0 +1,81 @@
+# Hostile `proxy_http` paths. Every entry must be refused by
+# `policy::check_request` for a preset that allows every path
+# (`allowed_paths = [".*"]`, method GET) — the checks below hold whatever the
+# allow-list says. CI runs them: `cargo test hostile_corpus`.
+#
+# One entry per line:  <input>  # <what it tests> (since vX.Y.Z)
+# The input ends at the first "  # " (two spaces, '#', space); "since" is the
+# first release that refused it. Lines starting with '#' are comments.
+#
+# Escapes in the input:
+#   \\        a backslash            \n \r \t   newline, carriage return, tab
+#   \xNN      the character U+00NN   \u{XXXX}   any character
+#   \x20      a space (needed only at either end of an input)
+#   \{c*N}    the character c repeated N times
+
+# Structure
+users/x  # relative path (since v0.1.0)
+https://attacker.com/x  # absolute URL with a scheme (since v0.1.0)
+/users/../admin  # dot-dot segment (since v0.1.0)
+/users/./admin  # dot segment (since v0.4.1)
+/users/x\\admin  # raw backslash, a separator to http(s) URL parsers (since v0.4.1)
+/a\x20b  # raw space, rewritten by URL normalisation (since v0.4.1)
+/a?x=1  # query in the path, rewritten by URL normalisation (since v0.4.1)
+
+# Percent-encoded dots and backslashes (0.4.1)
+/users/%2e%2e/admin  # encoded dot-dot (since v0.4.1)
+/users/%2E%2E/admin  # encoded dot-dot, upper case (since v0.4.1)
+/users/.%2e/admin  # half-encoded dot-dot (since v0.4.1)
+/%2e%2e/internal  # encoded dot-dot climbing out of base_url's path (since v0.4.1)
+/a/%2E%2E/%2e%2e/internal  # repeated encoded dot-dot (since v0.4.1)
+/users/x%5cadmin  # encoded backslash (since v0.4.1)
+
+# Empty segments, control characters, invalid UTF-8 (0.4.3)
+/user//repos  # empty segment, merged by some upstreams (since v0.4.3)
+//user/repos  # leading empty segment (since v0.4.3)
+/user/%2Frepos  # empty segment once decoded (since v0.4.3)
+/user%2F%2Frepos  # empty segment made of two encoded slashes (since v0.4.3)
+/users/a%2F.%2Fb  # dot segment once decoded (since v0.4.3)
+/users/a%2F.  # trailing dot segment once decoded (since v0.4.3)
+/users/.%2Fb  # leading dot segment once decoded (since v0.4.3)
+/users/a%00b  # NUL, truncates in C upstreams (since v0.4.3)
+/users/a%0ab  # LF, header splitting (since v0.4.3)
+/users/a%0D%0Ab  # CRLF, header splitting (since v0.4.3)
+/users/a%7fb  # DEL control character (since v0.4.3)
+/users/a%ff  # invalid UTF-8 once decoded (since v0.4.3)
+/users/a%c3%28  # invalid UTF-8 sequence once decoded (since v0.4.3)
+
+# Double percent-encoding (0.5.2)
+/users/%252e%252e/admin  # double-encoded dot-dot (since v0.5.2)
+/users/%252E%252E/admin  # double-encoded dot-dot, upper case (since v0.5.2)
+/users/%25%32%65%25%32%65/admin  # double-encoded dot-dot, digits encoded too (since v0.5.2)
+/users/%25252e%25252e/admin  # triple-encoded dot-dot (since v0.5.2)
+/repos/o/x%252Fcollaborators  # double-encoded slash (since v0.5.2)
+/users/x%255cadmin  # double-encoded backslash (since v0.5.2)
+/users/100%25  # literal '%', indistinguishable from double encoding (since v0.5.2)
+
+# Malformed escapes (0.5.3)
+/users/%u005cadmin  # IIS/ASP.NET %uXXXX backslash (since v0.5.3)
+/users/%U005Cadmin  # %uXXXX backslash, upper case (since v0.5.3)
+/users/%u002e%u002e/admin  # %uXXXX dot-dot (since v0.5.3)
+/users/%u002fadmin  # %uXXXX slash (since v0.5.3)
+/users/a%zz  # '%' followed by non-hex (since v0.5.3)
+/users/a%2  # '%' followed by one hex digit (since v0.5.3)
+/users/a%  # trailing '%' (since v0.5.3)
+/users/%%32%65  # '%' followed by another escape (since v0.5.3)
+
+# Unicode compatibility forms (0.5.3)
+/users/a%EF%BC%8Fadmin  # encoded FULLWIDTH SOLIDUS, NFKC '/' (since v0.5.3)
+/users/%EF%BC%8E%EF%BC%8E/admin  # encoded FULLWIDTH FULL STOP x2, NFKC '..' (since v0.5.3)
+/users/a%EF%BC%BCadmin  # encoded FULLWIDTH REVERSE SOLIDUS, NFKC '\' (since v0.5.3)
+/users/a\u{FF0F}admin  # raw FULLWIDTH SOLIDUS; build_url re-encodes it (since v0.4.1)
+/users/\u{FF0E}\u{FF0E}/admin  # raw FULLWIDTH FULL STOP x2; build_url re-encodes it (since v0.4.1)
+/users/a\u{FF3C}admin  # raw FULLWIDTH REVERSE SOLIDUS; build_url re-encodes it (since v0.4.1)
+/users/%E2%84%AA  # KELVIN SIGN, NFKC 'K' (since v0.5.3)
+/users/%EF%AC%81le  # LATIN SMALL LIGATURE FI, NFKC 'fi' (since v0.5.3)
+/users/x%C2%B2  # SUPERSCRIPT TWO, NFKC '2' (since v0.5.3)
+/users/%D0%B8%CC%86  # decomposed 'й', NFKC composes it (since v0.5.3)
+/users/%E2%80%A4%E2%80%A4/admin  # ONE DOT LEADER x2, NFKC '..' (since v0.5.3)
+
+# Input limits (0.5.3)
+/\{a*2048}  # path of 2049 bytes, over MAX_HTTP_PATH_BYTES (since v0.5.3)

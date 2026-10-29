@@ -1,0 +1,15 @@
+{
+  "name": "@mcp-warden/@NPM_PLATFORM@",
+  "version": "@VERSION@",
+  "description": "The mcp-warden binary for @NPM_PLATFORM@. Installed by @mcp-warden/cli; not meant to be used on its own.",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/ermoluk/mcp-warden#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ermoluk/mcp-warden.git"
+  },
+  "os": ["@NPM_OS@"],
+  "cpu": ["@NPM_CPU@"],
+  "files": ["bin/"],
+  "preferUnplugged": true
+}

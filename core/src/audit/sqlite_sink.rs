@@ -1,9 +1,14 @@
-use crate::audit::{AuditDecision, AuditEvent, AuditOutcome, AuditSink};
+use crate::audit::{AuditDecision, AuditEvent, AuditFilter, AuditOutcome, AuditSink};
 use crate::error::{Result, WardenError};
 use chrono::{DateTime, Utc};
+use rusqlite::types::Value;
 use rusqlite::{Connection, params};
 use std::path::Path;
 use std::sync::Mutex;
+
+/// The columns `row_to_event` reads, in its order.
+const COLUMNS: &str = "id, created_at, preset, action, summary, decision, outcome_kind, \
+                       outcome_data, client, session, via_event";
 
 pub struct LocalSqlite {
     conn: Mutex<Connection>,
@@ -34,7 +39,8 @@ impl LocalSqlite {
                 outcome_kind TEXT,
                 outcome_data TEXT,
                 client TEXT,
-                session TEXT
+                session TEXT,
+                via_event INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_events_created_at ON events(created_at);",
         )
@@ -52,8 +58,8 @@ impl LocalSqlite {
     }
 }
 
-/// Databases created before sessions were recorded lack the `client` and
-/// `session` columns. Adding a column keeps every existing row (the log
+/// Older databases lack columns added since: `client` and `session` (0.5.0),
+/// `via_event` (0.5.3). Adding a column keeps every existing row (the log
 /// stays append-only, invariant 7).
 fn add_missing_columns(conn: &Connection) -> Result<()> {
     let audit = |e: rusqlite::Error| WardenError::Audit(e.to_string());
@@ -63,9 +69,13 @@ fn add_missing_columns(conn: &Connection) -> Result<()> {
         .map_err(audit)?
         .collect::<std::result::Result<_, _>>()
         .map_err(audit)?;
-    for column in ["client", "session"] {
+    for (column, kind) in [
+        ("client", "TEXT"),
+        ("session", "TEXT"),
+        ("via_event", "INTEGER"),
+    ] {
         if !columns.iter().any(|c| c == column) {
-            conn.execute_batch(&format!("ALTER TABLE events ADD COLUMN {column} TEXT"))
+            conn.execute_batch(&format!("ALTER TABLE events ADD COLUMN {column} {kind}"))
                 .map_err(audit)?;
         }
     }
@@ -93,15 +103,7 @@ impl AuditSink for LocalSqlite {
     }
 
     fn record_decision(&self, id: i64, d: AuditDecision) -> Result<()> {
-        let label = match d {
-            AuditDecision::Approved => "approved",
-            AuditDecision::Denied => "denied",
-            AuditDecision::Auto => "auto",
-            AuditDecision::Timeout => "timeout",
-            AuditDecision::Windowed => "windowed",
-            AuditDecision::Refused => "refused",
-            AuditDecision::Failed => "failed",
-        };
+        let label = d.as_str();
         self.conn
             .lock()
             .unwrap()
@@ -130,33 +132,73 @@ impl AuditSink for LocalSqlite {
     }
 
     fn recent(&self, limit: usize) -> Result<Vec<AuditEvent>> {
+        self.query(&AuditFilter {
+            limit: Some(limit),
+            ..Default::default()
+        })
+    }
+
+    fn since(&self, ts: DateTime<Utc>) -> Result<Vec<AuditEvent>> {
+        self.query(&AuditFilter {
+            since: Some(ts),
+            ..Default::default()
+        })
+    }
+
+    /// Filters in SQL. Every value is a bound parameter; only the number of
+    /// `?` placeholders depends on the filter.
+    fn query(&self, filter: &AuditFilter) -> Result<Vec<AuditEvent>> {
+        let mut clauses = Vec::new();
+        let mut args: Vec<Value> = Vec::new();
+        if !filter.decisions.is_empty() {
+            let marks = vec!["?"; filter.decisions.len()].join(", ");
+            clauses.push(format!("decision IN ({marks})"));
+            args.extend(
+                filter
+                    .decisions
+                    .iter()
+                    .map(|d| Value::Text(d.as_str().into())),
+            );
+        }
+        if let Some(ts) = filter.since {
+            clauses.push("created_at >= ?".into());
+            args.push(Value::Text(ts.to_rfc3339()));
+        }
+        if let Some(id) = filter.window {
+            clauses.push("(id = ? OR via_event = ?)".into());
+            args.extend([Value::Integer(id), Value::Integer(id)]);
+        }
+        let mut sql = format!("SELECT {COLUMNS} FROM events");
+        if !clauses.is_empty() {
+            sql.push_str(" WHERE ");
+            sql.push_str(&clauses.join(" AND "));
+        }
+        sql.push_str(" ORDER BY id DESC");
+        if let Some(limit) = filter.limit {
+            sql.push_str(" LIMIT ?");
+            args.push(Value::Integer(i64::try_from(limit).unwrap_or(i64::MAX)));
+        }
         let conn = self.conn.lock().unwrap();
         let mut stmt = conn
-            .prepare(
-                "SELECT id, created_at, preset, action, summary, decision, outcome_kind, outcome_data, \
-                 client, session FROM events ORDER BY id DESC LIMIT ?1",
-            )
+            .prepare(&sql)
             .map_err(|e| WardenError::Audit(e.to_string()))?;
         let rows = stmt
-            .query_map(params![limit as i64], row_to_event)
+            .query_map(rusqlite::params_from_iter(args), row_to_event)
             .map_err(|e| WardenError::Audit(e.to_string()))?;
         rows.collect::<std::result::Result<Vec<_>, _>>()
             .map_err(|e| WardenError::Audit(e.to_string()))
     }
 
-    fn since(&self, ts: DateTime<Utc>) -> Result<Vec<AuditEvent>> {
-        let conn = self.conn.lock().unwrap();
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, created_at, preset, action, summary, decision, outcome_kind, outcome_data, \
-                 client, session FROM events WHERE created_at >= ?1 ORDER BY id DESC",
+    fn record_windowed(&self, id: i64, via_event_id: i64) -> Result<()> {
+        self.conn
+            .lock()
+            .unwrap()
+            .execute(
+                "UPDATE events SET decision = ?1, via_event = ?2 WHERE id = ?3",
+                params![AuditDecision::Windowed.as_str(), via_event_id, id],
             )
             .map_err(|e| WardenError::Audit(e.to_string()))?;
-        let rows = stmt
-            .query_map(params![ts.to_rfc3339()], row_to_event)
-            .map_err(|e| WardenError::Audit(e.to_string()))?;
-        rows.collect::<std::result::Result<Vec<_>, _>>()
-            .map_err(|e| WardenError::Audit(e.to_string()))
+        Ok(())
     }
 
     fn set_session(&self, id: &str) {
@@ -181,15 +223,9 @@ fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<AuditEvent> {
         preset: row.get(2)?,
         action: row.get(3)?,
         summary: row.get(4)?,
-        decision: decision.as_deref().map(|d| match d {
-            "approved" => AuditDecision::Approved,
-            "denied" => AuditDecision::Denied,
-            "auto" => AuditDecision::Auto,
-            "windowed" => AuditDecision::Windowed,
-            "refused" => AuditDecision::Refused,
-            "failed" => AuditDecision::Failed,
-            _ => AuditDecision::Timeout,
-        }),
+        decision: decision
+            .as_deref()
+            .map(|d| AuditDecision::from_name(d).unwrap_or(AuditDecision::Timeout)),
         outcome: match (outcome_kind.as_deref(), outcome_data) {
             (Some("ok"), Some(s)) => Some(AuditOutcome::Ok {
                 status: s.parse().unwrap_or(0),
@@ -199,5 +235,6 @@ fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<AuditEvent> {
         },
         client: row.get(8)?,
         session: row.get(9)?,
+        via_event: row.get(10)?,
     })
 }

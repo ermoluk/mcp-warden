@@ -1,0 +1,39 @@
+# Formula for the ermoluk/homebrew-tap tap (`brew install ermoluk/tap/mcp-warden`).
+# Rendered by packaging/render.sh from the release's SHA256SUMS and pushed to
+# the tap by the release workflow. Installs the prebuilt release binary.
+class McpWarden < Formula
+  desc "Local-first credential broker MCP server for AI coding agents"
+  homepage "https://github.com/ermoluk/mcp-warden"
+  version "@VERSION@"
+  license "Apache-2.0"
+
+  on_macos do
+    on_arm do
+      url "https://github.com/ermoluk/mcp-warden/releases/download/v@VERSION@/mcp-warden-aarch64-apple-darwin.tar.gz"
+      sha256 "@SHA256:mcp-warden-aarch64-apple-darwin.tar.gz@"
+    end
+    on_intel do
+      url "https://github.com/ermoluk/mcp-warden/releases/download/v@VERSION@/mcp-warden-x86_64-apple-darwin.tar.gz"
+      sha256 "@SHA256:mcp-warden-x86_64-apple-darwin.tar.gz@"
+    end
+  end
+
+  on_linux do
+    on_arm do
+      url "https://github.com/ermoluk/mcp-warden/releases/download/v@VERSION@/mcp-warden-aarch64-unknown-linux-musl.tar.gz"
+      sha256 "@SHA256:mcp-warden-aarch64-unknown-linux-musl.tar.gz@"
+    end
+    on_intel do
+      url "https://github.com/ermoluk/mcp-warden/releases/download/v@VERSION@/mcp-warden-x86_64-unknown-linux-musl.tar.gz"
+      sha256 "@SHA256:mcp-warden-x86_64-unknown-linux-musl.tar.gz@"
+    end
+  end
+
+  def install
+    bin.install "mcp-warden"
+  end
+
+  test do
+    assert_match version.to_s, shell_output("#{bin}/mcp-warden --version")
+  end
+end

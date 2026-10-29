@@ -11,13 +11,20 @@ the user must do it. Keep the user informed in one line per step.
 
 ## 1. Binary
 
-Run `mcp-warden --version` (fall back to `~/.cargo/bin/mcp-warden --version`).
+Run `mcp-warden --version`. If that fails, try the places installers put it:
+`~/.local/bin/mcp-warden`, `/opt/homebrew/bin/mcp-warden`,
+`/usr/local/bin/mcp-warden`, `~/.cargo/bin/mcp-warden`.
 
-If it is missing, tell the user the two ways to install it and ask which they
-want before running anything:
+If it is missing, tell the user the ways to install it and ask which they want
+before running anything:
 
-- `cargo install --locked mcp-warden` (needs a Rust toolchain)
-- a prebuilt binary for macOS or Linux from https://github.com/ermoluk/mcp-warden/releases
+- macOS or Linux with Homebrew: `brew install ermoluk/tap/mcp-warden`
+- Windows: `winget install ermoluk.mcp-warden` or Scoop (see the README)
+- any macOS or Linux machine: `curl -fsSL https://github.com/ermoluk/mcp-warden/releases/latest/download/install.sh | sh`
+  (checks the release checksum, installs to `~/.local/bin`, no sudo)
+- with a Rust toolchain: `cargo install --locked mcp-warden`
+
+All options, including AUR, Nix and npm: https://github.com/ermoluk/mcp-warden#install
 
 ## 2. Config
 

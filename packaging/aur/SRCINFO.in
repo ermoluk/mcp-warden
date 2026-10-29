@@ -1,0 +1,18 @@
+pkgbase = mcp-warden-bin
+	pkgdesc = Local-first credential broker MCP server for AI coding agents (prebuilt binary)
+	pkgver = @VERSION@
+	pkgrel = 1
+	url = https://github.com/ermoluk/mcp-warden
+	arch = x86_64
+	arch = aarch64
+	license = Apache-2.0
+	provides = mcp-warden
+	conflicts = mcp-warden
+	options = !strip
+	options = !debug
+	source_x86_64 = mcp-warden-@VERSION@-x86_64.tar.gz::https://github.com/ermoluk/mcp-warden/releases/download/v@VERSION@/mcp-warden-x86_64-unknown-linux-musl.tar.gz
+	sha256sums_x86_64 = @SHA256:mcp-warden-x86_64-unknown-linux-musl.tar.gz@
+	source_aarch64 = mcp-warden-@VERSION@-aarch64.tar.gz::https://github.com/ermoluk/mcp-warden/releases/download/v@VERSION@/mcp-warden-aarch64-unknown-linux-musl.tar.gz
+	sha256sums_aarch64 = @SHA256:mcp-warden-aarch64-unknown-linux-musl.tar.gz@
+
+pkgname = mcp-warden-bin

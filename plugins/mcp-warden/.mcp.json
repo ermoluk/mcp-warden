@@ -2,7 +2,10 @@
   "mcpServers": {
     "mcp-warden": {
       "command": "sh",
-      "args": ["-c", "exec \"$(command -v mcp-warden || echo \"$HOME/.cargo/bin/mcp-warden\")\" mcp"]
+      "args": [
+        "-c",
+        "for b in \"$(command -v mcp-warden)\" \"$HOME/.local/bin/mcp-warden\" /opt/homebrew/bin/mcp-warden /usr/local/bin/mcp-warden \"$HOME/.cargo/bin/mcp-warden\" \"$HOME/.nix-profile/bin/mcp-warden\"; do [ -n \"$b\" ] && [ -x \"$b\" ] && exec \"$b\" mcp; done; echo \"mcp-warden: binary not found; see https://github.com/ermoluk/mcp-warden#install\" >&2; exit 127"
+      ]
     }
   }
 }

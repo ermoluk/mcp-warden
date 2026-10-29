@@ -15,13 +15,12 @@ conversation. See the [main README](../../README.md) for how mcp-warden works.
 
 ## Install
 
-The plugin does not include the binary. Install it first:
-
-```bash
-cargo install --locked mcp-warden
-```
-
-or download a prebuilt binary from the [releases page](https://github.com/ermoluk/mcp-warden/releases). Then in Claude Code:
+The plugin does not include the binary. Install it first — for example
+`brew install ermoluk/tap/mcp-warden`, `winget install ermoluk.mcp-warden`,
+the install script or `cargo install --locked mcp-warden`; every option is in
+the [main README](https://github.com/ermoluk/mcp-warden#install). The plugin
+finds the binary on `PATH` or in `~/.local/bin`, `/opt/homebrew/bin`,
+`/usr/local/bin`, `~/.cargo/bin` or `~/.nix-profile/bin`. Then in Claude Code:
 
 ```
 /plugin marketplace add ermoluk/mcp-warden

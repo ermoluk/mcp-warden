@@ -1,5 +1,5 @@
 use super::dialog::{self, DENY, TITLE};
-use super::window_label;
+use super::window_button;
 use async_trait::async_trait;
 use base64::Engine;
 use mcp_warden_core::approval::{ApprovalDecision, ApprovalRequest, ApprovalTransport};
@@ -53,6 +53,7 @@ $row.AutoSize = $true
 foreach ($text in ($env:MCPW_DIALOG_BUTTONS -split "`n")) {
   $button = New-Object System.Windows.Forms.Button
   $button.Text = $text
+  $button.UseMnemonic = $false
   $button.AutoSize = $true
   $button.Add_Click({ param($sender, $e) $state.answer = $sender.Text; $form.Close() })
   $row.Controls.Add($button)
@@ -93,7 +94,7 @@ impl Default for PowerShellApproval {
 #[async_trait]
 impl ApprovalTransport for PowerShellApproval {
     async fn request(&self, req: ApprovalRequest) -> Result<ApprovalDecision> {
-        let window = req.window_seconds.map(window_label);
+        let window = window_button(&req);
         let mut cmd = tokio::process::Command::new(&self.program);
         cmd.args(&self.leading_args)
             .args(powershell_args())
@@ -165,16 +166,20 @@ mod tests {
         let evil = "GET /x\n\"; Remove-Item -Recurse C:\\ #";
         let req = ApprovalRequest::new("p\u{1b}[31m".into(), "proxy_http".into(), evil.into())
             .with_window(Some(600));
-        let env: std::collections::HashMap<_, _> = dialog_env(&req, Some("Approve for 10 min"))
-            .into_iter()
-            .collect();
+        let window = window_button(&req).unwrap();
+        let env: std::collections::HashMap<_, _> =
+            dialog_env(&req, Some(&window)).into_iter().collect();
         let message = &env["MCPW_DIALOG_MESSAGE"];
         assert!(message.starts_with("proxy_http → p[31m\n\n"), "{message}");
         assert!(message.contains("GET /x\"; Remove-Item -Recurse C:\\ #"));
         assert!(!message.contains('\u{1b}'));
         assert_eq!(
             env["MCPW_DIALOG_BUTTONS"],
-            "Approve for 10 min\nApprove once\nDeny"
+            format!("{window}\nApprove once\nDeny")
+        );
+        assert!(
+            window.starts_with("Approve for 10 min: every proxy_http call p[31m allows"),
+            "{window}"
         );
         assert_eq!(env["MCPW_DIALOG_DENY"], "Deny");
         assert_eq!(env["MCPW_DIALOG_SECONDS"], "60");

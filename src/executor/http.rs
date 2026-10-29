@@ -8,6 +8,7 @@ use mcp_warden_core::secret::Secret;
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use unicode_normalization::UnicodeNormalization;
 use url::Url;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -72,6 +73,14 @@ pub fn validate_request(preset: &Preset, method: &str, path: &str) -> Result<()>
             "path '{path}' contains an encoded '%' (%25); double percent-encoding is refused"
         )));
     }
+    // `percent_decode_str` leaves any other `%` as it is, but servers differ
+    // on what follows: IIS and ASP.NET decode `%u005c` to `\` and `%u002e`
+    // to `.`. The allow-list can't see what such a server will route.
+    if !well_formed_escapes(path) {
+        return Err(WardenError::Validation(format!(
+            "path '{path}' has a '%' that is not followed by two hex digits"
+        )));
+    }
     let decoded = decode_path(path)?;
     if preset.allowed_paths.is_empty() {
         return Ok(());
@@ -90,6 +99,16 @@ pub fn validate_request(preset: &Preset, method: &str, path: &str) -> Result<()>
         "path '{path}' not allowed by preset '{}'",
         preset.name
     )))
+}
+
+/// Every `%` in `path` starts an escape of exactly two hex digits.
+fn well_formed_escapes(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.iter().enumerate().all(|(i, &b)| {
+        b != b'%'
+            || matches!(bytes.get(i + 1..i + 3), Some([h, l])
+                if h.is_ascii_hexdigit() && l.is_ascii_hexdigit())
+    })
 }
 
 /// Percent-decode `path` for allow-list matching.
@@ -120,6 +139,16 @@ fn decode_path(path: &str) -> Result<std::borrow::Cow<'_, str>> {
         return Err(WardenError::Validation(format!(
             "path '{path}' contains dot segments, backslashes or control \
              characters once percent-decoded"
+        )));
+    }
+    // An upstream that applies compatibility normalisation after decoding
+    // turns `／` into `/`, `．．` into `..` and `＼` into `\`. Only paths
+    // NFKC leaves unchanged reach the allow-list, so every upstream sees
+    // the characters it saw.
+    if !decoded.nfkc().eq(decoded.chars()) {
+        return Err(WardenError::Validation(format!(
+            "path '{path}' contains characters that Unicode NFKC normalisation \
+             would change (fullwidth or compatibility forms)"
         )));
     }
     Ok(decoded)
@@ -162,6 +191,8 @@ pub async fn execute(
     let request = Request::Http {
         method: &method_upper,
         path: &req.path,
+        query: req.query.as_ref(),
+        body: req.body.as_ref(),
     };
     let mut url = check_request(preset, &request)
         .and_then(|()| validated_url(preset, &method_upper, &req.path))
@@ -332,22 +363,26 @@ mod tests {
         }
     }
 
+    // Inputs refused whatever the allow-list says are in
+    // `tests/corpus/paths.txt`; the tests below pin the error each check
+    // gives the agent and what depends on the preset's patterns.
+
     #[test]
-    fn rejects_encoded_traversal_and_backslashes() {
+    fn structural_refusals_say_why() {
         let mut q = p();
-        q.allowed_paths = vec!["/users/.*".into()];
-        for evil in [
-            "/users/%2e%2e/admin",
-            "/users/%2E%2E/admin",
-            "/users/.%2e/admin",
-            "/users/x%5cadmin",
-            "/users/x\\admin",
-            "/users/./admin",
+        q.allowed_paths = vec![];
+        for (evil, why) in [
+            (
+                "/users/%2e%2e/admin",
+                "dot segments, encoded dots or backslashes",
+            ),
+            ("/user//repos", "empty segment"),
+            ("/users/a%2F.%2Fb", "once percent-decoded"),
+            ("/users/a%0ab", "control characters"),
+            ("/users/a%ff", "not valid UTF-8"),
         ] {
-            assert!(
-                validate_request(&q, "GET", evil).is_err(),
-                "should reject: {evil}"
-            );
+            let err = validate_request(&q, "GET", evil).unwrap_err();
+            assert!(err.to_string().contains(why), "{evil}: {err}");
         }
     }
 
@@ -360,15 +395,66 @@ mod tests {
         q.allowed_paths = vec!["/users/.*".into(), "/repos/o/[^/]+".into()];
         for evil in [
             "/users/%252e%252e/admin",
-            "/users/%252E%252E/admin",
-            "/users/%25%32%65%25%32%65/admin",
-            "/users/%25252e%25252e/admin",
             "/repos/o/x%252Fcollaborators",
             // A literal `%` is refused too: it can't be told apart.
             "/users/100%25",
         ] {
             let err = validate_request(&q, "GET", evil).unwrap_err();
             assert!(err.to_string().contains("%25"), "{evil}: {err}");
+        }
+    }
+
+    #[test]
+    fn rejects_malformed_percent_escapes() {
+        // `percent_decode_str` leaves `%` alone unless two hex digits follow,
+        // so `%u005c` reached the allow-list as text — but IIS and ASP.NET
+        // decode the non-standard `%uXXXX` to `\` / `.`.
+        let mut q = p();
+        q.allowed_paths = vec!["/users/.*".into()];
+        for evil in [
+            "/users/%u005cadmin",
+            "/users/%u002e%u002e/admin",
+            "/users/a%",
+        ] {
+            let err = validate_request(&q, "GET", evil).unwrap_err();
+            assert!(err.to_string().contains("two hex digits"), "{evil}: {err}");
+        }
+        validate_request(&q, "GET", "/users/a%2Db%7E").unwrap();
+    }
+
+    #[test]
+    fn rejects_paths_that_nfkc_would_change() {
+        // An upstream that applies Unicode compatibility normalisation after
+        // decoding sees `／` as `/`, `．．` as `..` and `＼` as `\`.
+        let mut q = p();
+        q.allowed_paths = vec!["/users/.*".into()];
+        for evil in [
+            "/users/a%EF%BC%8Fadmin",
+            "/users/%EF%BC%8E%EF%BC%8E/admin",
+            // Raw, too, before `build_url` would refuse to send it.
+            "/users/a＼admin",
+            // `и` + COMBINING BREVE: NFKC composes it to `й`.
+            "/users/%D0%B8%CC%86",
+        ] {
+            let err = validate_request(&q, "GET", evil).unwrap_err();
+            assert!(err.to_string().contains("NFKC"), "{evil}: {err}");
+        }
+    }
+
+    #[test]
+    fn accepts_nfkc_stable_cyrillic_and_cjk() {
+        let mut q = p();
+        q.allowed_paths = vec!["/search/[^/]+".into()];
+        for ok in [
+            "/search/%D0%BF%D1%80%D0%B8%D0%B2%D0%B5%D1%82",
+            "/search/привет",
+            "/search/%D0%81%D0%BB%D0%BA%D0%B0",
+            "/search/%E6%97%A5%E6%9C%AC%E8%AA%9E",
+            "/search/日本語",
+            "/search/中文",
+            "/search/%ED%95%9C%EA%B8%80",
+        ] {
+            validate_request(&q, "GET", ok).unwrap();
         }
     }
 
@@ -411,62 +497,122 @@ mod tests {
     }
 
     #[test]
-    fn rejects_empty_segments_raw_or_decoded() {
-        // Upstreams that merge slashes would route a different path than
-        // the allow-list saw. Empty allowed_paths: only the structural
-        // checks stand between these and the upstream.
-        let mut q = p();
-        q.allowed_paths = vec![];
-        for evil in [
-            "/user//repos",
-            "//user/repos",
-            "/user/%2Frepos",
-            "/user%2F%2Frepos",
-        ] {
-            assert!(
-                validate_request(&q, "GET", evil).is_err(),
-                "should reject: {evil}"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_decoded_control_chars_and_invalid_utf8() {
-        let mut q = p();
-        q.allowed_paths = vec![];
-        for evil in [
-            "/users/a%00b",
-            "/users/a%0ab",
-            "/users/a%0D%0Ab",
-            "/users/a%7fb",
-            "/users/a%ff",
-            "/users/a%c3%28",
-        ] {
-            assert!(
-                validate_request(&q, "GET", evil).is_err(),
-                "should reject: {evil}"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_dot_segments_that_appear_only_after_decoding() {
-        let mut q = p();
-        q.allowed_paths = vec![];
-        for evil in ["/users/a%2F.%2Fb", "/users/a%2F.", "/users/.%2Fb"] {
-            assert!(
-                validate_request(&q, "GET", evil).is_err(),
-                "should reject: {evil}"
-            );
-        }
-    }
-
-    #[test]
     fn accepts_ordinary_encoded_characters() {
         let mut q = p();
         q.allowed_paths = vec!["/search/[^/]+".into()];
         validate_request(&q, "GET", "/search/a%20b").unwrap();
         validate_request(&q, "GET", "/search/%D0%BF%D1%80%D0%B8").unwrap();
+    }
+
+    // Properties of every path `validate_request` accepts: whatever the
+    // upstream does with it — decode once more, normalise — it sees what
+    // the allow-list saw.
+    mod decoder_properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Path fragments biased towards what bypasses are made of.
+        fn piece() -> impl Strategy<Value = String> {
+            prop_oneof![
+                "[a-zA-Z0-9_~+-]{1,6}",
+                Just("/".to_string()),
+                Just(".".to_string()),
+                Just("..".to_string()),
+                Just("\\".to_string()),
+                Just("%".to_string()),
+                "%[0-9a-fA-F]{2}",
+                "%(2[eEfF]|5[cC]|25|00|0[aAdD]|7[fF])",
+                "%25[0-9a-fA-F]{2}",
+                "%[uU]00[0-9a-fA-F]{2}",
+                "%[eE][fF]%[bB][cC]%[89a-fA-F][0-9a-fA-F]",
+                "%[dD]0%[bB][0-9a-fA-F]",
+                prop::sample::select(vec![
+                    "／",
+                    "．",
+                    "＼",
+                    "привет",
+                    "日本語",
+                    "ﬁ",
+                    "K",
+                    "²",
+                    "й",
+                    "и\u{306}",
+                    " ",
+                    "?",
+                ])
+                .prop_map(String::from),
+            ]
+        }
+
+        fn hostile_path() -> impl Strategy<Value = String> {
+            prop::collection::vec(piece(), 0..12).prop_map(|v| format!("/{}", v.concat()))
+        }
+
+        /// Paths made only of fragments that must be accepted, so the
+        /// properties below are exercised on accepted paths too.
+        fn plausible_path() -> impl Strategy<Value = String> {
+            let segment = prop_oneof![
+                "[a-zA-Z0-9_~-]{1,8}",
+                Just("%20".to_string()),
+                Just("%D0%BF%D1%80%D0%B8".to_string()),
+                Just("%E6%97%A5".to_string()),
+                Just("a%2Fb".to_string()),
+            ];
+            prop::collection::vec(segment, 1..6).prop_map(|v| format!("/{}", v.join("/")))
+        }
+
+        fn decode(s: &str) -> String {
+            percent_decode_str(s).decode_utf8_lossy().into_owned()
+        }
+
+        fn open() -> Preset {
+            let mut q = p();
+            q.allowed_paths = vec![];
+            q
+        }
+
+        fn check_accepted(path: &str) -> std::result::Result<(), TestCaseError> {
+            let once = decode(path);
+            let twice = decode(&once);
+            prop_assert_eq!(&twice, &once, "a second decode pass changed {:?}", path);
+            prop_assert!(
+                once.nfkc().eq(once.chars()),
+                "{:?} is not NFKC-stable once decoded",
+                path
+            );
+            for form in [path, once.as_str(), twice.as_str()] {
+                prop_assert!(!form.contains('\\'), "backslash in {:?}", form);
+                prop_assert!(!form.chars().any(char::is_control), "control in {:?}", form);
+                prop_assert!(!form.contains("//"), "empty segment in {:?}", form);
+                prop_assert!(
+                    !form.split('/').any(|seg| seg == "." || seg == ".."),
+                    "dot segment in {:?}",
+                    form
+                );
+            }
+            Ok(())
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(4096))]
+
+            #[test]
+            fn accepted_paths_survive_a_second_decode_and_nfkc(path in hostile_path()) {
+                if validate_request(&open(), "GET", &path).is_ok() {
+                    check_accepted(&path)?;
+                }
+            }
+
+            #[test]
+            fn plausible_paths_are_accepted_and_stable(path in plausible_path()) {
+                prop_assert!(
+                    validate_request(&open(), "GET", &path).is_ok(),
+                    "refused {:?}",
+                    path
+                );
+                check_accepted(&path)?;
+            }
+        }
     }
 
     #[test]

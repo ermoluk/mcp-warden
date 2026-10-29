@@ -1,0 +1,27 @@
+name: nix
+# `nix build` compiles the whole dependency tree, so it runs only when the
+# flake or the dependencies change, and on demand.
+on:
+  push:
+    branches: [main]
+    paths: ['flake.nix', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'core/Cargo.toml']
+  pull_request:
+    paths: ['flake.nix', 'flake.lock', 'Cargo.toml', 'Cargo.lock', 'core/Cargo.toml']
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v5
+      - uses: cachix/install-nix-action@v31
+      - run: nix flake check --no-build
+      - run: nix build -L
+      - run: nix run . -- --version

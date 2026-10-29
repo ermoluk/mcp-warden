@@ -1,6 +1,8 @@
-use clap::Args;
+use clap::{Args, ValueEnum};
 use mcp_warden_core::approval::sanitise_for_prompt;
-use mcp_warden_core::audit::{AuditOutcome, AuditSink, clip, sqlite_sink::LocalSqlite};
+use mcp_warden_core::audit::{
+    AuditDecision, AuditFilter, AuditOutcome, AuditSink, clip, sqlite_sink::LocalSqlite,
+};
 use mcp_warden_core::error::{Result, WardenError};
 use std::path::Path;
 
@@ -18,6 +20,39 @@ pub struct AuditArgs {
     /// RFC3339 timestamp; show events at or after this time instead of `--last`.
     #[arg(long)]
     pub since: Option<String>,
+    /// Show only events with this decision. Repeat to show several.
+    #[arg(long = "decision", value_enum, value_name = "DECISION")]
+    pub decisions: Vec<Decision>,
+    /// Show approval #N and every call that ran inside the window it opened,
+    /// oldest first.
+    #[arg(long, value_name = "N", conflicts_with_all = ["since", "last"])]
+    pub window: Option<i64>,
+}
+
+/// `AuditDecision`, as typed on the command line.
+#[derive(Debug, Clone, Copy, ValueEnum)]
+pub enum Decision {
+    Approved,
+    Denied,
+    Auto,
+    Timeout,
+    Windowed,
+    Refused,
+    Failed,
+}
+
+impl From<Decision> for AuditDecision {
+    fn from(d: Decision) -> Self {
+        match d {
+            Decision::Approved => AuditDecision::Approved,
+            Decision::Denied => AuditDecision::Denied,
+            Decision::Auto => AuditDecision::Auto,
+            Decision::Timeout => AuditDecision::Timeout,
+            Decision::Windowed => AuditDecision::Windowed,
+            Decision::Refused => AuditDecision::Refused,
+            Decision::Failed => AuditDecision::Failed,
+        }
+    }
 }
 
 pub fn run(args: AuditArgs, db_path: &Path) -> Result<()> {
@@ -26,19 +61,39 @@ pub fn run(args: AuditArgs, db_path: &Path) -> Result<()> {
         return Ok(());
     }
     let sink = LocalSqlite::open(db_path)?;
-    let events = if let Some(s) = args.since {
+    let mut filter = AuditFilter {
+        decisions: args.decisions.into_iter().map(Into::into).collect(),
+        window: args.window,
+        ..Default::default()
+    };
+    if args.window.is_some() {
+        // The whole window, however long.
+    } else if let Some(s) = args.since {
         let ts = chrono::DateTime::parse_from_rfc3339(&s)
             .map_err(|e| WardenError::Validation(e.to_string()))?
             .with_timezone(&chrono::Utc);
-        sink.since(ts)?
+        filter.since = Some(ts);
     } else {
-        sink.recent(args.last)?
-    };
+        filter.limit = Some(args.last);
+    }
+    let mut events = sink.query(&filter)?;
+    if let Some(n) = args.window {
+        if !events.iter().any(|e| e.id == n) {
+            println!("(no event #{n})");
+            return Ok(());
+        }
+        // The approval, then the calls it let through, in order.
+        events.reverse();
+    }
     if events.is_empty() {
         println!("(no events)");
         return Ok(());
     }
     for e in events {
+        let via = e
+            .via_event
+            .map(|n| format!(" via approval #{n}"))
+            .unwrap_or_default();
         let outcome = e.outcome.map(|o| match o {
             AuditOutcome::Err { message } => AuditOutcome::Err {
                 message: for_terminal(&message, MESSAGE_WIDTH),
@@ -52,7 +107,7 @@ pub fn run(args: AuditArgs, db_path: &Path) -> Result<()> {
             (None, None) => String::new(),
         };
         println!(
-            "{} [{}] {:24} {} {} → {:?} {:?}{who}",
+            "{} [{}] {:24} {} {} → {:?}{via} {:?}{who}",
             e.created_at.to_rfc3339(),
             e.id,
             for_terminal(&e.preset, PRESET_WIDTH),

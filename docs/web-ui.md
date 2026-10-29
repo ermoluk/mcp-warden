@@ -36,7 +36,7 @@ any other address.
 | `GET` | `/` | Dashboard: preset count, audit events in last 24 h |
 | `GET` | `/presets` | Table of all presets: name, kind, approval policy, description |
 | `GET` | `/presets/:name` | Detail page for a single preset (no secret values) |
-| `GET` | `/audit?limit=N` | Recent audit log entries (default 100, max 1000) |
+| `GET` | `/audit?limit=N&decision=D…` | Recent audit log entries (default 100, max 1000); repeat `decision` (`approved`, `denied`, `auto`, `timeout`, `windowed`, `refused`, `failed`) to show only those, filtered in SQL. The page has a matching checkbox form. |
 
 ## Next iterations
 

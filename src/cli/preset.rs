@@ -657,9 +657,11 @@ pub struct TestArgs {
 }
 
 impl TestArgs {
-    fn request(&self) -> Option<Request<'_>> {
+    /// The simulated call. `--params N` stands for N `null` parameters,
+    /// which `params` must hold.
+    fn request<'a>(&'a self, params: &'a [serde_json::Value]) -> Option<Request<'a>> {
         if let (Some(method), Some(path)) = (&self.method, &self.path) {
-            return Some(Request::Http { method, path });
+            return Some(Request::http(method, path));
         }
         if let Some(command) = &self.command {
             return Some(Request::Ssh { command });
@@ -667,17 +669,17 @@ impl TestArgs {
         if let Some([remote, local]) = self.get.as_deref().or(self.put.as_deref()) {
             return Some(Request::Sftp { remote, local });
         }
-        self.query.as_deref().map(|query| Request::Db {
-            query,
-            params: self.params,
-        })
+        self.query
+            .as_deref()
+            .map(|query| Request::Db { query, params })
     }
 }
 
 fn test_preset(args: TestArgs, config_path: &Path, kc: &dyn KeychainStore) -> Result<()> {
     let raw = fs::read_to_string(config_path).map_err(WardenError::Io)?;
     let cfg: Config = toml::from_str(&raw).map_err(|e| WardenError::Config(e.to_string()))?;
-    let Some(request) = args.request() else {
+    let nulls = vec![serde_json::Value::Null; args.params];
+    let Some(request) = args.request(&nulls) else {
         cfg.validate(kc)?;
         let p = cfg
             .find(&args.name)

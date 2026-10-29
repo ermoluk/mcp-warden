@@ -1,0 +1,88 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.ermoluk/mcp-warden",
+  "title": "mcp-warden",
+  "description": "Local credential broker: agents call APIs, SSH and DBs via scoped presets; secrets stay in keychain.",
+  "version": "@VERSION@",
+  "repository": {
+    "url": "https://github.com/ermoluk/mcp-warden",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "cargo",
+      "identifier": "mcp-warden",
+      "version": "@VERSION@",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ]
+    },
+    {
+      "registryType": "npm",
+      "registryBaseUrl": "https://registry.npmjs.org",
+      "identifier": "@mcp-warden/cli",
+      "version": "@VERSION@",
+      "runtimeHint": "npx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "mcp"
+        }
+      ]
+    },
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/ermoluk/mcp-warden/releases/download/v@VERSION@/mcp-warden-aarch64-apple-darwin.mcpb",
+      "version": "@VERSION@",
+      "fileSha256": "@SHA256:mcp-warden-aarch64-apple-darwin.mcpb@",
+      "transport": {
+        "type": "stdio"
+      }
+    },
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/ermoluk/mcp-warden/releases/download/v@VERSION@/mcp-warden-x86_64-apple-darwin.mcpb",
+      "version": "@VERSION@",
+      "fileSha256": "@SHA256:mcp-warden-x86_64-apple-darwin.mcpb@",
+      "transport": {
+        "type": "stdio"
+      }
+    },
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/ermoluk/mcp-warden/releases/download/v@VERSION@/mcp-warden-x86_64-pc-windows-msvc.mcpb",
+      "version": "@VERSION@",
+      "fileSha256": "@SHA256:mcp-warden-x86_64-pc-windows-msvc.mcpb@",
+      "transport": {
+        "type": "stdio"
+      }
+    },
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/ermoluk/mcp-warden/releases/download/v@VERSION@/mcp-warden-x86_64-unknown-linux-musl.mcpb",
+      "version": "@VERSION@",
+      "fileSha256": "@SHA256:mcp-warden-x86_64-unknown-linux-musl.mcpb@",
+      "transport": {
+        "type": "stdio"
+      }
+    },
+    {
+      "registryType": "mcpb",
+      "identifier": "https://github.com/ermoluk/mcp-warden/releases/download/v@VERSION@/mcp-warden-aarch64-unknown-linux-musl.mcpb",
+      "version": "@VERSION@",
+      "fileSha256": "@SHA256:mcp-warden-aarch64-unknown-linux-musl.mcpb@",
+      "transport": {
+        "type": "stdio"
+      }
+    }
+  ]
+}

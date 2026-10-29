@@ -4,19 +4,30 @@ resolver = "2"
 
 [package]
 name = "mcp-warden"
-version = "0.5.2"
+version = "0.5.3"
 edition = "2024"
 rust-version = "1.89"
 license = "Apache-2.0"
 description = "Local-first credential broker MCP server for AI coding agents."
 readme = "README.md"
-exclude = ["docs/demo.gif", "docs/demo/", "docs/brand/", "plugins/", ".claude-plugin/"]
+exclude = ["docs/demo.gif", "docs/demo/", "docs/brand/", "plugins/", ".claude-plugin/", "packaging/", "flake.nix", "flake.lock", "install.sh", "install.ps1", ".github/"]
 repository = "https://github.com/ermoluk/mcp-warden"
 keywords = ["mcp", "credentials", "ai-agent", "security", "keychain"]
 categories = ["command-line-utilities", "authentication"]
 
+# `cargo binstall mcp-warden` fetches the prebuilt archive from the GitHub
+# release instead of compiling.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/mcp-warden-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "mcp-warden{ binary-ext }"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/mcp-warden-{ target }.zip"
+pkg-fmt = "zip"
+
 [dependencies]
-mcp-warden-core = { version = "0.5.2", path = "core" }
+mcp-warden-core = { version = "0.5.3", path = "core" }
 clap = { version = "4.5", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "process", "signal", "time", "sync", "fs"] }
 serde = { version = "1", features = ["derive"] }
@@ -31,6 +42,7 @@ tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 url = "2"
 percent-encoding = "2.3"
+unicode-normalization = "0.1.25"
 base64 = "0.22"
 getrandom = "0.3"
 memchr = "2"
@@ -65,6 +77,7 @@ assert_cmd = "2"
 predicates = "3"
 tempfile = "3"
 wiremock = "0.6"
+proptest = { version = "1", default-features = false, features = ["std"] }
 
 [profile.release]
 lto = "thin"

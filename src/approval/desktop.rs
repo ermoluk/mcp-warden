@@ -27,6 +27,7 @@ impl ApprovalTransport for DesktopApproval {
             .try_into()
             .unwrap_or(60_000);
         let window_seconds = req.window_seconds;
+        let window_text = super::window_button(&req);
 
         let res = tokio::task::spawn_blocking(move || -> Result<ApprovalDecision> {
             let mut n = notify_rust::Notification::new();
@@ -37,8 +38,8 @@ impl ApprovalTransport for DesktopApproval {
             #[cfg(target_os = "linux")]
             {
                 n.action("approve", "Approve once");
-                if let Some(secs) = window_seconds {
-                    n.action("approve_window", &super::window_label(secs));
+                if let Some(text) = &window_text {
+                    n.action("approve_window", text);
                 }
                 n.action("deny", "Deny");
                 let handle = n.show().map_err(|e| WardenError::Executor(e.to_string()))?;
@@ -59,7 +60,7 @@ impl ApprovalTransport for DesktopApproval {
             {
                 // window_seconds is unused on non-Linux because no interactive
                 // notification actions are wired up.
-                let _ = window_seconds;
+                let _ = (window_seconds, window_text);
                 let _ = n.show().map_err(|e| WardenError::Executor(e.to_string()))?;
                 Ok(ApprovalDecision::Timeout)
             }

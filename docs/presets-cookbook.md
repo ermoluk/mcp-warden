@@ -61,9 +61,11 @@ approval_window_seconds = 600
 ```
 
 When the agent triggers the first call, the approval prompt offers a
-third choice: **Approve for 10 min**. Subsequent `proxy_http` calls on
-`linear-read` inside the window proceed without re-prompting and are
-recorded with `decision = "windowed"` in `mcp-warden audit recent`.
+third choice: **Approve for 10 min: every proxy_http call linear-read allows
+runs without asking until 14:32** (the time the window ends, fixed when the
+prompt appears). Subsequent `proxy_http` calls on `linear-read` inside the
+window proceed without re-prompting and are recorded with
+`decision = "windowed"` — `mcp-warden audit --decision windowed` lists them.
 Restart `mcp-warden mcp` to clear all active windows.
 
 Set or change the cap from the CLI:
@@ -103,6 +105,11 @@ letters, digits and `- _ . / : = @ , + %`. Quotes, `$`, backticks, globs and
 redirections never reach the host, so don't write patterns that need them.
 Still keep each argument tight (`[a-z0-9_-]+`, `\d+`) — a loose `.*` lets
 the agent add options of its own.
+
+On the server, give the key its own account and a second allow-list — a
+forced command in `authorized_keys` or `ForceCommand` — so a pattern that is
+too broad or a leaked key still can't run anything else. Step by step, with a
+working gate script: [`docs/ssh-hardening.md`](ssh-hardening.md).
 
 ## SSH + SFTP — Log fetcher
 

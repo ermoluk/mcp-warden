@@ -1,14 +1,13 @@
 use crate::web::server::AppState;
 use axum::{
-    extract::{Path, Query, State},
+    extract::{Path, RawQuery, State},
     http::StatusCode,
     response::{Html, IntoResponse, Response},
 };
 use chrono::Utc;
 use mcp_warden_core::audit::sqlite_sink::LocalSqlite;
-use mcp_warden_core::audit::{AuditDecision, AuditEvent, AuditOutcome, AuditSink};
+use mcp_warden_core::audit::{AuditDecision, AuditEvent, AuditFilter, AuditOutcome, AuditSink};
 use mcp_warden_core::config::{ApprovalPolicy, Config, Preset, PresetType};
-use std::collections::HashMap;
 use std::sync::Arc;
 
 // ---------------------------------------------------------------------------
@@ -150,16 +149,7 @@ fn type_label(t: PresetType) -> &'static str {
 }
 
 fn decision_label(d: Option<AuditDecision>) -> &'static str {
-    match d {
-        Some(AuditDecision::Approved) => "approved",
-        Some(AuditDecision::Denied) => "denied",
-        Some(AuditDecision::Auto) => "auto",
-        Some(AuditDecision::Timeout) => "timeout",
-        Some(AuditDecision::Windowed) => "windowed",
-        Some(AuditDecision::Refused) => "refused",
-        Some(AuditDecision::Failed) => "failed",
-        None => "—",
-    }
+    d.map_or("—", AuditDecision::as_str)
 }
 
 fn outcome_cell(o: &Option<AuditOutcome>) -> String {
@@ -381,16 +371,67 @@ fn render_preset_detail(p: &Preset) -> String {
     format!("<dl>{rows}</dl>")
 }
 
-/// `GET /audit?limit=N` — Recent audit log entries.
-pub async fn audit_log(
-    State(state): State<Arc<AppState>>,
-    Query(params): Query<HashMap<String, String>>,
-) -> Response {
-    let limit: usize = params
-        .get("limit")
-        .and_then(|v| v.parse().ok())
-        .unwrap_or(100)
-        .min(1000);
+/// `?decision=refused&decision=failed&limit=N`: repeated `decision`s (unknown
+/// names are ignored) and a limit of 1..=1000, default 100.
+fn audit_query(raw: Option<&str>) -> (AuditFilter, usize) {
+    let mut filter = AuditFilter::default();
+    let mut limit = 100;
+    for (key, value) in url::form_urlencoded::parse(raw.unwrap_or("").as_bytes()) {
+        match &*key {
+            "decision" => {
+                if let Some(d) = AuditDecision::from_name(&value)
+                    && !filter.decisions.contains(&d)
+                {
+                    filter.decisions.push(d);
+                }
+            }
+            "limit" => limit = value.parse().unwrap_or(limit),
+            _ => {}
+        }
+    }
+    let limit = limit.clamp(1, 1000);
+    filter.limit = Some(limit);
+    (filter, limit)
+}
+
+/// A plain GET form — the CSP allows no script — that keeps the current
+/// choice, plus limit links that keep the decision filter.
+fn audit_filter_form(filter: &AuditFilter, limit: usize) -> String {
+    let boxes: String = AuditDecision::ALL
+        .iter()
+        .map(|d| {
+            let checked = if filter.decisions.contains(d) { " checked" } else { "" };
+            format!(
+                r#"<label><input type="checkbox" name="decision" value="{name}"{checked}> {name}</label> "#,
+                name = d.as_str()
+            )
+        })
+        .collect();
+    let link = |n: usize| {
+        let mut q = url::form_urlencoded::Serializer::new(String::new());
+        q.append_pair("limit", &n.to_string());
+        for d in &filter.decisions {
+            q.append_pair("decision", d.as_str());
+        }
+        format!(r#"<a href="/audit?{}">{n}</a>"#, esc(&q.finish()))
+    };
+    format!(
+        r#"<form method="get" action="/audit">
+  <p>Decision: {boxes}
+  <input type="hidden" name="limit" value="{limit}">
+  <button type="submit">Filter</button> <a href="/audit">Clear</a></p>
+</form>
+<p>{} | {} | {}</p>"#,
+        link(50),
+        link(100),
+        link(500),
+    )
+}
+
+/// `GET /audit?decision=…&limit=N` — Recent audit log entries, optionally
+/// only those with the given decisions (filtered in SQL).
+pub async fn audit_log(State(state): State<Arc<AppState>>, RawQuery(raw): RawQuery) -> Response {
+    let (filter, limit) = audit_query(raw.as_deref());
 
     if !state.audit_db.exists() {
         let body = r#"<h1>Audit log</h1>
@@ -403,15 +444,19 @@ pub async fn audit_log(
         Err(e) => return err_page(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
 
-    let events: Vec<AuditEvent> = match sink.recent(limit) {
+    let events: Vec<AuditEvent> = match sink.query(&filter) {
         Ok(v) => v,
         Err(e) => return err_page(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
 
     if events.is_empty() {
-        let body = r#"<h1>Audit log</h1>
-<p class="empty">No events recorded yet.</p>"#;
-        return Html(page("Audit log", body)).into_response();
+        let body = format!(
+            r#"<h1>Audit log</h1>
+{}
+<p class="empty">No events match.</p>"#,
+            audit_filter_form(&filter, limit)
+        );
+        return Html(page("Audit log", &body)).into_response();
     }
 
     let mut rows = String::new();
@@ -436,7 +481,10 @@ pub async fn audit_log(
             // values — credentials are read only after authorisation — but
             // they are untrusted, so they are HTML-escaped like everything else.
             summary = esc(&e.summary),
-            decision = esc(decision_label(e.decision)),
+            decision = esc(&match e.via_event {
+                Some(n) => format!("{} via #{n}", decision_label(e.decision)),
+                None => decision_label(e.decision).to_string(),
+            }),
             outcome = outcome_cell(&e.outcome),
             // Client name/version come from the MCP client: escaped too.
             client = esc(&match (&e.client, &e.session) {
@@ -448,11 +496,7 @@ pub async fn audit_log(
 
     let body = format!(
         r#"<h1>Audit log <small>(last {limit})</small></h1>
-<p>
-  <a href="/audit?limit=50">50</a> |
-  <a href="/audit?limit=100">100</a> |
-  <a href="/audit?limit=500">500</a>
-</p>
+{form}
 <table>
   <thead>
     <tr>
@@ -463,6 +507,7 @@ pub async fn audit_log(
   <tbody>{rows}</tbody>
 </table>"#,
         limit = limit,
+        form = audit_filter_form(&filter, limit),
         rows = rows,
     );
     Html(page("Audit log", &body)).into_response()
@@ -485,4 +530,75 @@ fn try_load_config_raw(path: &std::path::Path) -> Result<Config, String> {
     }
     let raw = std::fs::read_to_string(path).map_err(|e| format!("Could not read config: {e}"))?;
     toml::from_str(&raw).map_err(|e| format!("Config parse error: {e}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use axum::extract::RawQuery;
+
+    fn state_with_events(dir: &std::path::Path) -> Arc<AppState> {
+        let audit_db = dir.join("audit.db");
+        let sink = LocalSqlite::open(&audit_db).unwrap();
+        for d in AuditDecision::ALL {
+            let id = sink
+                .record_pending("p", "proxy_http", &format!("GET /{}", d.as_str()))
+                .unwrap();
+            sink.record_decision(id, d).unwrap();
+        }
+        Arc::new(AppState {
+            config_path: dir.join("config.toml"),
+            audit_db,
+        })
+    }
+
+    async fn body(resp: Response) -> String {
+        let bytes = axum::body::to_bytes(resp.into_body(), usize::MAX)
+            .await
+            .unwrap();
+        String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    #[test]
+    fn audit_query_reads_repeated_decisions_and_the_limit() {
+        let (filter, limit) = audit_query(Some("decision=refused&decision=failed&limit=5"));
+        assert_eq!(
+            filter.decisions,
+            [AuditDecision::Refused, AuditDecision::Failed]
+        );
+        assert_eq!((filter.limit, limit), (Some(5), 5));
+        let (filter, limit) = audit_query(Some("decision=bogus&limit=99999"));
+        assert!(filter.decisions.is_empty(), "unknown names are ignored");
+        assert_eq!(limit, 1000);
+        assert_eq!(audit_query(None).1, 100);
+    }
+
+    #[tokio::test]
+    async fn audit_page_filters_by_decision() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_events(dir.path());
+        let html = body(
+            audit_log(
+                State(state.clone()),
+                RawQuery(Some("decision=refused&decision=failed".into())),
+            )
+            .await,
+        )
+        .await;
+        assert!(html.contains("GET /refused") && html.contains("GET /failed"));
+        assert!(!html.contains("GET /approved") && !html.contains("GET /windowed"));
+        // The form keeps the choice, and the limit links keep the filter.
+        assert!(
+            html.contains(r#"name="decision" value="refused" checked"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"name="decision" value="approved">"#),
+            "{html}"
+        );
+        assert!(html.contains("/audit?limit=50&amp;decision=refused&amp;decision=failed"));
+
+        let html = body(audit_log(State(state), RawQuery(None)).await).await;
+        assert!(html.contains("GET /approved") && html.contains("GET /failed"));
+    }
 }
