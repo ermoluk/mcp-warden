@@ -32,22 +32,14 @@ Every option installs the same single binary — no background service, no auto-
 brew install ermoluk/tap/mcp-warden
 ```
 
-**Windows — Scoop or winget**
+**Windows — Scoop**
 
 ```powershell
 scoop bucket add ermoluk https://github.com/ermoluk/scoop-bucket
 scoop install ermoluk/mcp-warden
 ```
 
-```powershell
-winget install ermoluk.mcp-warden
-```
-
-**Arch Linux — AUR**
-
-```bash
-yay -S mcp-warden-bin
-```
+A winget package (`ermoluk.mcp-warden`) and an AUR package (`mcp-warden-bin`) are coming but not listed yet. Until they are, use Scoop on Windows, and Homebrew or the install script below on Arch Linux; on Linux the script installs the static musl build.
 
 **Nix** (builds from source)
 
@@ -189,7 +181,7 @@ Other MCP clients: see [`docs/claude-code-setup.md`](docs/claude-code-setup.md) 
 - **A hostile-input corpus and property tests in CI**, so a past bypass can't come back.
 - **The approval-window button says what it allows** — `Approve for 10 min: every proxy_http call github-read allows runs without asking until 14:32` — and the window ends at exactly that time.
 - **Audit filters:** `mcp-warden audit --decision refused --decision failed`, the same filter in `mcp-warden web`, and `audit --window N` for every call one approval let through.
-- **Install without Rust:** Homebrew, Scoop, winget, AUR, Nix, npm (`npx -y @mcp-warden/cli mcp`), `cargo binstall`, install scripts and a Claude Desktop bundle; Windows and Linux arm64 binaries.
+- **Install without Rust:** Homebrew, Scoop, Nix, npm (`npx -y @mcp-warden/cli mcp`), `cargo binstall`, install scripts and a Claude Desktop bundle, with winget and AUR to follow; Windows and Linux arm64 binaries.
 - **[Hardening the SSH side](docs/ssh-hardening.md):** a second allow-list on the server with `command=` / `ForceCommand`.
 
 Behaviour changes and the full list: [CHANGELOG.md](CHANGELOG.md).
@@ -210,7 +202,7 @@ Other MCP credential brokers make different trade-offs:
 | Kill switch | `mcp-warden lock`, or `/lock` in Telegram | ? | Revoke an agent in the vault | Revoke a session (`janee revoke`) |
 | Works with any MCP client | Yes | Yes | Yes | Yes |
 | License | Apache-2.0 | MIT | AGPL-3.0 (the hosted vault is not open source) | MIT |
-| Install | Homebrew, Scoop, winget, AUR, Nix, npm, `cargo install` / `binstall`, binaries for macOS / Linux / Windows | Homebrew, Scoop, `go install`, binaries | npm plus a broker installer, free account | npm or Docker |
+| Install | Homebrew, Scoop, Nix, npm, `cargo install` / `binstall`, binaries for macOS / Linux / Windows | Homebrew, Scoop, `go install`, binaries | npm plus a broker installer, free account | npm or Docker |
 
 Compared with Keyward 0.1.1, Wundervault MCP server 2.0.1 and Janee 0.16.0, from each project's README and docs as of October 2026. `?` means not documented there. If something here is wrong or out of date, please open an issue.
 

@@ -16,7 +16,8 @@ The mcp-warden Claude Code plugin is installed, but the mcp-warden binary was
 not found, so its MCP server cannot start. If the user asks for anything that
 needs credentials, tell them to install it first, for example:
   brew install ermoluk/tap/mcp-warden                       (macOS, Linux)
-  winget install ermoluk.mcp-warden                         (Windows)
+  scoop bucket add ermoluk https://github.com/ermoluk/scoop-bucket
+  scoop install ermoluk/mcp-warden                          (Windows, after the line above)
   curl -fsSL https://github.com/ermoluk/mcp-warden/releases/latest/download/install.sh | sh
   cargo install --locked mcp-warden                         (Rust toolchain)
 All options: https://github.com/ermoluk/mcp-warden#install

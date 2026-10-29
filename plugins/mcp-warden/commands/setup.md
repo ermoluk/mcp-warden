@@ -19,7 +19,8 @@ If it is missing, tell the user the ways to install it and ask which they want
 before running anything:
 
 - macOS or Linux with Homebrew: `brew install ermoluk/tap/mcp-warden`
-- Windows: `winget install ermoluk.mcp-warden` or Scoop (see the README)
+- Windows: Scoop — `scoop bucket add ermoluk https://github.com/ermoluk/scoop-bucket`,
+  then `scoop install ermoluk/mcp-warden`
 - any macOS or Linux machine: `curl -fsSL https://github.com/ermoluk/mcp-warden/releases/latest/download/install.sh | sh`
   (checks the release checksum, installs to `~/.local/bin`, no sudo)
 - with a Rust toolchain: `cargo install --locked mcp-warden`
