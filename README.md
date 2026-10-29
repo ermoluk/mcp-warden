@@ -24,12 +24,76 @@ The agent's context window contains zero secrets.
 
 ## Install
 
+Every option installs the same single binary — no background service, no auto-updater, no telemetry. To update, run the same tool again.
+
+**macOS and Linux — Homebrew**
+
 ```bash
-cargo install --locked mcp-warden # from crates.io
-cargo install --locked --path .   # or from a clone
+brew install ermoluk/tap/mcp-warden
 ```
 
-Pre-built binaries for macOS (x86_64, aarch64) and Linux (x86_64), each with a SHA-256 checksum, are attached to every [GitHub release](https://github.com/ermoluk/mcp-warden/releases).
+**Windows — Scoop or winget**
+
+```powershell
+scoop bucket add ermoluk https://github.com/ermoluk/scoop-bucket
+scoop install ermoluk/mcp-warden
+```
+
+```powershell
+winget install ermoluk.mcp-warden
+```
+
+**Arch Linux — AUR**
+
+```bash
+yay -S mcp-warden-bin
+```
+
+**Nix** (builds from source)
+
+```bash
+nix profile install github:ermoluk/mcp-warden
+```
+
+**npm** — for MCP clients configured with `npx`. The package is scoped: the unscoped `mcp-warden` on npm is an unrelated project.
+
+```json
+{ "mcpServers": { "mcp-warden": { "command": "npx", "args": ["-y", "@mcp-warden/cli", "mcp"] } } }
+```
+
+The binary for your platform comes from an optional dependency; nothing is downloaded at install or run time. `npx @mcp-warden/cli init` and the other subcommands work the same way.
+
+**Rust** — prebuilt with [cargo-binstall](https://github.com/cargo-bins/cargo-binstall), or from source (Rust 1.89+):
+
+```bash
+cargo binstall mcp-warden
+```
+
+```bash
+cargo install --locked mcp-warden
+```
+
+**Install script** — downloads the release archive for your machine, refuses it unless it matches the release's `SHA256SUMS`, and puts the binary in `~/.local/bin` (Windows: `%LOCALAPPDATA%\Programs\mcp-warden\bin`). No sudo, and it changes neither your PATH nor your shell profile. Read it first if you like: [`install.sh`](install.sh), [`install.ps1`](install.ps1).
+
+```bash
+curl -fsSL https://github.com/ermoluk/mcp-warden/releases/latest/download/install.sh | sh
+```
+
+```powershell
+irm https://github.com/ermoluk/mcp-warden/releases/latest/download/install.ps1 | iex
+```
+
+**Claude Desktop** — download the `.mcpb` bundle for your platform from the [latest release](https://github.com/ermoluk/mcp-warden/releases/latest) and open it. The bundle contains only the server; install the CLI with one of the options above to create presets and store secrets.
+
+**By hand** — every [GitHub release](https://github.com/ermoluk/mcp-warden/releases) has archives for macOS (arm64, x86_64), Linux (x86_64, aarch64; static musl builds, plus an x86_64 glibc build) and Windows (x86_64), a combined `SHA256SUMS`, and a build-provenance attestation for each archive:
+
+```bash
+gh attestation verify mcp-warden-aarch64-apple-darwin.tar.gz --repo ermoluk/mcp-warden
+```
+
+The macOS binaries are not notarized. Homebrew, npm, cargo and the install script don't mark them as downloaded, but an archive or bundle saved from a browser may be blocked by Gatekeeper until you run `xattr -d com.apple.quarantine` on it.
+
+There is no Docker image, on purpose: the OS keychain — macOS Keychain, Windows Credential Manager, the Linux kernel keyring — isn't reachable from inside a container, and mcp-warden never falls back to keeping secrets in a file.
 
 ## 90-second quickstart
 
@@ -118,6 +182,18 @@ Restart Claude Code and run `/mcp-warden:setup`. If you previously added the ser
 
 Other MCP clients: see [`docs/claude-code-setup.md`](docs/claude-code-setup.md) and [`docs/cursor-setup.md`](docs/cursor-setup.md) for manual setup.
 
+## What's new in v0.5.3
+
+- **Two more allow-list bypasses closed** (reported on r/mcp): `proxy_http` refuses `%uXXXX` and other malformed escapes, which IIS and ASP.NET decode, and paths that Unicode normalisation would change — fullwidth `／`, `．．` and `＼`, sent percent-encoded.
+- **Hard limits on agent input** — path, query and body for `proxy_http`, the `ssh_exec` command, SFTP paths and `db_query` parameters — checked before anything else.
+- **A hostile-input corpus and property tests in CI**, so a past bypass can't come back.
+- **The approval-window button says what it allows** — `Approve for 10 min: every proxy_http call github-read allows runs without asking until 14:32` — and the window ends at exactly that time.
+- **Audit filters:** `mcp-warden audit --decision refused --decision failed`, the same filter in `mcp-warden web`, and `audit --window N` for every call one approval let through.
+- **Install without Rust:** Homebrew, Scoop, winget, AUR, Nix, npm (`npx -y @mcp-warden/cli mcp`), `cargo binstall`, install scripts and a Claude Desktop bundle; Windows and Linux arm64 binaries.
+- **[Hardening the SSH side](docs/ssh-hardening.md):** a second allow-list on the server with `command=` / `ForceCommand`.
+
+Behaviour changes and the full list: [CHANGELOG.md](CHANGELOG.md).
+
 ## How it compares
 
 Other MCP credential brokers make different trade-offs:
@@ -134,7 +210,7 @@ Other MCP credential brokers make different trade-offs:
 | Kill switch | `mcp-warden lock`, or `/lock` in Telegram | ? | Revoke an agent in the vault | Revoke a session (`janee revoke`) |
 | Works with any MCP client | Yes | Yes | Yes | Yes |
 | License | Apache-2.0 | MIT | AGPL-3.0 (the hosted vault is not open source) | MIT |
-| Install | `cargo install`, or binaries for macOS / Linux | Homebrew, Scoop, `go install`, binaries | npm plus a broker installer, free account | npm or Docker |
+| Install | Homebrew, Scoop, winget, AUR, Nix, npm, `cargo install` / `binstall`, binaries for macOS / Linux / Windows | Homebrew, Scoop, `go install`, binaries | npm plus a broker installer, free account | npm or Docker |
 
 Compared with Keyward 0.1.1, Wundervault MCP server 2.0.1 and Janee 0.16.0, from each project's README and docs as of October 2026. `?` means not documented there. If something here is wrong or out of date, please open an issue.
 
