@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file. The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **HTTP path allow-list bypass via non-standard `%uXXXX` escapes.** `percent_decode_str` decodes only `%` followed by two hex digits and leaves anything else as text, so `/users/%u005cadmin` reached the allow-list as an ordinary segment, which `/users/.*` matched — but IIS and ASP.NET decode `%u005c` to `\` (a separator to them) and `%u002e` to `.`. Every `%` in a path must now start an escape of exactly two hex digits; `%u…`, `%zz` and a trailing `%` are refused before the credential is read (invariants 3 and 6). Reported by atp_studio_coll on r/mcp. **Behaviour change:** a path with any other `%` is refused.
+
 ## [0.5.2]
 
 ### Security

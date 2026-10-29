@@ -72,6 +72,14 @@ pub fn validate_request(preset: &Preset, method: &str, path: &str) -> Result<()>
             "path '{path}' contains an encoded '%' (%25); double percent-encoding is refused"
         )));
     }
+    // `percent_decode_str` leaves any other `%` as it is, but servers differ
+    // on what follows: IIS and ASP.NET decode `%u005c` to `\` and `%u002e`
+    // to `.`. The allow-list can't see what such a server will route.
+    if !well_formed_escapes(path) {
+        return Err(WardenError::Validation(format!(
+            "path '{path}' has a '%' that is not followed by two hex digits"
+        )));
+    }
     let decoded = decode_path(path)?;
     if preset.allowed_paths.is_empty() {
         return Ok(());
@@ -90,6 +98,16 @@ pub fn validate_request(preset: &Preset, method: &str, path: &str) -> Result<()>
         "path '{path}' not allowed by preset '{}'",
         preset.name
     )))
+}
+
+/// Every `%` in `path` starts an escape of exactly two hex digits.
+fn well_formed_escapes(path: &str) -> bool {
+    let bytes = path.as_bytes();
+    bytes.iter().enumerate().all(|(i, &b)| {
+        b != b'%'
+            || matches!(bytes.get(i + 1..i + 3), Some([h, l])
+                if h.is_ascii_hexdigit() && l.is_ascii_hexdigit())
+    })
 }
 
 /// Percent-decode `path` for allow-list matching.
@@ -370,6 +388,28 @@ mod tests {
             let err = validate_request(&q, "GET", evil).unwrap_err();
             assert!(err.to_string().contains("%25"), "{evil}: {err}");
         }
+    }
+
+    #[test]
+    fn rejects_malformed_percent_escapes() {
+        // `percent_decode_str` leaves `%` alone unless two hex digits follow,
+        // so `%u005c` reached the allow-list as text — but IIS and ASP.NET
+        // decode the non-standard `%uXXXX` to `\` / `.`.
+        let mut q = p();
+        q.allowed_paths = vec!["/users/.*".into()];
+        for evil in [
+            "/users/%u005cadmin",
+            "/users/%U005Cadmin",
+            "/users/%u002e%u002e/admin",
+            "/users/a%zz",
+            "/users/a%2",
+            "/users/a%",
+            "/users/%%32%65",
+        ] {
+            let err = validate_request(&q, "GET", evil).unwrap_err();
+            assert!(err.to_string().contains("two hex digits"), "{evil}: {err}");
+        }
+        validate_request(&q, "GET", "/users/a%2Db%7E").unwrap();
     }
 
     #[test]
