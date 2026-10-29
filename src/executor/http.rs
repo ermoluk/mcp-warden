@@ -363,22 +363,26 @@ mod tests {
         }
     }
 
+    // Inputs refused whatever the allow-list says are in
+    // `tests/corpus/paths.txt`; the tests below pin the error each check
+    // gives the agent and what depends on the preset's patterns.
+
     #[test]
-    fn rejects_encoded_traversal_and_backslashes() {
+    fn structural_refusals_say_why() {
         let mut q = p();
-        q.allowed_paths = vec!["/users/.*".into()];
-        for evil in [
-            "/users/%2e%2e/admin",
-            "/users/%2E%2E/admin",
-            "/users/.%2e/admin",
-            "/users/x%5cadmin",
-            "/users/x\\admin",
-            "/users/./admin",
+        q.allowed_paths = vec![];
+        for (evil, why) in [
+            (
+                "/users/%2e%2e/admin",
+                "dot segments, encoded dots or backslashes",
+            ),
+            ("/user//repos", "empty segment"),
+            ("/users/a%2F.%2Fb", "once percent-decoded"),
+            ("/users/a%0ab", "control characters"),
+            ("/users/a%ff", "not valid UTF-8"),
         ] {
-            assert!(
-                validate_request(&q, "GET", evil).is_err(),
-                "should reject: {evil}"
-            );
+            let err = validate_request(&q, "GET", evil).unwrap_err();
+            assert!(err.to_string().contains(why), "{evil}: {err}");
         }
     }
 
@@ -391,9 +395,6 @@ mod tests {
         q.allowed_paths = vec!["/users/.*".into(), "/repos/o/[^/]+".into()];
         for evil in [
             "/users/%252e%252e/admin",
-            "/users/%252E%252E/admin",
-            "/users/%25%32%65%25%32%65/admin",
-            "/users/%25252e%25252e/admin",
             "/repos/o/x%252Fcollaborators",
             // A literal `%` is refused too: it can't be told apart.
             "/users/100%25",
@@ -412,12 +413,8 @@ mod tests {
         q.allowed_paths = vec!["/users/.*".into()];
         for evil in [
             "/users/%u005cadmin",
-            "/users/%U005Cadmin",
             "/users/%u002e%u002e/admin",
-            "/users/a%zz",
-            "/users/a%2",
             "/users/a%",
-            "/users/%%32%65",
         ] {
             let err = validate_request(&q, "GET", evil).unwrap_err();
             assert!(err.to_string().contains("two hex digits"), "{evil}: {err}");
@@ -434,14 +431,8 @@ mod tests {
         for evil in [
             "/users/a%EF%BC%8Fadmin",
             "/users/%EF%BC%8E%EF%BC%8E/admin",
-            "/users/a%EF%BC%BCadmin",
-            "/users/a／admin",
-            "/users/．．/admin",
+            // Raw, too, before `build_url` would refuse to send it.
             "/users/a＼admin",
-            // KELVIN SIGN, `ﬁ` ligature, superscript two.
-            "/users/%E2%84%AA",
-            "/users/%EF%AC%81le",
-            "/users/x%C2%B2",
             // `и` + COMBINING BREVE: NFKC composes it to `й`.
             "/users/%D0%B8%CC%86",
         ] {
@@ -503,57 +494,6 @@ mod tests {
         let mut q = p();
         q.allowed_paths = vec!["/files/a+b".into()];
         validate_request(&q, "GET", "/files/a%2Bb").unwrap();
-    }
-
-    #[test]
-    fn rejects_empty_segments_raw_or_decoded() {
-        // Upstreams that merge slashes would route a different path than
-        // the allow-list saw. Empty allowed_paths: only the structural
-        // checks stand between these and the upstream.
-        let mut q = p();
-        q.allowed_paths = vec![];
-        for evil in [
-            "/user//repos",
-            "//user/repos",
-            "/user/%2Frepos",
-            "/user%2F%2Frepos",
-        ] {
-            assert!(
-                validate_request(&q, "GET", evil).is_err(),
-                "should reject: {evil}"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_decoded_control_chars_and_invalid_utf8() {
-        let mut q = p();
-        q.allowed_paths = vec![];
-        for evil in [
-            "/users/a%00b",
-            "/users/a%0ab",
-            "/users/a%0D%0Ab",
-            "/users/a%7fb",
-            "/users/a%ff",
-            "/users/a%c3%28",
-        ] {
-            assert!(
-                validate_request(&q, "GET", evil).is_err(),
-                "should reject: {evil}"
-            );
-        }
-    }
-
-    #[test]
-    fn rejects_dot_segments_that_appear_only_after_decoding() {
-        let mut q = p();
-        q.allowed_paths = vec![];
-        for evil in ["/users/a%2F.%2Fb", "/users/a%2F.", "/users/.%2Fb"] {
-            assert!(
-                validate_request(&q, "GET", evil).is_err(),
-                "should reject: {evil}"
-            );
-        }
     }
 
     #[test]

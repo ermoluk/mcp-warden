@@ -352,4 +352,133 @@ mod tests {
             other => panic!("{other:?}"),
         }
     }
+
+    // -------- hostile-input corpus --------
+
+    /// `tests/corpus/*.txt` entries as `(line, input, note)`. The format is
+    /// described at the top of each file.
+    fn corpus(text: &str) -> Vec<(usize, String, String)> {
+        text.lines()
+            .enumerate()
+            .filter(|(_, line)| !line.is_empty() && !line.starts_with('#'))
+            .map(|(i, line)| {
+                let (raw, note) = line
+                    .split_once("  # ")
+                    .unwrap_or_else(|| panic!("line {}: no `  # <note>`: {line:?}", i + 1));
+                assert!(
+                    note.contains("(since v"),
+                    "line {}: the note must say `(since vX.Y.Z)`: {line:?}",
+                    i + 1
+                );
+                (i + 1, unescape(raw, i + 1), note.to_string())
+            })
+            .collect()
+    }
+
+    fn unescape(raw: &str, line: usize) -> String {
+        let mut out = String::new();
+        let mut chars = raw.chars();
+        let bad = |what: &str| -> ! { panic!("line {line}: {what} in {raw:?}") };
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                out.push(c);
+                continue;
+            }
+            match chars.next() {
+                Some('\\') => out.push('\\'),
+                Some('n') => out.push('\n'),
+                Some('r') => out.push('\r'),
+                Some('t') => out.push('\t'),
+                Some('x') => {
+                    let hex: String = chars.by_ref().take(2).collect();
+                    let byte = u8::from_str_radix(&hex, 16).unwrap_or_else(|_| bad("bad \\xNN"));
+                    out.push(char::from(byte));
+                }
+                Some('u') => {
+                    if chars.next() != Some('{') {
+                        bad("\\u without {");
+                    }
+                    let hex: String = chars.by_ref().take_while(|c| *c != '}').collect();
+                    let code = u32::from_str_radix(&hex, 16).unwrap_or_else(|_| bad("bad \\u{}"));
+                    out.push(char::from_u32(code).unwrap_or_else(|| bad("bad \\u{}")));
+                }
+                Some('{') => {
+                    let spec: String = chars.by_ref().take_while(|c| *c != '}').collect();
+                    let (c, n) = spec.split_once('*').unwrap_or_else(|| bad("bad \\{c*N}"));
+                    let n: usize = n.parse().unwrap_or_else(|_| bad("bad \\{c*N}"));
+                    out.push_str(&c.repeat(n));
+                }
+                _ => bad("unknown escape"),
+            }
+        }
+        out
+    }
+
+    /// Every entry of `text` must be refused for `preset`; returns how many
+    /// were checked.
+    fn assert_all_refused(
+        file: &str,
+        text: &str,
+        preset: &Preset,
+        req: impl Fn(&str) -> Request,
+    ) -> usize {
+        let entries = corpus(text);
+        let allowed: Vec<String> = entries
+            .iter()
+            .filter(|(_, input, _)| check_request(preset, &req(input)).is_ok())
+            .map(|(line, input, note)| format!("  {file}:{line}: {input:?} — {note}"))
+            .collect();
+        assert!(
+            allowed.is_empty(),
+            "allowed by a preset that permits everything:\n{}",
+            allowed.join("\n")
+        );
+        entries.len()
+    }
+
+    #[test]
+    fn hostile_corpus_paths_are_refused_whatever_the_allow_list() {
+        let mut wide = http(ApprovalPolicy::Auto);
+        wide.allowed_paths = vec![".*".into()];
+        // The allow-list really is wide open: an ordinary path passes.
+        check_request(&wide, &Request::http("GET", "/repos/o/r/issues")).unwrap();
+        let n = assert_all_refused(
+            "tests/corpus/paths.txt",
+            include_str!("../../tests/corpus/paths.txt"),
+            &wide,
+            |path| Request::http("GET", path),
+        );
+        assert!(n >= 50, "only {n} entries in tests/corpus/paths.txt");
+    }
+
+    #[test]
+    fn hostile_corpus_commands_are_refused_whatever_the_allow_list() {
+        let mut wide = ssh();
+        wide.allowed_commands = vec![".*".into()];
+        check_request(
+            &wide,
+            &Request::Ssh {
+                command: "git pull",
+            },
+        )
+        .unwrap();
+        let n = assert_all_refused(
+            "tests/corpus/commands.txt",
+            include_str!("../../tests/corpus/commands.txt"),
+            &wide,
+            |command| Request::Ssh { command },
+        );
+        assert!(n >= 40, "only {n} entries in tests/corpus/commands.txt");
+    }
+
+    #[test]
+    fn corpus_escapes() {
+        assert_eq!(
+            unescape(r"a\\b\n\t\x00\x20\u{FF0F}\{z*3}", 1),
+            "a\\b\n\t\0 ／zzz"
+        );
+        let entries = corpus("# comment\n\n  # empty input (since v0.1.0)\nx#y  # z (since v1)\n");
+        assert_eq!(entries[0].1, "");
+        assert_eq!(entries[1].1, "x#y");
+    }
 }
