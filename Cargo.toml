@@ -10,10 +10,21 @@ rust-version = "1.89"
 license = "Apache-2.0"
 description = "Local-first credential broker MCP server for AI coding agents."
 readme = "README.md"
-exclude = ["docs/demo.gif", "docs/demo/", "docs/brand/", "plugins/", ".claude-plugin/"]
+exclude = ["docs/demo.gif", "docs/demo/", "docs/brand/", "plugins/", ".claude-plugin/", "packaging/", "flake.nix", "flake.lock", "install.sh", "install.ps1", ".github/"]
 repository = "https://github.com/ermoluk/mcp-warden"
 keywords = ["mcp", "credentials", "ai-agent", "security", "keychain"]
 categories = ["command-line-utilities", "authentication"]
+
+# `cargo binstall mcp-warden` fetches the prebuilt archive from the GitHub
+# release instead of compiling.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/mcp-warden-{ target }.tar.gz"
+pkg-fmt = "tgz"
+bin-dir = "mcp-warden{ binary-ext }"
+
+[package.metadata.binstall.overrides.x86_64-pc-windows-msvc]
+pkg-url = "{ repo }/releases/download/v{ version }/mcp-warden-{ target }.zip"
+pkg-fmt = "zip"
 
 [dependencies]
 mcp-warden-core = { version = "0.5.2", path = "core" }
