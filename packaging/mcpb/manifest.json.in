@@ -1,0 +1,41 @@
+{
+  "manifest_version": "0.3",
+  "name": "mcp-warden",
+  "display_name": "mcp-warden",
+  "version": "@VERSION@",
+  "description": "Local credential broker: agents call APIs, SSH and databases through scoped presets; secrets stay in the OS keychain.",
+  "long_description": "mcp-warden lets an AI agent take real, scoped actions — HTTP calls, SSH commands, SFTP transfers, named database queries — without ever seeing the credential. The agent calls a tool, mcp-warden checks the request against the preset's allow-list, asks you when the preset says so, injects the secret from the OS keychain and returns only the result. This bundle installs the server. To create presets and store secrets, install the mcp-warden command-line tool as well (Homebrew, Scoop, winget, npm or the install script) and run `mcp-warden init`.",
+  "author": {
+    "name": "ermoluk",
+    "url": "https://github.com/ermoluk"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/ermoluk/mcp-warden"
+  },
+  "homepage": "https://github.com/ermoluk/mcp-warden",
+  "documentation": "https://github.com/ermoluk/mcp-warden#readme",
+  "support": "https://github.com/ermoluk/mcp-warden/issues",
+  "icon": "icon.png",
+  "license": "Apache-2.0",
+  "keywords": ["credentials", "keychain", "security", "secrets", "ssh", "api"],
+  "server": {
+    "type": "binary",
+    "entry_point": "server/@EXE@",
+    "mcp_config": {
+      "command": "${__dirname}/server/@EXE@",
+      "args": ["mcp"]
+    }
+  },
+  "tools": [
+    { "name": "list_presets", "description": "List the scoped actions the agent may take." },
+    { "name": "proxy_http", "description": "HTTP request to a preset's base URL, method and path allow-list, with the credential injected." },
+    { "name": "get_secret_for_env", "description": "Reveal one secret for a legacy tool, after explicit approval every time." },
+    { "name": "ssh_exec", "description": "Run an allow-listed command on a host whose key is pinned in known_hosts." },
+    { "name": "sftp_transfer", "description": "Get or put a file along an allow-listed path." },
+    { "name": "db_query", "description": "Run a named query (PostgreSQL, MySQL, Redis) defined in the preset." }
+  ],
+  "compatibility": {
+    "platforms": ["@PLATFORM@"]
+  }
+}

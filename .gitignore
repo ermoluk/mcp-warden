@@ -6,3 +6,7 @@
 /.vscode
 *.swp
 Cargo.lock.bak
+# packaging/package.sh, render.sh and npm/pack.sh output
+/packaging/dist/
+/dist/
+/out/
