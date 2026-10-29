@@ -24,7 +24,7 @@ client. README and marketing position this as agent-agnostic.
 
 | Concern                    | Crate                          |
 |----------------------------|--------------------------------|
-| Cross-platform keychain    | `keyring` 4                    |
+| Cross-platform keychain    | `keyring-core` 1 + the OS stores (`apple-native-keyring-store`, `windows-native-keyring-store`, `linux-keyutils-keyring-store`) |
 | CLI                        | `clap` 4 (derive)              |
 | MCP server (stdio)         | `rmcp` 1.6 (official SDK)      |
 | Async runtime              | `tokio` 1                      |
