@@ -20,6 +20,12 @@ pub struct ApprovalRequest {
     /// offer the window choice. `Some(n)` is the maximum window length
     /// the executor will honour if the user chooses it.
     pub window_seconds: Option<u64>,
+    /// When an approve-for-window choice made now would end, as the prompt
+    /// shows it. The executor fixes it when the prompt is shown and ends the
+    /// window at exactly this time, so a late click gets a shorter window,
+    /// never a longer one. `None` when no window is offered (or the caller
+    /// left it to the transport, which then counts from its own `now`).
+    pub window_until: Option<chrono::DateTime<chrono::Local>>,
 }
 
 impl ApprovalRequest {
@@ -30,11 +36,17 @@ impl ApprovalRequest {
             summary,
             timeout: std::time::Duration::from_secs(60),
             window_seconds: None,
+            window_until: None,
         }
     }
 
     pub fn with_window(mut self, window_seconds: Option<u64>) -> Self {
         self.window_seconds = window_seconds.filter(|n| *n > 0);
+        self
+    }
+
+    pub fn with_window_until(mut self, until: chrono::DateTime<chrono::Local>) -> Self {
+        self.window_until = Some(until);
         self
     }
 }

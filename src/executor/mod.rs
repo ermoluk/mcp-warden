@@ -5,7 +5,7 @@ use mcp_warden_core::error::{Result, WardenError};
 use mcp_warden_core::keychain::KeychainStore;
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::time::{Duration, Instant};
+use std::time::Instant;
 
 pub mod credential_echo;
 pub mod db;
@@ -132,21 +132,21 @@ impl ActionExecutor {
             return Ok(event_id);
         }
 
-        let decision = if force_prompt {
+        let answer = if force_prompt {
             self.prompt(preset, action, summary, /* offer_window = */ false)
                 .await
         } else {
             match preset.approval {
-                ApprovalPolicy::Auto => Ok(ApprovalDecision::Approved),
-                ApprovalPolicy::Deny => Ok(ApprovalDecision::Denied),
+                ApprovalPolicy::Auto => Ok((ApprovalDecision::Approved, None)),
+                ApprovalPolicy::Deny => Ok((ApprovalDecision::Denied, None)),
                 ApprovalPolicy::Prompt => {
                     let offer_window = preset.approval_window_seconds.is_some_and(|n| n > 0);
                     self.prompt(preset, action, summary, offer_window).await
                 }
             }
         };
-        let decision = match decision {
-            Ok(d) => d,
+        let (decision, window_ends) = match answer {
+            Ok(a) => a,
             Err(e) => return Err(self.prompt_failed(event_id, e)?),
         };
 
@@ -155,9 +155,9 @@ impl ActionExecutor {
         // see the window. force_prompt callers never register a window.
         if !force_prompt
             && matches!(decision, ApprovalDecision::ApprovedForWindow)
-            && let Some(cap) = preset.approval_window_seconds.filter(|n| *n > 0)
+            && let Some(ends) = window_ends
         {
-            self.register_window(&preset.name, action, cap).await;
+            self.register_window(&preset.name, action, ends).await;
         }
 
         let audit_label = if !force_prompt && preset.approval == ApprovalPolicy::Auto {
@@ -281,40 +281,53 @@ impl ActionExecutor {
             .is_some_and(|expires| *expires > now)
     }
 
-    async fn register_window(&self, preset: &str, action: &str, window_seconds: u64) {
-        let expires = self.clock.now() + Duration::from_secs(window_seconds);
+    async fn register_window(&self, preset: &str, action: &str, expires: Instant) {
         self.approval_windows
             .lock()
             .await
             .insert((preset.to_string(), action.to_string()), expires);
     }
 
+    /// Ask the human, and say when an approval window chosen in that prompt
+    /// ends: the deadline fixed when the prompt was shown, so the window
+    /// never outlasts the time on the button. A fallback prompt shown after
+    /// the first one timed out gets a fresh deadline.
     async fn prompt(
         &self,
         preset: &Preset,
         action: &str,
         summary: &str,
         offer_window: bool,
-    ) -> Result<ApprovalDecision> {
+    ) -> Result<(ApprovalDecision, Option<Instant>)> {
         let window_seconds = if offer_window {
             preset.approval_window_seconds.filter(|n| *n > 0)
         } else {
             None
         };
-        let req = ApprovalRequest::new(preset.name.clone(), action.into(), summary.into())
-            .with_window(window_seconds);
-        let primary = self.approval.request(req.clone()).await?;
-        let result = match (&primary, self.approval_fallback.as_ref()) {
-            (ApprovalDecision::Timeout, Some(fb)) => fb.request(req).await?,
+        let ask = |transport: Arc<dyn ApprovalTransport>| async move {
+            let mut req = ApprovalRequest::new(preset.name.clone(), action.into(), summary.into())
+                .with_window(window_seconds);
+            let mut ends = None;
+            if let Some(seconds) = window_seconds {
+                let now = self.clock.now_utc().with_timezone(&chrono::Local);
+                let until = crate::approval::window_deadline(now, seconds);
+                ends = Some(self.clock.now() + (until - now).to_std().unwrap_or_default());
+                req = req.with_window_until(until);
+            }
+            transport.request(req).await.map(|d| (d, ends))
+        };
+        let primary = ask(self.approval.clone()).await?;
+        let (result, ends) = match (&primary.0, self.approval_fallback.as_ref()) {
+            (ApprovalDecision::Timeout, Some(fb)) => ask(fb.clone()).await?,
             _ => primary,
         };
         // Defence-in-depth: if the transport returns ApprovedForWindow but
         // the preset didn't offer windowing (e.g. a buggy / malicious
         // transport), demote it to a one-shot Approved.
         if matches!(result, ApprovalDecision::ApprovedForWindow) && !offer_window {
-            return Ok(ApprovalDecision::Approved);
+            return Ok((ApprovalDecision::Approved, None));
         }
-        Ok(result)
+        Ok((result, ends))
     }
 }
 
@@ -328,6 +341,7 @@ mod tests {
     use mcp_warden_core::keychain::memory::InMemoryKeychain;
     use std::sync::Arc;
     use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::time::Duration;
 
     struct CountingApproval {
         decision: ApprovalDecision,
@@ -402,25 +416,34 @@ mod tests {
         (exec, dir)
     }
 
-    /// Test clock whose `now()` returns whatever the inner Instant says.
-    /// Advance with `advance(d)`.
+    /// Test clock: `now()` and `now_utc()` start at a fixed instant and
+    /// move together with `advance(d)`.
     struct FakeClock {
-        inner: std::sync::Mutex<Instant>,
+        inner: std::sync::Mutex<(Instant, chrono::DateTime<chrono::Utc>)>,
     }
     impl FakeClock {
+        /// Starts on a whole minute, so windows end exactly `N` s later.
         fn new() -> Arc<Self> {
+            Self::at("2026-01-15T12:00:00Z")
+        }
+        fn at(utc: &str) -> Arc<Self> {
+            let utc = chrono::DateTime::parse_from_rfc3339(utc).unwrap().to_utc();
             Arc::new(Self {
-                inner: std::sync::Mutex::new(Instant::now()),
+                inner: std::sync::Mutex::new((Instant::now(), utc)),
             })
         }
         fn advance(&self, d: Duration) {
             let mut g = self.inner.lock().unwrap();
-            *g += d;
+            g.0 += d;
+            g.1 += d;
         }
     }
     impl Clock for FakeClock {
         fn now(&self) -> Instant {
-            *self.inner.lock().unwrap()
+            self.inner.lock().unwrap().0
+        }
+        fn now_utc(&self) -> chrono::DateTime<chrono::Utc> {
+            self.inner.lock().unwrap().1
         }
     }
 
@@ -603,6 +626,62 @@ mod tests {
             counter.calls.load(Ordering::SeqCst),
             2,
             "expired window must trigger a fresh prompt"
+        );
+    }
+
+    /// Approves for the window and remembers the requests it was shown.
+    struct RecordingApproval {
+        seen: std::sync::Mutex<Vec<ApprovalRequest>>,
+    }
+
+    #[async_trait]
+    impl ApprovalTransport for RecordingApproval {
+        async fn request(
+            &self,
+            r: ApprovalRequest,
+        ) -> mcp_warden_core::error::Result<ApprovalDecision> {
+            self.seen.lock().unwrap().push(r);
+            Ok(ApprovalDecision::ApprovedForWindow)
+        }
+    }
+
+    #[tokio::test]
+    async fn window_ends_at_the_time_the_prompt_showed() {
+        // Shown at 12:00:40 for 10 min: the button says "until 12:10" and
+        // the window ends then, 9 min 20 s later — never after it.
+        let approval = Arc::new(RecordingApproval {
+            seen: Default::default(),
+        });
+        let clock = FakeClock::at("2026-01-15T12:00:40Z");
+        let (exec, _dir) = exec_with_clock(approval.clone(), clock.clone());
+        let p = preset_with_window(Some(600));
+
+        exec.authorise(&p, "proxy_http", "first", false)
+            .await
+            .unwrap();
+        let until = approval.seen.lock().unwrap()[0].window_until.unwrap();
+        let shown = chrono::DateTime::parse_from_rfc3339("2026-01-15T12:10:00Z").unwrap();
+        assert_eq!(until, shown);
+        // The button shows the deadline the window is registered with.
+        let button = crate::approval::window_button(&approval.seen.lock().unwrap()[0]).unwrap();
+        assert!(
+            button.ends_with(&until.format("%H:%M").to_string()),
+            "{button}"
+        );
+
+        clock.advance(Duration::from_secs(559));
+        exec.authorise(&p, "proxy_http", "inside", false)
+            .await
+            .unwrap();
+        assert_eq!(approval.seen.lock().unwrap().len(), 1, "still inside");
+        clock.advance(Duration::from_secs(1));
+        exec.authorise(&p, "proxy_http", "at the deadline", false)
+            .await
+            .unwrap();
+        assert_eq!(
+            approval.seen.lock().unwrap().len(),
+            2,
+            "the window ends at the time on the button"
         );
     }
 

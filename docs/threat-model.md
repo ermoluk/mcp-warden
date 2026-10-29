@@ -141,7 +141,10 @@ The SQLite file is `0600`-permissioned and rejects symlinks at open time, but ro
 
 ### R9. Time-boxed approvals are convenience, not deeper trust
 
-When the user picks **Approve for window** in the approval prompt (dialog, notification, Telegram or TUI), the executor caches `(preset, action) → expires_at` in process memory and skips re-prompting for that pair until the window expires. Properties:
+When the user picks the approve-for-window choice in the approval prompt (dialog, notification, Telegram or TUI), the executor caches `(preset, action) → expires_at` in process memory and skips re-prompting for that pair until the window expires. Properties:
+
+- **The button says what it allows.** Since v0.5.3 every transport words it the same way — `Approve for 10 min: every proxy_http call github-read allows runs without asking until 14:32` — so a click can't be mistaken for "approve this one call". Preset and tool names in it are sanitised like the rest of the prompt (T5).
+- **It ends at the time shown.** The deadline is fixed when the prompt appears — `now + N`, rounded down to the minute for windows of 10 min or more and to the second otherwise — and the window is registered with exactly that deadline. A late click gets a slightly shorter window, never one that outlasts the button. A fallback prompt shown after the first one timed out gets its own deadline.
 
 - **In-process only.** The cache is a `tokio::sync::Mutex<HashMap<…, Instant>>` inside `ActionExecutor`. Restarting `mcp-warden mcp` clears every window — by design. There is no file or socket through which a different process can inject or read windows.
 - **Per `(preset, action)` keyed.** A window for `proxy_http` on `github-read` does **not** cover `ssh_exec` on the same preset. Each tool class requires its own approval.

@@ -14,6 +14,10 @@ All notable changes to this project will be documented in this file. The format 
 
 - **Hostile-input corpus in CI.** `tests/corpus/paths.txt` and `tests/corpus/commands.txt` list every path and command an allow-list bypass has used — the encodings from 0.4.1, 0.4.3 and 0.5.2, this release's `%uXXXX` and compatibility forms, shell syntax and over-limit inputs — one per line with what it tests and the release that first refused it. A test runs each one through the policy check the server and `preset test` share, with presets that allow every path and every command, and fails if any is allowed. New bypasses go there.
 
+### Changed
+
+- **The approval-window button says what it allows.** It read `Approve for 10 min` (Telegram: `⏱ Approve for window`), which can pass for approving one call. Every transport — the macOS and Windows dialogs, the Linux notification, Telegram and the TUI — now uses one wording from one function: `Approve for 10 min: every proxy_http call github-read allows runs without asking until 14:32`, with preset and tool names sanitised like the rest of the prompt. Telegram puts that button on a row of its own and repeats the text in the message, since it cuts long buttons short. **Behaviour change:** the time on the button is fixed when the prompt appears (to the minute for windows of 10 min or more, to the second for shorter ones), and the window now ends exactly then instead of N minutes after the click — a late click gets a slightly shorter window, never one that outlasts the button. Thanks to claudio-rootedlogic for the idea.
+
 ## [0.5.2]
 
 ### Security

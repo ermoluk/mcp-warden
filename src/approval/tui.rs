@@ -50,10 +50,10 @@ impl ApprovalTransport for TuiApproval {
         let preset = sanitise_for_prompt(&req.preset, 64);
         let action = sanitise_for_prompt(&req.action, 32);
         let summary = sanitise_for_prompt(&req.summary, 480);
-        let window_seconds = req.window_seconds;
+        let window = super::window_button(&req);
 
         tokio::task::spawn_blocking(move || -> Result<ApprovalDecision> {
-            run_dialog(preset, action, summary, timeout, window_seconds)
+            run_dialog(preset, action, summary, timeout, window)
         })
         .await
         .map_err(|e| WardenError::Executor(e.to_string()))?
@@ -65,7 +65,7 @@ fn run_dialog(
     action: String,
     summary: String,
     timeout: Duration,
-    window_seconds: Option<u64>,
+    window: Option<String>,
 ) -> Result<ApprovalDecision> {
     enable_raw_mode().map_err(WardenError::Io)?;
     let mut stderr = std::io::stderr();
@@ -85,7 +85,7 @@ fn run_dialog(
             let remaining = timeout.saturating_sub(elapsed);
 
             terminal
-                .draw(|f| draw(f, &preset, &action, &summary, remaining, window_seconds))
+                .draw(|f| draw(f, &preset, &action, &summary, remaining, window.as_deref()))
                 .map_err(WardenError::Io)?;
 
             // Poll briefly so the countdown refreshes.
@@ -100,7 +100,7 @@ fn run_dialog(
                         decision = Some(ApprovalDecision::Approved);
                         break;
                     }
-                    KeyCode::Char('w' | 'W') if window_seconds.is_some() => {
+                    KeyCode::Char('w' | 'W') if window.is_some() => {
                         decision = Some(ApprovalDecision::ApprovedForWindow);
                         break;
                     }
@@ -121,9 +121,9 @@ fn run_dialog(
     result
 }
 
-/// Format an "Approve for Nm" / "Approve for Ns" string.
-fn format_window_label(seconds: u64) -> String {
-    format!("[ W ] {}", super::window_label(seconds))
+/// The window choice's hint line: `[ W ] Approve for 10 min: every …`.
+fn format_window_label(window: &str) -> String {
+    format!("[ W ] {window}")
 }
 
 fn draw(
@@ -132,7 +132,7 @@ fn draw(
     action: &str,
     summary: &str,
     remaining: Duration,
-    window_seconds: Option<u64>,
+    window: Option<&str>,
 ) {
     let area = f.area();
     let chunks = Layout::default()
@@ -142,7 +142,8 @@ fn draw(
             Constraint::Length(3), // action line
             Constraint::Min(3),    // summary
             Constraint::Length(3), // countdown
-            Constraint::Length(3), // hints
+            // hints, plus a line for the window choice
+            Constraint::Length(if window.is_some() { 4 } else { 3 }),
         ])
         .split(area);
 
@@ -188,10 +189,10 @@ fn draw(
         .block(Block::default().borders(Borders::ALL));
     f.render_widget(countdown, chunks[3]);
 
-    let hints_text = match window_seconds {
-        Some(n) => format!(
-            "[ A ] / [ Enter ] Approve once   {}   [ D ] / [ Esc ] Deny",
-            format_window_label(n)
+    let hints_text = match window {
+        Some(window) => format!(
+            "[ A ] / [ Enter ] Approve once     [ D ] / [ Esc ] Deny\n{}",
+            format_window_label(window)
         ),
         None => "[ A ] / [ Y ] / [ Enter ] Approve     [ D ] / [ N ] / [ Esc ] Deny".to_string(),
     };
@@ -207,15 +208,20 @@ mod tests {
     use super::*;
 
     #[test]
-    fn format_window_label_uses_minutes_when_aligned() {
-        assert_eq!(format_window_label(600), "[ W ] Approve for 10 min");
-        assert_eq!(format_window_label(1800), "[ W ] Approve for 30 min");
-        assert_eq!(format_window_label(60), "[ W ] Approve for 1 min");
-    }
-
-    #[test]
-    fn format_window_label_uses_seconds_when_misaligned() {
-        assert_eq!(format_window_label(45), "[ W ] Approve for 45 s");
-        assert_eq!(format_window_label(90), "[ W ] Approve for 90 s");
+    fn window_hint_spells_out_the_window() {
+        let req = mcp_warden_core::approval::ApprovalRequest::new(
+            "github-read".into(),
+            "proxy_http".into(),
+            "GET /x".into(),
+        )
+        .with_window(Some(600));
+        let hint = format_window_label(&super::super::window_button(&req).unwrap());
+        assert!(
+            hint.starts_with(
+                "[ W ] Approve for 10 min: every proxy_http call github-read allows runs \
+                 without asking until "
+            ),
+            "{hint}"
+        );
     }
 }

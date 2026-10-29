@@ -62,12 +62,18 @@ POST /charges, body ~120 bytes
 
 No answer in 60 s means Deny.
 
-        [Approve for 10 min]  [Approve once]  [ Deny ]
+  [Approve for 10 min: every proxy_http call stripe-write allows runs without asking until 14:32]
+                                              [Approve once]  [ Deny ]
 ```
 
 - **Deny is the default.** Return and Esc both deny; approving takes a click.
-- **Approve for N min** appears only when the preset has a time-boxed window
-  (`mcp-warden approval <preset> prompt --window N`).
+- **The window button** appears only when the preset has a time-boxed window
+  (`mcp-warden approval <preset> prompt --window N`). Its text says what it
+  covers: every call of that tool the preset allows, without a prompt, until
+  the time shown. That time is fixed when the dialog appears (to the minute
+  for windows of 10 min or more, to the second for shorter ones), and the
+  window ends exactly then — clicking late shortens it, never extends it.
+  Every transport words it the same way.
 - **Unanswered means no.** The dialog closes itself after 60 s and the call
   is refused as `timeout`.
 - **No script injection.** The AppleScript is a fixed constant; the preset
@@ -129,12 +135,17 @@ Action: proxy_http
 
 POST /charges, body ~120 bytes
 
-[✓ Approve] [✗ Deny] [⏱ Approve for window]
+⏱ Approve for 10 min: every proxy_http call stripe-write allows runs without asking until 14:32
+
+[✓ Approve] [✗ Deny]
+[⏱ Approve for 10 min: every proxy_http call stripe-write allows …]
 ```
 
 The window button only appears when the preset has a time-boxed approval
-window (`mcp-warden approval <preset> prompt --window N`). After you press a
-button — or the prompt times out — the message is edited to show the outcome.
+window (`mcp-warden approval <preset> prompt --window N`). It gets a row of
+its own, and the message repeats its full text, since Telegram cuts long
+buttons short on narrow screens. After you press a button — or the prompt
+times out — the message is edited to show the outcome.
 
 ### Security properties
 
