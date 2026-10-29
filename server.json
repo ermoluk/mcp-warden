@@ -43,7 +43,7 @@
       "registryType": "mcpb",
       "identifier": "https://github.com/ermoluk/mcp-warden/releases/download/v0.5.3/mcp-warden-aarch64-apple-darwin.mcpb",
       "version": "0.5.3",
-      "fileSha256": "set-by-packaging/render.sh-once-the-release-is-built",
+      "fileSha256": "0ae072a98d10e8c2026ef803885d9f74d477f291763d7618720526d3b0d96d56",
       "transport": {
         "type": "stdio"
       }
@@ -52,7 +52,7 @@
       "registryType": "mcpb",
       "identifier": "https://github.com/ermoluk/mcp-warden/releases/download/v0.5.3/mcp-warden-x86_64-apple-darwin.mcpb",
       "version": "0.5.3",
-      "fileSha256": "set-by-packaging/render.sh-once-the-release-is-built",
+      "fileSha256": "ecfd9d0c333e4cb7cbf1e469f9a516dc42eab762376e58a7a4081cbbb0890619",
       "transport": {
         "type": "stdio"
       }
@@ -61,7 +61,7 @@
       "registryType": "mcpb",
       "identifier": "https://github.com/ermoluk/mcp-warden/releases/download/v0.5.3/mcp-warden-x86_64-pc-windows-msvc.mcpb",
       "version": "0.5.3",
-      "fileSha256": "set-by-packaging/render.sh-once-the-release-is-built",
+      "fileSha256": "9032636edd7888f175d0ea7a71eb5737592c11d353425205b6cd8e62345384f0",
       "transport": {
         "type": "stdio"
       }
@@ -70,7 +70,7 @@
       "registryType": "mcpb",
       "identifier": "https://github.com/ermoluk/mcp-warden/releases/download/v0.5.3/mcp-warden-x86_64-unknown-linux-musl.mcpb",
       "version": "0.5.3",
-      "fileSha256": "set-by-packaging/render.sh-once-the-release-is-built",
+      "fileSha256": "5c71ad55d122a28e75c93918b33b459298848da4efb29229c8be9b62d0c9a10c",
       "transport": {
         "type": "stdio"
       }
@@ -79,7 +79,7 @@
       "registryType": "mcpb",
       "identifier": "https://github.com/ermoluk/mcp-warden/releases/download/v0.5.3/mcp-warden-aarch64-unknown-linux-musl.mcpb",
       "version": "0.5.3",
-      "fileSha256": "set-by-packaging/render.sh-once-the-release-is-built",
+      "fileSha256": "0b1f35a27cad659d96206f259315bcc837672e4d1ad6e6d53a7cb6d7da81f15b",
       "transport": {
         "type": "stdio"
       }
