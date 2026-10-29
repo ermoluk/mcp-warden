@@ -8,6 +8,7 @@ use mcp_warden_core::secret::Secret;
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
+use unicode_normalization::UnicodeNormalization;
 use url::Url;
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -138,6 +139,16 @@ fn decode_path(path: &str) -> Result<std::borrow::Cow<'_, str>> {
         return Err(WardenError::Validation(format!(
             "path '{path}' contains dot segments, backslashes or control \
              characters once percent-decoded"
+        )));
+    }
+    // An upstream that applies compatibility normalisation after decoding
+    // turns `／` into `/`, `．．` into `..` and `＼` into `\`. Only paths
+    // NFKC leaves unchanged reach the allow-list, so every upstream sees
+    // the characters it saw.
+    if !decoded.nfkc().eq(decoded.chars()) {
+        return Err(WardenError::Validation(format!(
+            "path '{path}' contains characters that Unicode NFKC normalisation \
+             would change (fullwidth or compatibility forms)"
         )));
     }
     Ok(decoded)
@@ -410,6 +421,48 @@ mod tests {
             assert!(err.to_string().contains("two hex digits"), "{evil}: {err}");
         }
         validate_request(&q, "GET", "/users/a%2Db%7E").unwrap();
+    }
+
+    #[test]
+    fn rejects_paths_that_nfkc_would_change() {
+        // An upstream that applies Unicode compatibility normalisation after
+        // decoding sees `／` as `/`, `．．` as `..` and `＼` as `\`.
+        let mut q = p();
+        q.allowed_paths = vec!["/users/.*".into()];
+        for evil in [
+            "/users/a%EF%BC%8Fadmin",
+            "/users/%EF%BC%8E%EF%BC%8E/admin",
+            "/users/a%EF%BC%BCadmin",
+            "/users/a／admin",
+            "/users/．．/admin",
+            "/users/a＼admin",
+            // KELVIN SIGN, `ﬁ` ligature, superscript two.
+            "/users/%E2%84%AA",
+            "/users/%EF%AC%81le",
+            "/users/x%C2%B2",
+            // `и` + COMBINING BREVE: NFKC composes it to `й`.
+            "/users/%D0%B8%CC%86",
+        ] {
+            let err = validate_request(&q, "GET", evil).unwrap_err();
+            assert!(err.to_string().contains("NFKC"), "{evil}: {err}");
+        }
+    }
+
+    #[test]
+    fn accepts_nfkc_stable_cyrillic_and_cjk() {
+        let mut q = p();
+        q.allowed_paths = vec!["/search/[^/]+".into()];
+        for ok in [
+            "/search/%D0%BF%D1%80%D0%B8%D0%B2%D0%B5%D1%82",
+            "/search/привет",
+            "/search/%D0%81%D0%BB%D0%BA%D0%B0",
+            "/search/%E6%97%A5%E6%9C%AC%E8%AA%9E",
+            "/search/日本語",
+            "/search/中文",
+            "/search/%ED%95%9C%EA%B8%80",
+        ] {
+            validate_request(&q, "GET", ok).unwrap();
+        }
     }
 
     #[test]

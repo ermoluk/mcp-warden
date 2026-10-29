@@ -2819,6 +2819,7 @@ dependencies = [
  "toml",
  "tracing",
  "tracing-subscriber",
+ "unicode-normalization",
  "url",
  "webpki-roots 1.0.7",
  "wiremock",
