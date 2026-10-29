@@ -31,6 +31,7 @@ All notable changes to this project will be documented in this file. The format 
 ### Changed
 
 - **The approval-window button says what it allows.** It read `Approve for 10 min` (Telegram: `⏱ Approve for window`), which can pass for approving one call. Every transport — the macOS and Windows dialogs, the Linux notification, Telegram and the TUI — now uses one wording from one function: `Approve for 10 min: every proxy_http call github-read allows runs without asking until 14:32`, with preset and tool names sanitised like the rest of the prompt. Telegram puts that button on a row of its own and repeats the text in the message, since it cuts long buttons short. **Behaviour change:** the time on the button is fixed when the prompt appears (to the minute for windows of 10 min or more, to the second for shorter ones), and the window now ends exactly then instead of N minutes after the click — a late click gets a slightly shorter window, never one that outlasts the button. Thanks to claudio-rootedlogic for the idea.
+- **The Claude Code plugin finds binaries installed without cargo.** It looked on `PATH` and in `~/.cargo/bin` only, but Claude Desktop and other GUI apps on macOS don't get Homebrew's or `~/.local/bin` on their `PATH`. The MCP server entry, the `SessionStart` check and `/mcp-warden:setup` now also look in `~/.local/bin`, `/opt/homebrew/bin`, `/usr/local/bin` and `~/.nix-profile/bin`, and point at the new install options.
 
 ## [0.5.2]
 
