@@ -1,0 +1,28 @@
+{
+  "name": "@mcp-warden/cli",
+  "version": "@VERSION@",
+  "description": "mcp-warden, the local-first credential broker MCP server for AI coding agents, as a prebuilt binary for your platform.",
+  "license": "Apache-2.0",
+  "homepage": "https://github.com/ermoluk/mcp-warden#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/ermoluk/mcp-warden.git"
+  },
+  "bugs": "https://github.com/ermoluk/mcp-warden/issues",
+  "keywords": ["mcp", "mcp-server", "credentials", "keychain", "security", "ai-agent"],
+  "mcpName": "io.github.ermoluk/mcp-warden",
+  "bin": {
+    "mcp-warden": "bin/mcp-warden.js"
+  },
+  "files": ["bin/", "README.md"],
+  "engines": {
+    "node": ">=16"
+  },
+  "optionalDependencies": {
+    "@mcp-warden/darwin-arm64": "@VERSION@",
+    "@mcp-warden/darwin-x64": "@VERSION@",
+    "@mcp-warden/linux-arm64": "@VERSION@",
+    "@mcp-warden/linux-x64": "@VERSION@",
+    "@mcp-warden/win32-x64": "@VERSION@"
+  }
+}
