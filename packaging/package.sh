@@ -93,7 +93,13 @@ done
 cp "$root/install.sh" "$root/install.ps1" "$dist/"
 (
 	cd "$dist"
-	# shellcheck disable=SC2046 # asset names never contain spaces
-	sha256 $(ls | grep -v -e '\.sha256$' -e '^SHA256SUMS$') >SHA256SUMS
+	set --
+	for asset in *; do
+		case $asset in
+		*.sha256 | SHA256SUMS) ;;
+		*) set -- "$@" "$asset" ;;
+		esac
+	done
+	sha256 "$@" >SHA256SUMS
 )
 echo "package.sh: $found target(s) packaged into $dist"
