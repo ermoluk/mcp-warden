@@ -36,6 +36,10 @@ All notable changes to this project will be documented in this file. The format 
 - `policy::Request` (the shared check behind the tools and `preset test`) now carries the `proxy_http` query and body and the `db_query` parameter values, so the input limits are checked in one place.
 - The README keeps only "What's new in v0.5.3"; release notes for earlier versions are in this changelog.
 
+### Fixed
+
+- **`mcp-warden secret remove` failed on Linux for the last secret.** Removing it wrote an empty list of names to the index entry, which the Linux kernel keyring (keyutils) can't store, so the command failed with `Value of 'secret' is invalid: cannot be empty`. The secret itself was deleted, but its name stayed listed. An empty index now deletes the index entry. Broken since 0.5.1; found by the new keyring check in the release workflow.
+
 Thanks to claudio-rootedlogic on r/mcp for the ideas behind the approval-window wording and the audit decision filter.
 
 ## [0.5.2]

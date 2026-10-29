@@ -74,10 +74,23 @@ impl SystemKeychain {
         ensure_store()?;
         let entry = keyring_core::Entry::new(SERVICE, INDEX_KEY)
             .map_err(|e| WardenError::Keychain(e.to_string()))?;
-        entry
-            .set_password(&names.join(&SEPARATOR.to_string()))
-            .map_err(|e| WardenError::Keychain(e.to_string()))
+        write_index_to(&entry, names)
     }
+}
+
+/// Store the index of secret names in `entry`. An empty index deletes the
+/// entry instead: keyutils, the Linux store, can't hold an empty value, so
+/// writing one made removing the last secret fail.
+fn write_index_to(entry: &keyring_core::Entry, names: &[String]) -> Result<()> {
+    if names.is_empty() {
+        return match entry.delete_credential() {
+            Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
+            Err(e) => Err(WardenError::Keychain(e.to_string())),
+        };
+    }
+    entry
+        .set_password(&names.join(&SEPARATOR.to_string()))
+        .map_err(|e| WardenError::Keychain(e.to_string()))
 }
 
 impl Default for SystemKeychain {
@@ -128,5 +141,30 @@ impl KeychainStore for SystemKeychain {
 
     fn list_names(&self) -> Result<Vec<String>> {
         Ok(self.read_index())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use keyring_core::api::CredentialStoreApi;
+
+    #[test]
+    fn an_empty_index_leaves_no_entry() {
+        // The Linux store (keyutils) refuses empty values, so removing the
+        // last secret failed with "cannot be empty" and left its name in the
+        // index. An empty index must leave no index entry at all.
+        let store = keyring_core::mock::Store::new().unwrap();
+        let entry = store.build(SERVICE, INDEX_KEY, None).unwrap();
+        write_index_to(&entry, &["a".into(), "b".into()]).unwrap();
+        assert_eq!(entry.get_password().unwrap(), "a\u{1f}b");
+        write_index_to(&entry, &[]).unwrap();
+        assert!(
+            matches!(entry.get_password(), Err(keyring_core::Error::NoEntry)),
+            "{:?}",
+            entry.get_password()
+        );
+        // Already gone: still fine.
+        write_index_to(&entry, &[]).unwrap();
     }
 }
