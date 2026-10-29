@@ -1,0 +1,27 @@
+# yaml-language-server: $schema=https://aka.ms/winget-manifest.defaultLocale.1.9.0.schema.json
+PackageIdentifier: ermoluk.mcp-warden
+PackageVersion: @VERSION@
+PackageLocale: en-US
+Publisher: ermoluk
+PublisherUrl: https://github.com/ermoluk
+PublisherSupportUrl: https://github.com/ermoluk/mcp-warden/issues
+PackageName: mcp-warden
+PackageUrl: https://github.com/ermoluk/mcp-warden
+License: Apache-2.0
+LicenseUrl: https://github.com/ermoluk/mcp-warden/blob/main/LICENSE
+ShortDescription: Local-first credential broker MCP server for AI coding agents.
+Description: |-
+  mcp-warden lets an AI coding agent take real, scoped actions — HTTP calls, SSH commands,
+  SFTP transfers, named database queries — without ever seeing the credential. Secrets stay
+  in Windows Credential Manager; every call is checked against the preset's allow-list,
+  approved in a dialog when the preset says so, and recorded in a local audit log.
+Moniker: mcp-warden
+Tags:
+  - mcp
+  - credentials
+  - keychain
+  - security
+  - ai-agent
+ReleaseNotesUrl: https://github.com/ermoluk/mcp-warden/blob/main/CHANGELOG.md
+ManifestType: defaultLocale
+ManifestVersion: 1.9.0
