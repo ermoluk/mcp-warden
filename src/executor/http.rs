@@ -504,6 +504,117 @@ mod tests {
         validate_request(&q, "GET", "/search/%D0%BF%D1%80%D0%B8").unwrap();
     }
 
+    // Properties of every path `validate_request` accepts: whatever the
+    // upstream does with it — decode once more, normalise — it sees what
+    // the allow-list saw.
+    mod decoder_properties {
+        use super::*;
+        use proptest::prelude::*;
+
+        /// Path fragments biased towards what bypasses are made of.
+        fn piece() -> impl Strategy<Value = String> {
+            prop_oneof![
+                "[a-zA-Z0-9_~+-]{1,6}",
+                Just("/".to_string()),
+                Just(".".to_string()),
+                Just("..".to_string()),
+                Just("\\".to_string()),
+                Just("%".to_string()),
+                "%[0-9a-fA-F]{2}",
+                "%(2[eEfF]|5[cC]|25|00|0[aAdD]|7[fF])",
+                "%25[0-9a-fA-F]{2}",
+                "%[uU]00[0-9a-fA-F]{2}",
+                "%[eE][fF]%[bB][cC]%[89a-fA-F][0-9a-fA-F]",
+                "%[dD]0%[bB][0-9a-fA-F]",
+                prop::sample::select(vec![
+                    "／",
+                    "．",
+                    "＼",
+                    "привет",
+                    "日本語",
+                    "ﬁ",
+                    "K",
+                    "²",
+                    "й",
+                    "и\u{306}",
+                    " ",
+                    "?",
+                ])
+                .prop_map(String::from),
+            ]
+        }
+
+        fn hostile_path() -> impl Strategy<Value = String> {
+            prop::collection::vec(piece(), 0..12).prop_map(|v| format!("/{}", v.concat()))
+        }
+
+        /// Paths made only of fragments that must be accepted, so the
+        /// properties below are exercised on accepted paths too.
+        fn plausible_path() -> impl Strategy<Value = String> {
+            let segment = prop_oneof![
+                "[a-zA-Z0-9_~-]{1,8}",
+                Just("%20".to_string()),
+                Just("%D0%BF%D1%80%D0%B8".to_string()),
+                Just("%E6%97%A5".to_string()),
+                Just("a%2Fb".to_string()),
+            ];
+            prop::collection::vec(segment, 1..6).prop_map(|v| format!("/{}", v.join("/")))
+        }
+
+        fn decode(s: &str) -> String {
+            percent_decode_str(s).decode_utf8_lossy().into_owned()
+        }
+
+        fn open() -> Preset {
+            let mut q = p();
+            q.allowed_paths = vec![];
+            q
+        }
+
+        fn check_accepted(path: &str) -> std::result::Result<(), TestCaseError> {
+            let once = decode(path);
+            let twice = decode(&once);
+            prop_assert_eq!(&twice, &once, "a second decode pass changed {:?}", path);
+            prop_assert!(
+                once.nfkc().eq(once.chars()),
+                "{:?} is not NFKC-stable once decoded",
+                path
+            );
+            for form in [path, once.as_str(), twice.as_str()] {
+                prop_assert!(!form.contains('\\'), "backslash in {:?}", form);
+                prop_assert!(!form.chars().any(char::is_control), "control in {:?}", form);
+                prop_assert!(!form.contains("//"), "empty segment in {:?}", form);
+                prop_assert!(
+                    !form.split('/').any(|seg| seg == "." || seg == ".."),
+                    "dot segment in {:?}",
+                    form
+                );
+            }
+            Ok(())
+        }
+
+        proptest! {
+            #![proptest_config(ProptestConfig::with_cases(4096))]
+
+            #[test]
+            fn accepted_paths_survive_a_second_decode_and_nfkc(path in hostile_path()) {
+                if validate_request(&open(), "GET", &path).is_ok() {
+                    check_accepted(&path)?;
+                }
+            }
+
+            #[test]
+            fn plausible_paths_are_accepted_and_stable(path in plausible_path()) {
+                prop_assert!(
+                    validate_request(&open(), "GET", &path).is_ok(),
+                    "refused {:?}",
+                    path
+                );
+                check_accepted(&path)?;
+            }
+        }
+    }
+
     #[test]
     fn build_url_joins_base_path_and_request_path() {
         let u = build_url("https://api.github.com", "/user/repos").unwrap();
