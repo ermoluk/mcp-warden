@@ -69,6 +69,10 @@ Up to v0.5.2 nothing capped what an agent could send: a megabyte-long path or co
 
 A refused call returns an error naming the field and the limit, never the input, and is audited as `refused` like any other validation failure. Its agent-supplied text is still capped at 1024 characters in the audit log (T4).
 
+### T9. DNS rebinding against `mcp-warden web`
+
+The web UI binds 127.0.0.1 only and has no login, so any local process can read it — and, up to v0.5.3, so could any web page the user opened. A hostile page re-points its own domain at 127.0.0.1 (DNS rebinding); the browser then treats `http://evil.example:7077/audit` as same-origin and lets the page read the presets (hosts, paths, secret names) and the audit log. Since the release after v0.5.3 the UI answers only requests whose `Host` header names it — `127.0.0.1:<port>`, `localhost:<port>` or `[::1]:<port>` — and refuses the rest with 421 before any handler runs; a rebinding page cannot make the browser send another `Host`. Requests other than GET / HEAD (none exist yet) must in addition carry an `Origin` naming the UI and no cross-site `Sec-Fetch-Site`, so a form on another site cannot post to future state-changing routes. Tested in `src/web/server.rs`.
+
 ## Out-of-scope threats (what `mcp-warden` does NOT defend against)
 
 ### N1. The user's machine is compromised

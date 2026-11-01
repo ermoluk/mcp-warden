@@ -2,6 +2,12 @@
 
 All notable changes to this project will be documented in this file. The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Security
+
+- **DNS rebinding against `mcp-warden web`.** The web UI binds 127.0.0.1 but did not check the `Host` header, so a web page that re-pointed its own domain at 127.0.0.1 could read `/presets`, `/presets/:name` and `/audit` — hosts, paths, secret names and the audit log — as same-origin. Requests whose `Host` is not `127.0.0.1:<port>`, `localhost:<port>` or `[::1]:<port>` now get `421 Misdirected Request`; requests other than GET / HEAD also need an `Origin` naming the UI and no cross-site `Sec-Fetch-Site` (403 otherwise). See the threat model, T9. **Behaviour change:** the UI must be opened as `127.0.0.1`, `localhost` or `[::1]` with its port, not through another name.
+
 ## [0.5.3]
 
 ### Security
