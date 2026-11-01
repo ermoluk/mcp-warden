@@ -87,8 +87,14 @@ pub fn check_request(preset: &Preset, req: &Request) -> Result<()> {
         )));
     }
     match *req {
-        Request::Http { method, path, .. } => {
-            super::http::validated_url(preset, &method.to_uppercase(), path).map(drop)
+        Request::Http {
+            method,
+            path,
+            query,
+            body,
+        } => {
+            super::http::validated_url(preset, &method.to_uppercase(), path)?;
+            super::http::check_query_and_body_keys(query, body)
         }
         Request::Ssh { command } => super::ssh::validate_command(preset, command),
         Request::Sftp { remote, local } => super::sftp::validate_transfer(preset, remote, local),
@@ -410,6 +416,76 @@ mod tests {
             |command| Request::Ssh { command },
         );
         assert!(n >= 40, "only {n} entries in tests/corpus/commands.txt");
+    }
+
+    #[test]
+    fn hostile_corpus_query_keys_are_refused_whatever_the_allow_list() {
+        let mut wide = http(ApprovalPolicy::Auto);
+        wide.allowed_methods = vec!["GET".into(), "POST".into()];
+        wide.allowed_paths = vec![".*".into()];
+        let ordinary: BTreeMap<String, String> = [
+            ("page".to_string(), "2".to_string()),
+            ("q".into(), "a b\nc".into()),
+        ]
+        .into();
+        check_request(
+            &wide,
+            &Request::Http {
+                method: "POST",
+                path: "/x",
+                query: Some(&ordinary),
+                body: None,
+            },
+        )
+        .unwrap();
+        let n = assert_all_refused(
+            "tests/corpus/queries.txt",
+            include_str!("../../tests/corpus/queries.txt"),
+            &wide,
+            |key| {
+                let query = Box::leak(Box::new(BTreeMap::from([(
+                    key.to_string(),
+                    "DELETE".to_string(),
+                )])));
+                Request::Http {
+                    method: "POST",
+                    path: "/x",
+                    query: Some(query),
+                    body: None,
+                }
+            },
+        );
+        assert!(n >= 20, "only {n} entries in tests/corpus/queries.txt");
+    }
+
+    /// Laravel reads `_method` from a JSON body too.
+    #[test]
+    fn method_override_in_the_json_body_is_refused() {
+        let mut wide = http(ApprovalPolicy::Auto);
+        wide.allowed_methods = vec!["POST".into()];
+        wide.allowed_paths = vec![".*".into()];
+        let post = |body: &Value| {
+            check_request(
+                &wide,
+                &Request::Http {
+                    method: "POST",
+                    path: "/x",
+                    query: None,
+                    body: Some(body),
+                },
+            )
+        };
+        for body in [
+            serde_json::json!({ "_method": "DELETE" }),
+            serde_json::json!({ "title": "x", "X-HTTP-Method-Override": "DELETE" }),
+            serde_json::json!({ ".method": "DELETE" }),
+        ] {
+            let err = post(&body).unwrap_err().to_string();
+            assert!(err.contains("override the HTTP method"), "{body}: {err}");
+        }
+        // Only top-level keys count; nested data is the upstream's business.
+        post(&serde_json::json!({ "data": { "_method": "x" }, "method": "card" })).unwrap();
+        post(&serde_json::json!(["_method"])).unwrap();
     }
 
     #[test]

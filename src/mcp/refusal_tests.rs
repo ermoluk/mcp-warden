@@ -198,6 +198,19 @@ async fn corpus_paths_are_refused_before_anything_is_touched() {
 }
 
 #[tokio::test]
+async fn corpus_query_keys_are_refused_before_anything_is_touched() {
+    let h = Harness::wide_open().await;
+    let entries = corpus(include_str!("../../tests/corpus/queries.txt"));
+    for (_, key, _) in &entries {
+        h.http("POST", "/x", Some(json!({ key: "DELETE" })), None)
+            .await;
+    }
+    h.http("POST", "/x", None, Some(json!({ "_method": "DELETE" })))
+        .await;
+    h.assert_all_refused_untouched(entries.len() + 1).await;
+}
+
+#[tokio::test]
 async fn corpus_commands_are_refused_before_anything_is_touched() {
     let h = Harness::wide_open().await;
     let entries = corpus(include_str!("../../tests/corpus/commands.txt"));

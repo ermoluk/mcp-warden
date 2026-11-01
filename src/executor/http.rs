@@ -101,6 +101,72 @@ pub fn validate_request(preset: &Preset, method: &str, path: &str) -> Result<()>
     )))
 }
 
+/// Parameter names that tell a framework to run the request as another
+/// method — Laravel and Symfony read `_method` from the query string and
+/// (Laravel) the JSON body, Express `method-override` can be set up the
+/// same way, and the override header names turn up as parameters too — in
+/// the form `override_key` normalises them to.
+const METHOD_OVERRIDE_KEYS: [&str; 4] = [
+    "_method",
+    "x_http_method_override",
+    "x_http_method",
+    "x_method_override",
+];
+
+/// Refuse query parameters and top-level JSON body keys that could make the
+/// upstream run another method than the one the allow-list checked — `POST
+/// /x?_method=DELETE` is a DELETE to Laravel — and query keys with control
+/// characters, which upstreams split, truncate or log differently.
+/// Runs before any credential is read (invariant 3, T6).
+pub(crate) fn check_query_and_body_keys(
+    query: Option<&std::collections::BTreeMap<String, String>>,
+    body: Option<&serde_json::Value>,
+) -> Result<()> {
+    let refuse = |key: &str| {
+        WardenError::Validation(format!(
+            "parameter '{}' could override the HTTP method; method-override parameters \
+             (_method, X-HTTP-Method-Override, ...) are refused",
+            key.escape_debug()
+        ))
+    };
+    for key in query.into_iter().flat_map(|q| q.keys()) {
+        if key.chars().any(char::is_control) {
+            return Err(WardenError::Validation(format!(
+                "query parameter name '{}' contains control characters",
+                key.escape_debug()
+            )));
+        }
+        if is_method_override(key) {
+            return Err(refuse(key));
+        }
+    }
+    if let Some(serde_json::Value::Object(map)) = body
+        && let Some(key) = map.keys().find(|k| is_method_override(k))
+    {
+        return Err(refuse(key));
+    }
+    Ok(())
+}
+
+/// `key`, or the name in front of its PHP array suffix (`_method[]`),
+/// normalised as PHP and header-style names would be: case folded, leading
+/// and trailing spaces dropped, and `.`, ` `, `[` and `-` read as `_`.
+fn is_method_override(key: &str) -> bool {
+    let normalise = |k: &str| -> String {
+        k.trim()
+            .chars()
+            .map(|c| match c {
+                '.' | ' ' | '[' | '-' => '_',
+                c => c.to_ascii_lowercase(),
+            })
+            .collect()
+    };
+    let base = key.split('[').next().unwrap_or(key);
+    [normalise(key), normalise(base)]
+        .iter()
+        .any(|k| METHOD_OVERRIDE_KEYS.contains(&k.as_str()))
+}
+
 /// Every `%` in `path` starts an escape of exactly two hex digits.
 fn well_formed_escapes(path: &str) -> bool {
     let bytes = path.as_bytes();
