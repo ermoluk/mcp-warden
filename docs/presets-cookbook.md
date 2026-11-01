@@ -93,7 +93,7 @@ secret = "prod_ssh_key"
 allowed_commands = [
   "^docker compose (pull|up -d|ps|logs --tail \\d+)$",
   "^git pull$",
-  "^systemctl status [a-z0-9_-]+$",
+  "^systemctl status [a-z0-9][a-z0-9_-]*$",
 ]
 approval = "prompt"
 timeout_seconds = 300
@@ -103,8 +103,13 @@ The remote shell runs the command, so `ssh_exec` refuses shell syntax whatever
 the patterns say: words are separated by single spaces and may contain only
 letters, digits and `- _ . / : = @ , + %`. Quotes, `$`, backticks, globs and
 redirections never reach the host, so don't write patterns that need them.
-Still keep each argument tight (`[a-z0-9_-]+`, `\d+`) — a loose `.*` lets
-the agent add options of its own.
+Still keep each argument tight (`[a-z0-9][a-z0-9_-]*`, `\d+`), and don't let
+it start with `-`: `.*`, `\S+` and even `[a-z0-9_-]+` admit options of the
+agent's own — `systemctl status -Hother-host`, `git checkout -f`,
+`tar --to-command=…`, `rsync -e …`. Spell out the options you want
+(` -n [0-9]+`) and begin free arguments with a letter or digit.
+`mcp-warden doctor` warns about every pattern that lets an argument start
+with `-`.
 
 On the server, give the key its own account and a second allow-list — a
 forced command in `authorized_keys` or `ForceCommand` — so a pattern that is

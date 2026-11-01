@@ -79,6 +79,9 @@ pub async fn run(args: DoctorArgs, config_dir: &Path, kc: &dyn KeychainStore) ->
                 for w in access_warnings(&cfg, kc, chrono::Utc::now()) {
                     println!("warning:    {w}");
                 }
+                for w in cfg.preset.iter().flat_map(pattern_warnings) {
+                    println!("warning:    {w}");
+                }
                 valid.then_some(cfg)
             }
             Err(e) => {
@@ -406,6 +409,83 @@ fn print_probe_table(results: &[ProbeResult]) {
     }
 }
 
+/// `allowed_commands` patterns that let the agent turn an argument into an
+/// option of its own: wherever a pattern takes an argument after a space, a
+/// class that can match `-` there (`[a-z0-9_-]+`, `\S+`, `.*`, `[^ ]+`)
+/// admits `systemctl status -Hevil`, `git checkout -f`, `tar --to-command=…`.
+/// Options the author wrote out (` -n `, ` --tail `) are not flagged. A
+/// heuristic: it looks only at what directly follows a space, not inside
+/// groups such as ` (a|[a-z-]+)`.
+pub(crate) fn pattern_warnings(p: &Preset) -> Vec<String> {
+    p.allowed_commands
+        .iter()
+        .filter(|pattern| argument_may_start_with_dash(pattern))
+        .map(|pattern| {
+            format!(
+                "preset '{}': allowed_commands pattern '{pattern}' lets an argument start \
+                 with '-', so the agent can pass options of its own (e.g. `-Hhost`, \
+                 `--upload-pack=…`); start it with a character that cannot be one, \
+                 e.g. `[a-z0-9][a-z0-9._-]*`",
+                p.name
+            )
+        })
+        .collect()
+}
+
+/// Whether some atom right after a space in `pattern` — a class, `.`, `\S`
+/// or `\W` — can match `-`.
+fn argument_may_start_with_dash(pattern: &str) -> bool {
+    let bytes = pattern.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b' ' => {
+                let rest = &pattern[i + 1..];
+                let atom = if rest.starts_with('[') {
+                    class_end(rest).map(|end| &rest[..end])
+                } else if rest.starts_with("\\S") || rest.starts_with("\\W") {
+                    Some(&rest[..2])
+                } else if rest.starts_with('.') {
+                    Some(".")
+                } else {
+                    None
+                };
+                if atom
+                    .and_then(|a| regex::Regex::new(&format!("^(?:{a})$")).ok())
+                    .is_some_and(|rx| rx.is_match("-"))
+                {
+                    return true;
+                }
+                i += 1;
+            }
+            _ => i += 1,
+        }
+    }
+    false
+}
+
+/// Length of the character class `[...]` at the start of `s`, if it closes.
+fn class_end(s: &str) -> Option<usize> {
+    let bytes = s.as_bytes();
+    let mut i = 1;
+    if bytes.get(i) == Some(&b'^') {
+        i += 1;
+    }
+    // A `]` right after `[` or `[^` is a literal.
+    if bytes.get(i) == Some(&b']') {
+        i += 1;
+    }
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' => i += 2,
+            b']' => return Some(i + 1),
+            _ => i += 1,
+        }
+    }
+    None
+}
+
 /// Presets whose `preset grant` window has ended, and wrapped servers whose
 /// keys are missing from the keychain.
 fn access_warnings(
@@ -473,6 +553,93 @@ mod tests {
     }
 
     use super::*;
+
+    fn ssh_with(patterns: &[&str]) -> Preset {
+        let mut p: Preset = toml::from_str(
+            r#"
+            name = "box"
+            type = "ssh"
+            description = "x"
+            host = "h"
+            user = "u"
+            secret = "k"
+            approval = "prompt"
+            "#,
+        )
+        .unwrap();
+        p.allowed_commands = patterns.iter().map(|s| s.to_string()).collect();
+        p
+    }
+
+    #[test]
+    fn arguments_that_may_be_options_are_flagged() {
+        for loose in [
+            "^systemctl status [a-z0-9_-]+$",
+            "git checkout [-a-z]+",
+            "git checkout [a-z\\-]+",
+            "git pull .*",
+            "git checkout \\S+",
+            "cat [^ ]+",
+        ] {
+            let w = pattern_warnings(&ssh_with(&[loose]));
+            assert_eq!(w.len(), 1, "{loose}: {w:?}");
+            assert!(w[0].contains("start with '-'"), "{w:?}");
+        }
+        for tight in [
+            "^systemctl status [a-z0-9][a-z0-9_-]*$",
+            "^docker compose (pull|up -d|ps|logs --tail \\d+)$",
+            "^tail -n [0-9]+ /var/log/app/[a-z0-9._-]+$",
+            "journalctl -u app -n [1-9][0-9]{0,2}",
+            "git checkout [\\w/]+",
+            "uptime",
+        ] {
+            assert!(pattern_warnings(&ssh_with(&[tight])).is_empty(), "{tight}");
+        }
+    }
+
+    /// The patterns the docs recommend refuse option injection, and doctor
+    /// has nothing to say about them.
+    #[test]
+    fn documented_command_patterns_admit_no_options() {
+        let mut patterns = Vec::new();
+        for doc in [
+            include_str!("../../docs/presets-cookbook.md"),
+            include_str!("../../docs/ssh-hardening.md"),
+            include_str!("../../README.md"),
+        ] {
+            for block in doc.split("```toml").skip(1) {
+                let block = block.split("```").next().unwrap();
+                let Ok(value) = toml::from_str::<toml::Value>(block) else {
+                    continue;
+                };
+                for preset in value
+                    .get("preset")
+                    .and_then(|v| v.as_array())
+                    .into_iter()
+                    .flatten()
+                {
+                    for pat in preset
+                        .get("allowed_commands")
+                        .and_then(|v| v.as_array())
+                        .into_iter()
+                        .flatten()
+                    {
+                        patterns.push(pat.as_str().unwrap().to_string());
+                    }
+                }
+            }
+        }
+        assert!(patterns.len() >= 8, "{patterns:?}");
+        let refs: Vec<&str> = patterns.iter().map(String::as_str).collect();
+        let p = ssh_with(&refs);
+        assert_eq!(pattern_warnings(&p), Vec::<String>::new());
+        for evil in ["systemctl status -Hevil", "systemctl status --user"] {
+            assert!(
+                crate::executor::ssh::validate_command(&p, evil).is_err(),
+                "{evil}"
+            );
+        }
+    }
 
     #[test]
     fn pick_probe_path_prefers_literal() {
