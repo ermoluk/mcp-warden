@@ -43,16 +43,29 @@ pub fn validate_command(preset: &Preset, command: &str) -> Result<()> {
 /// The exec channel hands the command to sshd, which runs it with the
 /// remote user's login shell (`$SHELL -c`), so `git checkout \S+` would
 /// also let `git checkout $(curl …|sh)` through. Each space-separated word
-/// may hold only characters no common shell (sh, bash, zsh, fish) expands,
-/// splits or chains on; the shell then runs exactly the words the
-/// allow-list matched.
+/// may hold only characters no common shell (sh, bash, zsh, dash, ksh,
+/// tcsh, csh, fish) expands, splits or chains on; the shell then runs
+/// exactly the words the allow-list matched — checked against every one of
+/// those shells by `shells_split_permitted_words_as_written`.
+///
+/// Two uses of permitted characters still mean something to a shell, so
+/// they are refused too: a leading `NAME=value` word, which every one of
+/// those shells reads as an environment variable for the command
+/// (`LD_PRELOAD=/tmp/x.so git pull`), and a word starting with `%`, which
+/// fish expands (`%self` is its PID) and other shells read as a job.
 fn check_words(command: &str) -> Result<()> {
     let refuse = |why: String| {
         WardenError::Validation(format!(
             "command refused ({why}): ssh_exec words may only contain letters, digits \
-             and - _ . / : = @ , + % (no leading '='), separated by single spaces"
+             and - _ . / : = @ , + % (no leading '=' or '%', no leading NAME=value), \
+             separated by single spaces"
         ))
     };
+    if command.split(' ').next().is_some_and(is_assignment) {
+        return Err(refuse(
+            "starts with NAME=value, an environment assignment".into(),
+        ));
+    }
     for word in command.split(' ') {
         if word.is_empty() {
             return Err(refuse(
@@ -63,6 +76,9 @@ fn check_words(command: &str) -> Result<()> {
         if word.starts_with('=') {
             return Err(refuse("word starts with '='".into()));
         }
+        if word.starts_with('%') {
+            return Err(refuse("word starts with '%'".into()));
+        }
         if let Some(c) = word.chars().find(|c| {
             !(c.is_ascii_alphanumeric()
                 || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | '@' | ',' | '+' | '%'))
@@ -71,6 +87,18 @@ fn check_words(command: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `NAME=value`, as shells read an assignment in front of a command.
+fn is_assignment(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 struct WardenSshHandler {
@@ -294,6 +322,89 @@ mod tests {
         ] {
             validate_command(&q, ok).unwrap();
         }
+    }
+
+    #[test]
+    fn permitted_characters_that_are_not_plain_words_are_refused() {
+        let mut q = p();
+        q.allowed_commands = vec![".*".into()];
+        for evil in [
+            "LD_PRELOAD=/tmp/x.so git pull",
+            "A=1 B=2 git pull",
+            "kill %self",
+            "%1",
+        ] {
+            let err = validate_command(&q, evil).unwrap_err().to_string();
+            assert!(err.contains("may only contain"), "{evil:?}: {err}");
+        }
+        // `=` and `%` inside a word, and assignments after the command
+        // name, are ordinary arguments.
+        for ok in [
+            "make TARGET=x",
+            "journalctl --since=1h",
+            "date +%F",
+            "git log --format=%H",
+            "env",
+        ] {
+            validate_command(&q, ok).unwrap();
+        }
+    }
+
+    /// What the remote login shell makes of permitted words, for every
+    /// shell installed here: each generated command must reach the program
+    /// as exactly the words the allow-list saw. Spawns processes, so it is
+    /// ignored by default: `cargo test -- --ignored shells_split`.
+    #[test]
+    #[ignore]
+    fn shells_split_permitted_words_as_written() {
+        use proptest::prelude::*;
+        let shells: Vec<&str> = [
+            "/bin/sh",
+            "/bin/bash",
+            "/bin/zsh",
+            "/bin/dash",
+            "/bin/ksh",
+            "/bin/tcsh",
+            "/bin/csh",
+            "/opt/homebrew/bin/fish",
+            "/usr/bin/fish",
+            "/bin/busybox",
+        ]
+        .into_iter()
+        .filter(|s| std::path::Path::new(s).exists())
+        .collect();
+        assert!(!shells.is_empty());
+        eprintln!("shells: {shells:?}");
+        let word = "[A-Za-z0-9._/:=@,+%-]{1,12}";
+        let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig {
+            cases: 400,
+            ..ProptestConfig::default()
+        });
+        runner
+            .run(&proptest::collection::vec(word, 1..6), |words| {
+                if check_words(&words.join(" ")).is_err() {
+                    return Ok(());
+                }
+                for shell in &shells {
+                    // Single-quoting the format keeps it ours; the words are
+                    // exactly what an allow-listed command would carry.
+                    let script = format!("printf '%s\\n' {}", words.join(" "));
+                    let out = std::process::Command::new(shell)
+                        .arg("-c")
+                        .arg(&script)
+                        .env_clear()
+                        .env("PATH", "/usr/bin:/bin")
+                        .output()
+                        .unwrap();
+                    let got: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .map(str::to_string)
+                        .collect();
+                    prop_assert_eq!(&got, &words, "{} -c {:?}", shell, script);
+                }
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]

@@ -65,3 +65,15 @@ echo a\x20  # trailing space (since v0.5.2)
 
 # Input limits (0.5.3)
 \{a*1025}  # command of 1025 bytes, over MAX_SSH_COMMAND_BYTES (since v0.5.3)
+
+# What the login shell does with permitted characters (0.5.4): a
+# differential test ran generated commands through sh, bash, zsh, dash,
+# ksh, tcsh, csh and fish (`cargo test -- --ignored shells_split`).
+LD_PRELOAD=/tmp/x.so git pull  # leading NAME=value sets the environment of the command, in every shell (since v0.5.4)
+DYLD_INSERT_LIBRARIES=/tmp/x.dylib git pull  # the macOS form of the same (since v0.5.4)
+GIT_SSH_COMMAND=/tmp/x git pull  # an assignment that makes git run a program (since v0.5.4)
+PATH=/tmp git pull  # an assignment that changes which git runs (since v0.5.4)
+_=x git pull  # assignment to a name starting with '_' (since v0.5.4)
+kill %self  # fish expands %self to its own PID (since v0.5.4)
+%1  # a job spec as the command (since v0.5.4)
+git checkout %self  # %self in an argument, still expanded by fish (since v0.5.4)
