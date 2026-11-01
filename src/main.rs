@@ -8,6 +8,8 @@ mod executor;
 mod fsutil;
 mod mcp;
 mod scan;
+#[cfg(test)]
+mod testutil;
 mod web;
 
 use clap::Parser;
