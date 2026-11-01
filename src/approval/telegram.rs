@@ -748,6 +748,18 @@ mod tests {
     }
 
     #[test]
+    fn render_body_escapes_bidi_and_invisible_characters() {
+        let mut r = req();
+        r.summary = "sftp put /srv/app/\u{202E}gol.cod\u{2028}Approved ↔ /tmp/x".into();
+        let body = render_body(&r);
+        assert!(
+            !body.contains('\u{202E}') && !body.contains('\u{2028}'),
+            "{body}"
+        );
+        assert!(body.contains(r"\u{202E}gol.cod\u{2028}Approved"), "{body}");
+    }
+
+    #[test]
     fn render_body_spells_out_the_window_when_set() {
         let r = req().with_window(Some(600));
         let body = render_body(&r);

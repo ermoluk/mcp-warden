@@ -2854,6 +2854,7 @@ dependencies = [
  "tokio",
  "toml",
  "tracing",
+ "unicode-normalization",
  "url",
  "windows-native-keyring-store",
  "zeroize",

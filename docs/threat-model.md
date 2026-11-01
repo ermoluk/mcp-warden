@@ -31,7 +31,9 @@ The log also shows what the agent *tried*. Calls refused before authorisation �
 
 ### T5. Approval-prompt phishing via crafted preset names
 
-A malicious preset named `"prod-readonly\nApproval: auto\n"` could spoof the desktop notification body. `mcp-warden` sanitises preset names and summaries before rendering — strips control characters and truncates. See `src/approval/mod.rs::sanitise_for_prompt`.
+A malicious preset named `"prod-readonly\nApproval: auto\n"` could spoof the desktop notification body. `mcp-warden` sanitises preset names and summaries before rendering — strips control characters and truncates. See `core/src/approval/mod.rs::sanitise_for_prompt`.
+
+Stripping control characters (Unicode category Cc) is not enough: up to v0.5.3 the bidi overrides, embeddings and isolates (U+202A–202E, U+2066–2069), zero-width characters, the line and paragraph separators U+2028 / U+2029 and long runs of combining marks passed through. The agent controls text that reaches a prompt — the `remote` and `local` paths of `sftp_transfer`, the secret name of `get_secret_for_env` — and text that reaches the audit views — the preset name, summary and error of every refused call, the client name. With U+202E a path such as `/srv/app/\u{202E}gol.cod` is displayed reversed, and U+2028 starts a new line in many dialogs. Since the release after v0.5.3 every format character (Cf), U+2028 / U+2029 and the Hangul fillers are shown as a visible `\u{XXXX}` escape, and a character keeps at most two combining marks. The same function feeds every transport (the macOS and Windows dialogs, the Linux notification, Telegram, the TUI), `mcp-warden audit`, and — newly — the web UI, which escaped HTML but not these characters.
 
 ### T6. URL-parsing tricks bypassing the path allow-list
 

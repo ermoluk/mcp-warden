@@ -27,6 +27,16 @@ fn esc(s: &str) -> String {
         .replace('\'', "&#x27;")
 }
 
+/// Agent-supplied text from the audit log, made safe to show: invisible and
+/// reordering characters become visible escapes (as in approval prompts),
+/// then the result is HTML-escaped.
+fn untrusted(s: &str) -> String {
+    esc(&mcp_warden_core::approval::sanitise_for_prompt(
+        s,
+        usize::MAX,
+    ))
+}
+
 // ---------------------------------------------------------------------------
 // Minimal shared layout
 // ---------------------------------------------------------------------------
@@ -159,7 +169,7 @@ fn outcome_cell(o: &Option<AuditOutcome>) -> String {
         }
         Some(AuditOutcome::Err { message }) => format!(
             r#"<span class="badge badge-err">err: {}</span>"#,
-            esc(message)
+            untrusted(message)
         ),
         None => "—".to_string(),
     }
@@ -474,20 +484,21 @@ pub async fn audit_log(State(state): State<Arc<AppState>>, RawQuery(raw): RawQue
 </tr>"#,
             id = e.id,
             ts = esc(&e.created_at.format("%Y-%m-%d %H:%M:%S").to_string()),
-            preset = esc(&e.preset),
+            preset = untrusted(&e.preset),
             action = esc(&e.action),
             // SECURITY: Summaries (and, for refused calls, preset names) are
             // agent-supplied text recorded verbatim. They never hold secret
             // values — credentials are read only after authorisation — but
-            // they are untrusted, so they are HTML-escaped like everything else.
-            summary = esc(&e.summary),
+            // they are untrusted: shown with invisible and reordering
+            // characters escaped, then HTML-escaped like everything else.
+            summary = untrusted(&e.summary),
             decision = esc(&match e.via_event {
                 Some(n) => format!("{} via #{n}", decision_label(e.decision)),
                 None => decision_label(e.decision).to_string(),
             }),
             outcome = outcome_cell(&e.outcome),
             // Client name/version come from the MCP client: escaped too.
-            client = esc(&match (&e.client, &e.session) {
+            client = untrusted(&match (&e.client, &e.session) {
                 (Some(c), Some(s)) => format!("{c} · {s}"),
                 (c, s) => c.clone().or(s.clone()).unwrap_or_default(),
             }),
@@ -557,6 +568,40 @@ mod tests {
             .await
             .unwrap();
         String::from_utf8(bytes.to_vec()).unwrap()
+    }
+
+    /// A refused call's preset name, summary and error are the agent's text:
+    /// a bidi override in them must not reorder the row.
+    #[tokio::test]
+    async fn agent_text_is_shown_with_reordering_characters_escaped() {
+        let dir = tempfile::tempdir().unwrap();
+        let audit_db = dir.path().join("audit.db");
+        let sink = LocalSqlite::open(&audit_db).unwrap();
+        let id = sink
+            .record_pending(
+                "p\u{202E}x",
+                "sftp_transfer",
+                "sftp get /a\u{2066}b ↔ /tmp/c",
+            )
+            .unwrap();
+        sink.record_decision(id, AuditDecision::Refused).unwrap();
+        sink.record_outcome(
+            id,
+            AuditOutcome::Err {
+                message: "bad\u{2028}line".into(),
+            },
+        )
+        .unwrap();
+        let state = Arc::new(AppState {
+            config_path: dir.path().join("config.toml"),
+            audit_db,
+        });
+        let html = body(audit_log(State(state), RawQuery(None)).await).await;
+        for c in ['\u{202E}', '\u{2066}', '\u{2028}'] {
+            assert!(!html.contains(c), "raw U+{:04X} in the page", c as u32);
+        }
+        assert!(html.contains(r"p\u{202E}x") && html.contains(r"/a\u{2066}b"));
+        assert!(html.contains(r"bad\u{2028}line"), "{html}");
     }
 
     #[test]

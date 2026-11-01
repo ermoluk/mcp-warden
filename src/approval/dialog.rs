@@ -118,6 +118,21 @@ mod tests {
         assert!(parse_reply("x", false, "Approve once", "boom", None).is_err());
     }
 
+    /// The macOS and Windows dialogs show the same text.
+    #[test]
+    fn message_escapes_bidi_and_invisible_characters() {
+        let req = ApprovalRequest::new(
+            "__secret__/gh\u{200B}_pat".into(),
+            "sftp_transfer".into(),
+            "sftp get /srv/\u{2067}x\u{2069} ↔ /tmp/y".into(),
+        );
+        let text = message(&req);
+        for c in ['\u{200B}', '\u{2067}', '\u{2069}'] {
+            assert!(!text.contains(c), "{text}");
+        }
+        assert!(text.contains(r"gh\u{200B}_pat") && text.contains(r"/srv/\u{2067}x\u{2069}"));
+    }
+
     #[test]
     fn deny_is_the_last_button() {
         assert_eq!(buttons(None), ["Approve once", "Deny"]);
