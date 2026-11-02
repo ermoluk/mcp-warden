@@ -270,6 +270,13 @@ It is the escape hatch for tools that read a secret from their environment, so i
 - Claude Code and Claude Desktop rewrite their own config files. If they are running during an import, they may put the old entry back, plaintext included, so `import` asks the user to quit them and to re-run `scan` afterwards.
 - A key that has been sitting in a config file should be considered exposed. Rotate it.
 
+### R17. Supply chain
+
+- **Dependencies.** CI runs `cargo deny check` (advisories, licenses, sources: crates.io only, no git dependencies) and `cargo audit`. Advisories that cannot be fixed yet are listed with their reason in `deny.toml` and `.cargo/audit.toml`; at v0.5.4 these are `rsa` (Marvin, no fixed release; mcp-warden only signs with it) and `crypto-bigint` pinned by russh's `rsa` pre-release, `quick-xml` in the Windows notification crate (parses only mcp-warden's own XML), and `zstd` in `mysql_common` (MySQL compression is not enabled). Removing them needs semver-breaking upgrades of russh, notify-rust and mysql_async.
+- **CI.** Every third-party action is pinned to a commit SHA (version in a comment), jobs get `contents: read` unless they publish, `actions/checkout` keeps no token in the workspace, there is no `pull_request_target`, and `HOMEBREW_TAP_TOKEN` is visible only to the release job's publish step.
+- **Installers.** `install.sh` / `install.ps1` verify the archive against `SHA256SUMS` from the same release — proof of an intact download, not of who built it. With `MCP_WARDEN_VERIFY_ATTESTATION=1` they also run `gh attestation verify` and refuse to install unless the archive carries this repository's build-provenance attestation. Each script's body runs only once it has been downloaded completely (a function called on the last line in `install.sh`, one script block in `install.ps1`), so a truncated `curl | sh` runs nothing.
+- **npm.** The packages have no install scripts; `files` limits them to the launcher, README and binary.
+
 ## Update policy
 
 This document updates with every release. Material changes are noted in `CHANGELOG.md` under a `### Security` heading.

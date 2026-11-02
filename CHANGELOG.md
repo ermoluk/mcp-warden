@@ -35,6 +35,9 @@ All notable changes to this project will be documented in this file. The format 
 
 - **Two presets could share a name.** Calls used the first, while `list_presets`, the web UI and approval windows (keyed by name) saw both, so a second `gh` with `approval = "auto"` and other methods sat behind the first. Duplicate preset names now stop the server from starting (invariant 10). **Behaviour change.**
 
+- **Vulnerable dependencies updated.** `cargo audit` reported 27 advisories in `Cargo.lock`. Updated within semver: russh 0.60.3 (unbounded allocation from a hostile SSH server), rustls 0.23.46 and rustls-webpki 0.103.16 (handshake and certificate-verification fixes), webpki-roots 1.0.11 (distrusted roots), postgres-protocol 0.6.12 (SCRAM iteration DoS from a hostile server), h2, quinn-proto, crossbeam-epoch, ctutils, tokio, anyhow, event-listener. Eight remain, each needing a semver-breaking upgrade or without a fix; they are listed with reasons in `deny.toml` (threat model, R17).
+- **Supply-chain checks.** CI gains a job that runs `cargo deny check` (advisories, licenses, sources) and `cargo audit`; every GitHub Action is pinned to a commit SHA, `ci.yml` gets `permissions: contents: read`, and checkouts keep no token. `install.sh` and `install.ps1` verify the archive's build-provenance attestation with `gh attestation verify` when `MCP_WARDEN_VERIFY_ATTESTATION=1` is set (R17).
+
 ### Added
 
 - **`mcp-warden doctor` warns about risky named Redis queries** — `EVAL`, `SCRIPT`, `FUNCTION`, `CONFIG`, `MODULE`, `DEBUG`, `ACL`, `FLUSHALL`, `KEYS`, `MIGRATE`, `REPLICAOF` and others whose arguments the agent chooses (R7) — and about `allowed_commands` patterns that admit options.
