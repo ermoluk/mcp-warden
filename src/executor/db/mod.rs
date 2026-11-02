@@ -248,6 +248,7 @@ mod tests {
             expires_at: None,
             max_response_bytes: None,
             response_fields: vec![],
+            allowed_local_paths: vec![],
         }
     }
 

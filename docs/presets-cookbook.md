@@ -132,6 +132,7 @@ allowed_commands = [
 ]
 allow_sftp = true
 sftp_allowed_paths = ["/var/log/app/"]
+allowed_local_paths = ["/tmp/app-logs"]   # local side: only this directory
 approval = "auto"
 ```
 

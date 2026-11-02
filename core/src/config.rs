@@ -140,6 +140,11 @@ pub struct Preset {
     /// Empty: the whole body.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub response_fields: Vec<String>,
+    /// SFTP: the only local directories `sftp_transfer` may read or write,
+    /// absolute. Empty: anywhere under `$HOME`, `/tmp` and `/var/tmp`
+    /// except the locations that hold credentials or run code.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_local_paths: Vec<String>,
 }
 
 /// One step of a `response_fields` path.
@@ -398,6 +403,14 @@ impl Config {
             })?;
         }
         if p.allow_sftp {
+            for dir in &p.allowed_local_paths {
+                if !Path::new(dir).is_absolute() {
+                    return Err(WardenError::Validation(format!(
+                        "preset '{}': allowed_local_paths must be absolute, got '{dir}'",
+                        p.name
+                    )));
+                }
+            }
             for prefix in &p.sftp_allowed_paths {
                 if !prefix.starts_with('/') {
                     return Err(WardenError::Validation(format!(
@@ -914,6 +927,7 @@ mod tests {
                 expires_at: None,
                 max_response_bytes: None,
                 response_fields: vec![],
+                allowed_local_paths: vec![],
             }],
         };
         let s = toml::to_string(&cfg).unwrap();

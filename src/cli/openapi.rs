@@ -200,6 +200,7 @@ fn build_preset(api: OpenAPI, opts: FromOpenapiOptions<'_>) -> Result<Bootstrapp
         expires_at: None,
         max_response_bytes: None,
         response_fields: vec![],
+        allowed_local_paths: vec![],
     };
     Ok(Bootstrapped {
         spec_title: api.info.title,
