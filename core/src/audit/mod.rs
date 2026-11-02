@@ -183,6 +183,31 @@ mod tests {
         assert_eq!(recent[0].outcome, Some(AuditOutcome::Ok { status: 200 }));
     }
 
+    /// SQLite writes `audit.db-journal` (and `-wal`, `-shm` in WAL mode)
+    /// next to the database and follows a symlink planted there, writing
+    /// journal pages into whatever file it names. The sink refuses to open
+    /// with one in place, and opens the database itself without following.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_journal_or_database_is_refused() {
+        for suffix in ["", "-journal", "-wal", "-shm"] {
+            let dir = tempdir().unwrap();
+            let victim = dir.path().join("victim");
+            std::fs::write(&victim, "keep me").unwrap();
+            let db = dir.path().join("audit.db");
+            if !suffix.is_empty() {
+                sqlite_sink::LocalSqlite::open(&db).unwrap();
+            }
+            let planted = dir.path().join(format!("audit.db{suffix}"));
+            let _ = std::fs::remove_file(&planted);
+            std::os::unix::fs::symlink(&victim, &planted).unwrap();
+            let opened = sqlite_sink::LocalSqlite::open(&db)
+                .and_then(|s| s.record_pending("p", "a", "s").map(drop));
+            assert!(opened.is_err(), "audit.db{suffix} symlink was followed");
+            assert_eq!(std::fs::read_to_string(&victim).unwrap(), "keep me");
+        }
+    }
+
     #[test]
     fn round_trip_windowed_decision() {
         let dir = tempdir().unwrap();

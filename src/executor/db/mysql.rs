@@ -1,30 +1,22 @@
-use crate::executor::ActionExecutor;
 use crate::executor::db::{DbQueryResponse, is_local_host};
 use mcp_warden_core::config::{NamedQuery, Preset};
 use mcp_warden_core::error::{Result, WardenError};
+use mcp_warden_core::secret::Secret;
 use mysql_async::prelude::*;
 use serde_json::Value;
 
 pub async fn run(
-    actx: &ActionExecutor,
     preset: &Preset,
+    password: &Secret,
     nq: &NamedQuery,
     params: &[Value],
 ) -> Result<DbQueryResponse> {
-    let password = actx
-        .keychain
-        .get(preset.secret.as_deref().unwrap_or(""))?
-        .ok_or_else(|| WardenError::MissingSecret {
-            preset: preset.name.clone(),
-            secret: preset.secret.clone().unwrap_or_default(),
-        })?;
     let host = preset.host.as_deref().unwrap_or("");
     let user = preset.user.as_deref().unwrap_or("");
     let port = preset.port.unwrap_or(3306);
     let database = preset.database.as_deref().unwrap_or("");
 
     let opts = mysql_opts(host, port, user, password.expose(), database);
-    drop(password);
 
     let pool = mysql_async::Pool::new(opts);
     let mut conn = pool
@@ -50,6 +42,7 @@ pub async fn run(
     Ok(DbQueryResponse {
         rows_affected: json_rows.len() as u64,
         rows: json_rows,
+        notice: None,
     })
 }
 

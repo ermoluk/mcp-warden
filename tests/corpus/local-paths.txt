@@ -1,0 +1,49 @@
+# Local `sftp_transfer` paths that must be refused although they lie under
+# $HOME. Each entry is relative to the home directory; the test creates it
+# (as a file, with its parent directories) in a temporary home and checks
+# `get` and `put` are refused before anything is sent. `put` would upload
+# credentials, `get` would overwrite something that runs code or holds
+# keys. CI runs them: `cargo test hostile_corpus`.
+#
+# Format and escapes as in paths.txt: one entry per line,
+#   <input>  # <what it tests> (since vX.Y.Z)
+
+# Credentials
+.ssh/id_ed25519  # SSH private key (since v0.5.4)
+.ssh/authorized_keys  # SSH login keys: `get` adds the attacker's (since v0.5.4)
+.ssh/config  # SSH client config, ProxyCommand runs code (since v0.5.4)
+.aws/credentials  # AWS keys (since v0.5.4)
+.gnupg/private-keys-v1.d/x.key  # GnuPG private key (since v0.5.4)
+.kube/config  # Kubernetes credentials (since v0.5.4)
+.docker/config.json  # Docker registry credentials (since v0.5.4)
+.config/gcloud/credentials.db  # Google Cloud credentials (since v0.5.4)
+.azure/accessTokens.json  # Azure tokens (since v0.5.4)
+.netrc  # passwords for curl, git, ftp (since v0.5.4)
+.git-credentials  # git credential store (since v0.5.4)
+.npmrc  # npm tokens (since v0.5.4)
+.pypirc  # PyPI tokens (since v0.5.4)
+.cargo/credentials.toml  # crates.io token (since v0.5.4)
+.password-store/x.gpg  # pass(1) store (since v0.5.4)
+Library/Keychains/login.keychain-db  # macOS keychain (since v0.5.4)
+
+# Code that runs later
+.zshrc  # zsh startup file (since v0.5.4)
+.zshenv  # zsh startup file, read by every zsh (since v0.5.4)
+.zprofile  # zsh login file (since v0.5.4)
+.bashrc  # bash startup file (since v0.5.4)
+.bash_profile  # bash login file (since v0.5.4)
+.profile  # POSIX login file (since v0.5.4)
+.config/fish/config.fish  # fish startup file (since v0.5.4)
+.gitconfig  # git config: core.sshCommand, hooks (since v0.5.4)
+.config/git/config  # git config, XDG location (since v0.5.4)
+Library/LaunchAgents/evil.plist  # macOS login item (since v0.5.4)
+.config/autostart/evil.desktop  # Linux login item (since v0.5.4)
+.config/systemd/user/evil.service  # systemd user unit (since v0.5.4)
+.claude/settings.json  # Claude Code settings: hooks run commands (since v0.5.4)
+.claude.json  # Claude Code config: MCP servers run commands (since v0.5.4)
+.cursor/mcp.json  # Cursor MCP servers (since v0.5.4)
+Library/Application Support/Claude/claude_desktop_config.json  # Claude Desktop MCP servers (since v0.5.4)
+
+# mcp-warden itself
+.config/mcp-warden/config.toml  # mcp-warden config, Linux default (since v0.5.4)
+Library/Application Support/io.mcp-warden.mcp-warden/config.toml  # mcp-warden config, macOS default (since v0.5.4)

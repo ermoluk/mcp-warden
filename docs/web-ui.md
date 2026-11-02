@@ -15,10 +15,18 @@ any other address.
 - **Loopback-only bind.** `127.0.0.1` is hardcoded in `src/web/server.rs`.
   No authentication is needed precisely because only local processes can
   reach the socket.
+- **Only requests addressed to this UI.** The bind keeps other machines out,
+  not other web pages: with DNS rebinding a page on `evil.example` re-points
+  its own name at 127.0.0.1 and reads the UI as same-origin. Its requests
+  still carry `Host: evil.example:<port>`, so every request whose `Host` is
+  not `127.0.0.1:<port>`, `localhost:<port>` or `[::1]:<port>` gets `421
+  Misdirected Request` before any handler runs (since 0.5.4). Requests other than GET / HEAD — there are none yet — also need an
+  `Origin` naming the UI and no cross-site `Sec-Fetch-Site`, or get `403`.
 - **No secrets exposed.** Preset detail pages show keychain entry *names*
-  (e.g. `gh_pat`) but never the values. Audit summaries are redacted by the
-  existing `audit::redact` path before they reach the database; the web UI
-  applies no additional un-redaction.
+  (e.g. `gh_pat`) but never the values. Audit summaries never hold a secret:
+  they are built from the agent's request fields (method and path, command,
+  file paths, query name), never from a credential, header, query string or
+  body.
 - **Security headers on every response.**
   - `Content-Security-Policy: default-src 'self'`
   - `X-Frame-Options: DENY`

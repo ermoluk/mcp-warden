@@ -1,4 +1,5 @@
 use crate::executor::ActionExecutor;
+use crate::executor::credential_echo::CredentialForms;
 use mcp_warden_core::audit::AuditOutcome;
 use mcp_warden_core::config::{NamedQuery, Preset};
 use mcp_warden_core::error::{Result, WardenError};
@@ -23,6 +24,9 @@ pub mod redis;
 pub struct DbQueryResponse {
     pub rows: Vec<Value>,
     pub rows_affected: u64,
+    /// Set when mcp-warden withheld the rows (over the size limit).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 /// Look up the named query, validate parameters, then dispatch to the correct
@@ -35,6 +39,7 @@ pub async fn run(
 ) -> Result<DbQueryResponse> {
     let summary = super::summary::db(
         preset_type_label(&preset.preset_type),
+        preset.host.as_deref(),
         &query_name,
         params.len(),
     );
@@ -47,14 +52,59 @@ pub async fn run(
         .inspect_err(|e| actx.record_refused(&preset.name, "db_query", &summary, e))?;
     let event_id = actx.authorise(preset, "db_query", &summary, false).await?;
 
-    let result = match preset.preset_type {
-        mcp_warden_core::config::PresetType::Postgres => {
-            postgres::run(actx, preset, &nq, &params).await
+    let password = actx
+        .keychain
+        .get(preset.secret.as_deref().unwrap_or(""))?
+        .ok_or_else(|| WardenError::MissingSecret {
+            preset: preset.name.clone(),
+            secret: preset.secret.clone().unwrap_or_default(),
+        })?;
+    // A database can hand the password back — Redis `CONFIG GET
+    // requirepass`, a server error that quotes it — so rows and errors are
+    // scrubbed of it like a `proxy_http` body (invariants 1-2). The forms
+    // live for this call only and are zeroized on drop.
+    let forms = CredentialForms::raw(&password);
+
+    // Connecting, authenticating and the query, all under one timeout: a
+    // database that stops answering cannot hold the call open.
+    let timeout = std::time::Duration::from_secs(
+        preset
+            .timeout_seconds
+            .unwrap_or(super::limits::DEFAULT_DB_TIMEOUT_SECS),
+    );
+    let query = async {
+        match preset.preset_type {
+            mcp_warden_core::config::PresetType::Postgres => {
+                postgres::run(preset, &password, &nq, &params).await
+            }
+            mcp_warden_core::config::PresetType::Mysql => {
+                mysql::run(preset, &password, &nq, &params).await
+            }
+            mcp_warden_core::config::PresetType::Redis => {
+                redis::run(preset, &password, &nq, &params).await
+            }
+            _ => Err(WardenError::Validation("not a db preset".into())),
         }
-        mcp_warden_core::config::PresetType::Mysql => mysql::run(actx, preset, &nq, &params).await,
-        mcp_warden_core::config::PresetType::Redis => redis::run(actx, preset, &nq, &params).await,
-        _ => Err(WardenError::Validation("not a db preset".into())),
     };
+    let result = tokio::time::timeout(timeout, query)
+        .await
+        .unwrap_or_else(|_| Err(WardenError::Executor("db timeout".into())));
+    drop(password);
+    let result = match result {
+        Ok(mut resp) => {
+            let redacted: usize = resp.rows.iter_mut().map(|row| forms.scrub(row)).sum();
+            if redacted > 0 {
+                tracing::warn!(
+                    "preset '{}': the database returned the password; redacted {redacted} \
+                     occurrence(s) before returning the rows to the agent",
+                    preset.name
+                );
+            }
+            Ok(withhold_oversized(resp))
+        }
+        Err(e) => Err(forms.scrub_error(e)),
+    };
+    drop(forms);
 
     match &result {
         Ok(_) => {
@@ -72,6 +122,21 @@ pub async fn run(
         }
     };
     result
+}
+
+/// Rows too large for the agent's context are not returned — the same
+/// ceiling as a `proxy_http` body — and the response says why.
+fn withhold_oversized(mut resp: DbQueryResponse) -> DbQueryResponse {
+    let max = super::limits::MAX_RESPONSE_BYTES;
+    let rows = Value::Array(std::mem::take(&mut resp.rows));
+    if super::limits::json_longer_than(&rows, max) {
+        resp.notice = Some(format!(
+            "the result is larger than mcp-warden's limit of {max} bytes and was not returned"
+        ));
+    } else if let Value::Array(rows) = rows {
+        resp.rows = rows;
+    }
+    resp
 }
 
 /// The named query the agent asked for, if the preset declares it and the
@@ -184,6 +249,7 @@ mod tests {
             expires_at: None,
             max_response_bytes: None,
             response_fields: vec![],
+            allowed_local_paths: vec![],
         }
     }
 
@@ -198,6 +264,53 @@ mod tests {
             Arc::new(LocalSqlite::open(&dir.path().join("audit.db")).unwrap()),
         );
         (exec, dir)
+    }
+
+    /// A result too large for the agent's context is withheld, as for
+    /// `proxy_http`: the call says so instead of returning it.
+    #[tokio::test]
+    async fn an_oversized_result_is_withheld() {
+        let huge = crate::executor::limits::MAX_RESPONSE_BYTES + 1;
+        let redis = crate::testutil::FakeRedis::start(move |args| {
+            match args[0].to_ascii_uppercase().as_str() {
+                "GET" => format!("${huge}\r\n{}\r\n", "a".repeat(huge)).into_bytes(),
+                _ => b"+OK\r\n".to_vec(),
+            }
+        })
+        .await;
+        let (exec, _dir) = test_executor();
+        let mut preset = pg_preset_with_query("GET", "GET", vec!["text".into()]);
+        preset.preset_type = PresetType::Redis;
+        preset.host = Some("127.0.0.1".into());
+        preset.port = Some(redis.port);
+        let resp = run(&exec, &preset, "GET".into(), vec![Value::from("k")])
+            .await
+            .unwrap();
+        assert!(resp.rows.is_empty(), "{} rows returned", resp.rows.len());
+        assert!(resp.notice.unwrap().contains("limit"));
+    }
+
+    /// A database that accepts the connection and never answers: the call
+    /// ends after the preset's timeout, for every driver.
+    #[tokio::test]
+    async fn a_database_that_never_answers_times_out() {
+        use mcp_warden_core::config::PresetType;
+        let silent = crate::testutil::SilentListener::start();
+        for kind in [PresetType::Postgres, PresetType::Mysql, PresetType::Redis] {
+            let (exec, _dir) = test_executor();
+            let mut preset = pg_preset_with_query("ping", "select 1", vec![]);
+            preset.preset_type = kind;
+            preset.approval = ApprovalPolicy::Auto;
+            preset.host = Some("127.0.0.1".into());
+            preset.port = Some(silent.port);
+            preset.timeout_seconds = Some(1);
+            let call = run(&exec, &preset, "ping".into(), vec![]);
+            let res = tokio::time::timeout(std::time::Duration::from_secs(10), call)
+                .await
+                .unwrap_or_else(|_| panic!("{kind:?}: db_query hung past its own timeout"));
+            let err = res.expect_err("must fail").to_string();
+            assert!(err.contains("timeout"), "{kind:?}: {err}");
+        }
     }
 
     #[tokio::test]

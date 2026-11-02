@@ -44,7 +44,8 @@ pub fn is_present(path: &Path) -> bool {
 /// it only loses its description.
 pub fn read(path: &Path) -> Option<LockInfo> {
     is_present(path).then(|| {
-        std::fs::read_to_string(path)
+        // Never follow a symlink or wait on a FIFO planted in its place.
+        crate::fsutil::read_small_nofollow(path, 4096)
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
             .unwrap_or(LockInfo {
@@ -100,6 +101,26 @@ impl LockState {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A lock file replaced by a symlink to /dev/zero still locks, and
+    /// reading its description neither hangs nor fills memory.
+    #[cfg(unix)]
+    #[test]
+    fn a_hostile_lock_file_still_locks_and_reads_quickly() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join(LOCK_FILE);
+        std::os::unix::fs::symlink("/dev/zero", &path).unwrap();
+        assert!(LockState::at(path.clone()).is_locked());
+        let (tx, rx) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let _ = tx.send(read(&path));
+        });
+        let info = rx
+            .recv_timeout(std::time::Duration::from_secs(5))
+            .expect("reading the lock file never ended")
+            .expect("a present lock file locks");
+        assert_eq!(info.reason.as_deref(), Some("lock file unreadable"));
+    }
 
     #[test]
     fn latch_survives_deleting_the_file() {

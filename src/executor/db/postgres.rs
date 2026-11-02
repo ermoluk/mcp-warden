@@ -1,7 +1,7 @@
-use crate::executor::ActionExecutor;
 use crate::executor::db::{DbQueryResponse, is_local_host};
 use mcp_warden_core::config::{NamedQuery, Preset};
 use mcp_warden_core::error::{Result, WardenError};
+use mcp_warden_core::secret::Secret;
 use serde_json::Value;
 use std::sync::Arc;
 use tokio::io::{AsyncRead, AsyncWrite};
@@ -11,18 +11,11 @@ use tokio_postgres::types::Type;
 use tokio_postgres::{Connection, NoTls};
 
 pub async fn run(
-    actx: &ActionExecutor,
     preset: &Preset,
+    password: &Secret,
     nq: &NamedQuery,
     params: &[Value],
 ) -> Result<DbQueryResponse> {
-    let password = actx
-        .keychain
-        .get(preset.secret.as_deref().unwrap_or(""))?
-        .ok_or_else(|| WardenError::MissingSecret {
-            preset: preset.name.clone(),
-            secret: preset.secret.clone().unwrap_or_default(),
-        })?;
     let host = preset.host.as_deref().unwrap_or("");
     let user = preset.user.as_deref().unwrap_or("");
     let port = preset.port.unwrap_or(5432);
@@ -35,7 +28,6 @@ pub async fn run(
         .user(user)
         .dbname(database)
         .password(password.expose());
-    drop(password);
 
     // The password must never cross the network in plaintext: TLS with
     // certificate verification for any remote host; plaintext only when the
@@ -76,6 +68,7 @@ pub async fn run(
     Ok(DbQueryResponse {
         rows_affected: json_rows.len() as u64,
         rows: json_rows,
+        notice: None,
     })
 }
 

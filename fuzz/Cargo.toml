@@ -1,0 +1,83 @@
+# Fuzz targets for the parsers and checks that see agent, upstream or
+# config input. Needs nightly and cargo-fuzz:
+#   cargo +nightly fuzz run <target> -- -max_total_time=600
+# The main build stays on stable; this crate is its own workspace.
+[package]
+name = "mcp-warden-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2024"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+mcp-warden = { path = ".." }
+mcp-warden-core = { path = "../core" }
+serde_json = "1"
+toml = "0.8"
+russh = "0.60"
+tempfile = "3"
+
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "check_request"
+path = "fuzz_targets/check_request.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "check_words"
+path = "fuzz_targets/check_words.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "config"
+path = "fuzz_targets/config.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "scrub"
+path = "fuzz_targets/scrub.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "select_fields"
+path = "fuzz_targets/select_fields.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "known_hosts"
+path = "fuzz_targets/known_hosts.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "telegram_updates"
+path = "fuzz_targets/telegram_updates.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "sanitise_for_prompt"
+path = "fuzz_targets/sanitise_for_prompt.rs"
+test = false
+doc = false
+bench = false

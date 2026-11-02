@@ -4,13 +4,13 @@ resolver = "2"
 
 [package]
 name = "mcp-warden"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2024"
 rust-version = "1.89"
 license = "Apache-2.0"
 description = "Local-first credential broker MCP server for AI coding agents."
 readme = "README.md"
-exclude = ["docs/demo.gif", "docs/demo/", "docs/brand/", "plugins/", ".claude-plugin/", "packaging/", "flake.nix", "flake.lock", "install.sh", "install.ps1", ".github/"]
+exclude = ["docs/demo.gif", "docs/demo/", "docs/brand/", "plugins/", ".claude-plugin/", "packaging/", "flake.nix", "flake.lock", "install.sh", "install.ps1", ".github/", ".cargo/", "deny.toml", "fuzz/"]
 repository = "https://github.com/ermoluk/mcp-warden"
 keywords = ["mcp", "credentials", "ai-agent", "security", "keychain"]
 categories = ["command-line-utilities", "authentication"]
@@ -27,13 +27,16 @@ pkg-url = "{ repo }/releases/download/v{ version }/mcp-warden-{ target }.zip"
 pkg-fmt = "zip"
 
 [dependencies]
-mcp-warden-core = { version = "0.5.3", path = "core" }
+mcp-warden-core = { version = "0.5.4", path = "core" }
 clap = { version = "4.5", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "process", "signal", "time", "sync", "fs"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = { version = "1", features = ["preserve_order"] }
 toml = "0.8"
 rmcp = { version = "1.6", features = ["server", "macros", "schemars", "transport-io"] }
+tokio-util = { version = "0.7", features = ["codec"] }
+futures = "0.3"
+bytes = "1"
 schemars = "1"
 reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls", "gzip"] }
 notify-rust = "4"
@@ -78,6 +81,7 @@ predicates = "3"
 tempfile = "3"
 wiremock = "0.6"
 proptest = { version = "1", default-features = false, features = ["std"] }
+flate2 = "1"
 
 [profile.release]
 lto = "thin"

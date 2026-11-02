@@ -137,7 +137,7 @@ mcp-warden preset add <preset_name> \
   --approval prompt
 ```
 
-If the user wants `auto`-approval (no prompt), they must add `--confirm-auto` to the preset add command. Without it, the CLI rejects `auto` policy as a guard against drive-by config edits.
+If the user wants `auto`-approval (no prompt), they must add `--confirm-auto` to the preset add command and then approve the confirmation prompt mcp-warden shows. Without it, the CLI rejects `auto`; an `auto` preset nobody confirmed (or edited since) keeps asking until they run `mcp-warden preset confirm <name>`. You cannot confirm it for them.
 
 Tell them to restart Claude Code after editing presets — the MCP server loads-once-and-freezes config at startup (TOCTOU defence).
 

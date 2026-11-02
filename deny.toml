@@ -1,0 +1,75 @@
+# cargo-deny: advisories, licenses, bans and sources for the dependency
+# tree. CI runs `cargo deny check`; run it locally before a release.
+
+[graph]
+all-features = true
+
+[advisories]
+# Every advisory fails the check unless it is listed here with the reason
+# it does not affect mcp-warden and what would remove it.
+ignore = [
+    # rsa 0.10.0-rc (Marvin attack, no fixed release exists), pulled in by
+    # russh's ssh-key fork. mcp-warden only signs with a user's RSA key
+    # for SSH authentication, never decrypts. Removed by moving to a russh
+    # whose ssh-key no longer depends on rsa (or using ed25519 keys).
+    { id = "RUSTSEC-2023-0071", reason = "rsa via russh: no fix released; signing only" },
+    # crypto-bigint 0.7.0-rc.28 timing variability, pinned by the same rsa
+    # pre-release (via crypto-primes). Fixed when russh moves past it
+    # (russh 0.65 is a semver-breaking upgrade, left for its own change).
+    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint pinned by russh's rsa pre-release" },
+    # quick-xml 0.37 in tauri-winrt-notification (Windows notifications via
+    # notify-rust): it parses only the toast XML mcp-warden builds itself,
+    # never upstream or agent input. Fixed by a notify-rust release that
+    # moves to quick-xml >= 0.41.
+    { id = "RUSTSEC-2026-0194", reason = "quick-xml parses only our own toast XML" },
+    { id = "RUSTSEC-2026-0195", reason = "quick-xml parses only our own toast XML" },
+    # zstd 0.13 / zstd-safe 7 / zstd-sys 2.0 in mysql_common, for MySQL
+    # binlog and compressed-protocol support mcp-warden does not enable.
+    # Fixed by upgrading mysql_async (semver-breaking, its own change).
+    { id = "RUSTSEC-2026-0391", reason = "zstd unused: MySQL compression is not enabled" },
+    { id = "RUSTSEC-2026-0398", reason = "zstd unused: MySQL compression is not enabled" },
+    { id = "RUSTSEC-2026-0403", reason = "zstd unused: MySQL compression is not enabled" },
+    { id = "RUSTSEC-2026-0410", reason = "zstd-sys: WebAssembly shim, not a target we build" },
+]
+# Unmaintained and unsound crates deep in the tree are reported, not fatal:
+# each is listed by `cargo deny check advisories` and reviewed per release.
+unmaintained = "none"
+unsound = "workspace"
+yanked = "deny"
+
+[licenses]
+confidence-threshold = 0.9
+allow = [
+    "Apache-2.0",
+    "Apache-2.0 WITH LLVM-exception",
+    "BSD-1-Clause",
+    "BSD-2-Clause",
+    "BSD-3-Clause",
+    "BSL-1.0",
+    "CC0-1.0",
+    "CDLA-Permissive-2.0",
+    "ISC",
+    "MIT",
+    "MIT-0",
+    "MPL-2.0",
+    "Unicode-3.0",
+    "Unlicense",
+    "Zlib",
+]
+
+[bans]
+multiple-versions = "allow"
+wildcards = "deny"
+allow-wildcard-paths = true
+
+[sources]
+unknown-registry = "deny"
+unknown-git = "deny"
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+
+# webpki 0.22 (via mysql_async) has no `license` field; its LICENSE file
+# is ISC-style.
+[[licenses.clarify]]
+crate = "webpki"
+expression = "ISC"
+license-files = [{ path = "LICENSE", hash = 0x001c7e6c }]

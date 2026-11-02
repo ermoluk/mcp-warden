@@ -21,7 +21,7 @@ const TEMPLATE: &str = "\
 ";
 
 pub fn run(config_dir: &Path) -> Result<()> {
-    fs::create_dir_all(config_dir).map_err(WardenError::Io)?;
+    crate::fsutil::ensure_private_dir(config_dir).map_err(WardenError::Io)?;
     let path = config_dir.join("config.toml");
     if path.exists() {
         eprintln!("Config already exists at {}", path.display());

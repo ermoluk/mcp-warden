@@ -1,6 +1,6 @@
 [package]
 name = "mcp-warden-core"
-version = "0.5.3"
+version = "0.5.4"
 edition = "2024"
 rust-version = "1.85"
 license = "Apache-2.0"
@@ -19,10 +19,14 @@ keyring-core = "1"
 rusqlite = { version = "0.32", features = ["bundled"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+sha2 = "0.10"
+hmac = "0.12"
+getrandom = "0.3"
 thiserror = "1"
 tokio = { version = "1", features = ["sync", "time", "rt"] }
 toml = "0.8"
 tracing = "0.1"
+unicode-normalization = "0.1.25"
 url = "2"
 zeroize = { version = "1", features = ["zeroize_derive"] }
 regex = "1"

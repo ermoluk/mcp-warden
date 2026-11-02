@@ -72,6 +72,12 @@ pub struct TelegramConfig {
     /// Optional per-prompt timeout in seconds (default 120).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<u64>,
+    /// Show the local prompt (the desktop dialog, or the TUI on a terminal)
+    /// when a Telegram prompt times out. Off by default: Telegram is for
+    /// when the agent may control the screen, and a local dialog is one it
+    /// could click.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub desktop_fallback: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -125,7 +131,8 @@ pub struct Preset {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
     /// HTTP: largest response body `proxy_http` hands the agent, in bytes.
-    /// A larger body is read no further and not returned. `None`: no limit.
+    /// A larger body is read no further and not returned. It can only lower
+    /// mcp-warden's own ceiling (10 MiB of decoded body); `None` uses that.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_response_bytes: Option<u64>,
     /// HTTP: the only JSON fields `proxy_http` returns — `id`,
@@ -133,6 +140,11 @@ pub struct Preset {
     /// Empty: the whole body.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub response_fields: Vec<String>,
+    /// SFTP: the only local directories `sftp_transfer` may read or write,
+    /// absolute. Empty: anywhere under `$HOME`, `/tmp` and `/var/tmp`
+    /// except the locations that hold credentials or run code.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub allowed_local_paths: Vec<String>,
 }
 
 /// One step of a `response_fields` path.
@@ -222,6 +234,16 @@ pub enum Auth {
     },
 }
 
+/// `localhost`, 127.0.0.0/8 or `::1`: a host whose traffic cannot leave
+/// this machine.
+fn is_loopback(host: &url::Host<&str>) -> bool {
+    match host {
+        url::Host::Domain(d) => d.eq_ignore_ascii_case("localhost"),
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
+    }
+}
+
 impl Config {
     pub fn load_and_validate(path: &Path, kc: &dyn KeychainStore) -> Result<Self> {
         let raw = std::fs::read_to_string(path).map_err(WardenError::Io)?;
@@ -233,9 +255,33 @@ impl Config {
 
     pub fn validate(&self, kc: &dyn KeychainStore) -> Result<()> {
         self.validate_servers()?;
+        let mut names = std::collections::HashSet::new();
+        if let Some(dup) = self.preset.iter().find(|p| !names.insert(&p.name)) {
+            return Err(WardenError::Validation(format!(
+                "more than one preset named '{}'",
+                dup.name
+            )));
+        }
         for p in &self.preset {
             if p.name.is_empty() {
                 return Err(WardenError::Validation("preset name empty".into()));
+            }
+            // A preset naming a confirmation stamp (or the key that signs
+            // them) could send it upstream or reveal it to the agent.
+            let secret = match &p.auth {
+                Some(
+                    Auth::Bearer { secret }
+                    | Auth::Header { secret, .. }
+                    | Auth::Basic { secret, .. },
+                ) => Some(secret),
+                None => p.secret.as_ref(),
+            };
+            if let Some(secret) = secret.filter(|s| crate::stamp::is_stamp_name(s)) {
+                return Err(WardenError::Validation(format!(
+                    "preset '{}': keychain entry '{secret}' is reserved for mcp-warden's \
+                     confirmations and cannot be a preset's secret",
+                    p.name
+                )));
             }
             match p.preset_type {
                 PresetType::Http => self.validate_http(p, kc)?,
@@ -279,7 +325,20 @@ impl Config {
         })?;
         match parsed.scheme() {
             "https" => {}
-            "http" => tracing::warn!("preset '{}' uses plain http", p.name),
+            // The credential would cross the network in clear text. Only a
+            // connection that cannot leave this machine may skip TLS (as
+            // for databases, R10); reach anything else over https or an
+            // SSH tunnel to localhost.
+            "http" if parsed.host().is_some_and(|h| is_loopback(&h)) => {}
+            "http" => {
+                return Err(WardenError::Validation(format!(
+                    "preset '{}': base_url uses plain http to a host that is not loopback, so \
+                     the credential would cross the network unencrypted; use https, or an \
+                     SSH tunnel to localhost (`ssh -L 8080:localhost:80 host`, then \
+                     base_url = \"http://localhost:8080\")",
+                    p.name
+                )));
+            }
             other => {
                 return Err(WardenError::Validation(format!(
                     "preset '{}': base_url scheme '{}' not allowed",
@@ -368,6 +427,14 @@ impl Config {
             })?;
         }
         if p.allow_sftp {
+            for dir in &p.allowed_local_paths {
+                if !Path::new(dir).is_absolute() {
+                    return Err(WardenError::Validation(format!(
+                        "preset '{}': allowed_local_paths must be absolute, got '{dir}'",
+                        p.name
+                    )));
+                }
+            }
             for prefix in &p.sftp_allowed_paths {
                 if !prefix.starts_with('/') {
                     return Err(WardenError::Validation(format!(
@@ -641,6 +708,117 @@ mod tests {
     }
 
     #[test]
+    fn plain_http_is_refused_unless_the_host_is_loopback() {
+        let cfg = |url: &str| -> Config {
+            toml::from_str(&format!(
+                r#"
+                [[preset]]
+                name = "p"
+                type = "http"
+                description = "x"
+                base_url = "{url}"
+                auth = {{ type = "bearer", secret = "x" }}
+                allowed_methods = ["GET"]
+                approval = "prompt"
+                "#
+            ))
+            .unwrap()
+        };
+        let kc = InMemoryKeychain::new();
+        kc.set("x", Secret::new("y".into())).unwrap();
+        for remote in [
+            "http://api.example.com",
+            "http://192.168.1.10:3000",
+            "http://10.0.0.1",
+            "http://localhost.example.com",
+            "http://evil.localhost",
+            "http://[::ffff:127.0.0.1]",
+            "http://0.0.0.0:8080",
+        ] {
+            let err = cfg(remote).validate(&kc).unwrap_err().to_string();
+            assert!(err.contains("plain http"), "{remote}: {err}");
+        }
+        for local in [
+            "http://localhost:8080",
+            "http://LOCALHOST",
+            "http://127.0.0.1:3000",
+            "http://127.1.2.3",
+            "http://[::1]:8080",
+            "https://api.example.com",
+        ] {
+            cfg(local)
+                .validate(&kc)
+                .unwrap_or_else(|e| panic!("{local}: {e}"));
+        }
+    }
+
+    /// `stamp/…` entries are mcp-warden's confirmations, not secrets: a
+    /// preset that named one could send or reveal the stamp key.
+    #[test]
+    fn presets_cannot_use_a_reserved_keychain_name() {
+        let kc = InMemoryKeychain::new();
+        kc.set("stamp/key", Secret::new("k".into())).unwrap();
+        for preset in [
+            r#"
+            [[preset]]
+            name = "p"
+            type = "http"
+            description = "x"
+            base_url = "https://example.com"
+            auth = { type = "bearer", secret = "stamp/key" }
+            allowed_methods = ["GET"]
+            approval = "prompt"
+            "#,
+            r#"
+            [[preset]]
+            name = "p"
+            type = "ssh"
+            description = "x"
+            host = "h"
+            user = "u"
+            secret = "stamp/key"
+            approval = "prompt"
+            "#,
+        ] {
+            let cfg: Config = toml::from_str(preset).unwrap();
+            let err = cfg.validate(&kc).unwrap_err().to_string();
+            assert!(err.contains("reserved"), "{err}");
+        }
+    }
+
+    /// Lookups take the first preset of a name, while `list_presets`, the
+    /// web UI and approval windows would see both: refuse duplicates.
+    #[test]
+    fn duplicate_preset_names_are_refused() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [[preset]]
+            name = "gh"
+            type = "http"
+            description = "read"
+            base_url = "https://api.github.com"
+            auth = { type = "bearer", secret = "x" }
+            allowed_methods = ["GET"]
+            approval = "prompt"
+
+            [[preset]]
+            name = "gh"
+            type = "http"
+            description = "write"
+            base_url = "https://api.github.com"
+            auth = { type = "bearer", secret = "x" }
+            allowed_methods = ["DELETE"]
+            approval = "auto"
+            "#,
+        )
+        .unwrap();
+        let kc = InMemoryKeychain::new();
+        kc.set("x", Secret::new("y".into())).unwrap();
+        let err = cfg.validate(&kc).unwrap_err().to_string();
+        assert!(err.contains("more than one preset named 'gh'"), "{err}");
+    }
+
+    #[test]
     fn rejects_non_http_non_https_base_url() {
         let toml_src = r#"
             [[preset]]
@@ -839,6 +1017,7 @@ mod tests {
                 expires_at: None,
                 max_response_bytes: None,
                 response_fields: vec![],
+                allowed_local_paths: vec![],
             }],
         };
         let s = toml::to_string(&cfg).unwrap();

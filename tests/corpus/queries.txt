@@ -1,0 +1,36 @@
+# Hostile `proxy_http` query keys. Every entry must be refused by
+# `policy::check_request` as a query key (`?<key>=DELETE`), for a preset
+# that allows GET and POST on every path — the check holds whatever the
+# allow-list says. CI runs them: `cargo test hostile_corpus`.
+#
+# Format and escapes as in paths.txt: one entry per line,
+#   <input>  # <what it tests> (since vX.Y.Z)
+# where "since" is the first release that refused it.
+
+# Method override: Laravel and Symfony (with method parameter override,
+# Laravel's default) run `POST /x?_method=DELETE` as DELETE; Express
+# `method-override` can be configured the same way.
+_method  # Laravel / Symfony / Rails-style override parameter (since v0.5.4)
+_METHOD  # override parameter, upper case (since v0.5.4)
+_Method  # override parameter, mixed case (since v0.5.4)
+.method  # PHP turns '.' in a parameter name into '_' (since v0.5.4)
+x-http-method\x20override  # PHP turns an inner ' ' into '_' (since v0.5.4)
+[method  # PHP turns an unmatched '[' into '_' (since v0.5.4)
+\x20_method  # PHP drops leading spaces in a parameter name (since v0.5.4)
+_method\x20  # trailing space (since v0.5.4)
+_method[]  # PHP array syntax, still named _method (since v0.5.4)
+_method[0]  # PHP array syntax with an index (since v0.5.4)
+X-HTTP-Method-Override  # override header name used as a parameter (since v0.5.4)
+x-http-method-override  # override header name, lower case (since v0.5.4)
+X_HTTP_METHOD_OVERRIDE  # override header name, as PHP sees it (since v0.5.4)
+x.http.method.override  # override header name with dots (since v0.5.4)
+X-HTTP-Method  # OData / Microsoft override name (since v0.5.4)
+X-Method-Override  # another common override name (since v0.5.4)
+
+# Control characters in a key: upstreams split, truncate or log them
+# differently.
+_method\x00x  # NUL truncation of a parameter name (since v0.5.4)
+a\nb  # newline in a parameter name (since v0.5.4)
+a\rb  # carriage return in a parameter name (since v0.5.4)
+a\tb  # tab in a parameter name (since v0.5.4)
+a\x7fb  # DEL in a parameter name (since v0.5.4)

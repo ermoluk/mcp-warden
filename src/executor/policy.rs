@@ -87,8 +87,14 @@ pub fn check_request(preset: &Preset, req: &Request) -> Result<()> {
         )));
     }
     match *req {
-        Request::Http { method, path, .. } => {
-            super::http::validated_url(preset, &method.to_uppercase(), path).map(drop)
+        Request::Http {
+            method,
+            path,
+            query,
+            body,
+        } => {
+            super::http::validated_url(preset, &method.to_uppercase(), path)?;
+            super::http::check_query_and_body_keys(query, body)
         }
         Request::Ssh { command } => super::ssh::validate_command(preset, command),
         Request::Sftp { remote, local } => super::sftp::validate_transfer(preset, remote, local),
@@ -355,65 +361,6 @@ mod tests {
 
     // -------- hostile-input corpus --------
 
-    /// `tests/corpus/*.txt` entries as `(line, input, note)`. The format is
-    /// described at the top of each file.
-    fn corpus(text: &str) -> Vec<(usize, String, String)> {
-        text.lines()
-            .enumerate()
-            .filter(|(_, line)| !line.is_empty() && !line.starts_with('#'))
-            .map(|(i, line)| {
-                let (raw, note) = line
-                    .split_once("  # ")
-                    .unwrap_or_else(|| panic!("line {}: no `  # <note>`: {line:?}", i + 1));
-                assert!(
-                    note.contains("(since v"),
-                    "line {}: the note must say `(since vX.Y.Z)`: {line:?}",
-                    i + 1
-                );
-                (i + 1, unescape(raw, i + 1), note.to_string())
-            })
-            .collect()
-    }
-
-    fn unescape(raw: &str, line: usize) -> String {
-        let mut out = String::new();
-        let mut chars = raw.chars();
-        let bad = |what: &str| -> ! { panic!("line {line}: {what} in {raw:?}") };
-        while let Some(c) = chars.next() {
-            if c != '\\' {
-                out.push(c);
-                continue;
-            }
-            match chars.next() {
-                Some('\\') => out.push('\\'),
-                Some('n') => out.push('\n'),
-                Some('r') => out.push('\r'),
-                Some('t') => out.push('\t'),
-                Some('x') => {
-                    let hex: String = chars.by_ref().take(2).collect();
-                    let byte = u8::from_str_radix(&hex, 16).unwrap_or_else(|_| bad("bad \\xNN"));
-                    out.push(char::from(byte));
-                }
-                Some('u') => {
-                    if chars.next() != Some('{') {
-                        bad("\\u without {");
-                    }
-                    let hex: String = chars.by_ref().take_while(|c| *c != '}').collect();
-                    let code = u32::from_str_radix(&hex, 16).unwrap_or_else(|_| bad("bad \\u{}"));
-                    out.push(char::from_u32(code).unwrap_or_else(|| bad("bad \\u{}")));
-                }
-                Some('{') => {
-                    let spec: String = chars.by_ref().take_while(|c| *c != '}').collect();
-                    let (c, n) = spec.split_once('*').unwrap_or_else(|| bad("bad \\{c*N}"));
-                    let n: usize = n.parse().unwrap_or_else(|_| bad("bad \\{c*N}"));
-                    out.push_str(&c.repeat(n));
-                }
-                _ => bad("unknown escape"),
-            }
-        }
-        out
-    }
-
     /// Every entry of `text` must be refused for `preset`; returns how many
     /// were checked.
     fn assert_all_refused(
@@ -422,7 +369,7 @@ mod tests {
         preset: &Preset,
         req: impl Fn(&str) -> Request,
     ) -> usize {
-        let entries = corpus(text);
+        let entries = crate::testutil::corpus(text);
         let allowed: Vec<String> = entries
             .iter()
             .filter(|(_, input, _)| check_request(preset, &req(input)).is_ok())
@@ -472,7 +419,78 @@ mod tests {
     }
 
     #[test]
+    fn hostile_corpus_query_keys_are_refused_whatever_the_allow_list() {
+        let mut wide = http(ApprovalPolicy::Auto);
+        wide.allowed_methods = vec!["GET".into(), "POST".into()];
+        wide.allowed_paths = vec![".*".into()];
+        let ordinary: BTreeMap<String, String> = [
+            ("page".to_string(), "2".to_string()),
+            ("q".into(), "a b\nc".into()),
+        ]
+        .into();
+        check_request(
+            &wide,
+            &Request::Http {
+                method: "POST",
+                path: "/x",
+                query: Some(&ordinary),
+                body: None,
+            },
+        )
+        .unwrap();
+        let n = assert_all_refused(
+            "tests/corpus/queries.txt",
+            include_str!("../../tests/corpus/queries.txt"),
+            &wide,
+            |key| {
+                let query = Box::leak(Box::new(BTreeMap::from([(
+                    key.to_string(),
+                    "DELETE".to_string(),
+                )])));
+                Request::Http {
+                    method: "POST",
+                    path: "/x",
+                    query: Some(query),
+                    body: None,
+                }
+            },
+        );
+        assert!(n >= 20, "only {n} entries in tests/corpus/queries.txt");
+    }
+
+    /// Laravel reads `_method` from a JSON body too.
+    #[test]
+    fn method_override_in_the_json_body_is_refused() {
+        let mut wide = http(ApprovalPolicy::Auto);
+        wide.allowed_methods = vec!["POST".into()];
+        wide.allowed_paths = vec![".*".into()];
+        let post = |body: &Value| {
+            check_request(
+                &wide,
+                &Request::Http {
+                    method: "POST",
+                    path: "/x",
+                    query: None,
+                    body: Some(body),
+                },
+            )
+        };
+        for body in [
+            serde_json::json!({ "_method": "DELETE" }),
+            serde_json::json!({ "title": "x", "X-HTTP-Method-Override": "DELETE" }),
+            serde_json::json!({ ".method": "DELETE" }),
+        ] {
+            let err = post(&body).unwrap_err().to_string();
+            assert!(err.contains("override the HTTP method"), "{body}: {err}");
+        }
+        // Only top-level keys count; nested data is the upstream's business.
+        post(&serde_json::json!({ "data": { "_method": "x" }, "method": "card" })).unwrap();
+        post(&serde_json::json!(["_method"])).unwrap();
+    }
+
+    #[test]
     fn corpus_escapes() {
+        use crate::testutil::{corpus, unescape};
         assert_eq!(
             unescape(r"a\\b\n\t\x00\x20\u{FF0F}\{z*3}", 1),
             "a\\b\n\t\0 ／zzz"

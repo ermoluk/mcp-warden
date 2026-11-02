@@ -4,6 +4,7 @@ use std::sync::Arc;
 
 pub mod approval;
 pub mod audit;
+pub mod confirm;
 pub mod doctor;
 pub mod import;
 pub mod init;

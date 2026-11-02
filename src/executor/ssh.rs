@@ -13,6 +13,9 @@ pub struct SshExecResponse {
     pub stdout: String,
     pub stderr: String,
     pub exit_code: Option<u32>,
+    /// Set when mcp-warden stopped reading the output (over the limit).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub notice: Option<String>,
 }
 
 /// Validate the agent-supplied command against the preset's anchored regex
@@ -43,16 +46,29 @@ pub fn validate_command(preset: &Preset, command: &str) -> Result<()> {
 /// The exec channel hands the command to sshd, which runs it with the
 /// remote user's login shell (`$SHELL -c`), so `git checkout \S+` would
 /// also let `git checkout $(curl …|sh)` through. Each space-separated word
-/// may hold only characters no common shell (sh, bash, zsh, fish) expands,
-/// splits or chains on; the shell then runs exactly the words the
-/// allow-list matched.
-fn check_words(command: &str) -> Result<()> {
+/// may hold only characters no common shell (sh, bash, zsh, dash, ksh,
+/// tcsh, csh, fish) expands, splits or chains on; the shell then runs
+/// exactly the words the allow-list matched — checked against every one of
+/// those shells by `shells_split_permitted_words_as_written`.
+///
+/// Two uses of permitted characters still mean something to a shell, so
+/// they are refused too: a leading `NAME=value` word, which every one of
+/// those shells reads as an environment variable for the command
+/// (`LD_PRELOAD=/tmp/x.so git pull`), and a word starting with `%`, which
+/// fish expands (`%self` is its PID) and other shells read as a job.
+pub(crate) fn check_words(command: &str) -> Result<()> {
     let refuse = |why: String| {
         WardenError::Validation(format!(
             "command refused ({why}): ssh_exec words may only contain letters, digits \
-             and - _ . / : = @ , + % (no leading '='), separated by single spaces"
+             and - _ . / : = @ , + % (no leading '=' or '%', no leading NAME=value), \
+             separated by single spaces"
         ))
     };
+    if command.split(' ').next().is_some_and(is_assignment) {
+        return Err(refuse(
+            "starts with NAME=value, an environment assignment".into(),
+        ));
+    }
     for word in command.split(' ') {
         if word.is_empty() {
             return Err(refuse(
@@ -63,6 +79,9 @@ fn check_words(command: &str) -> Result<()> {
         if word.starts_with('=') {
             return Err(refuse("word starts with '='".into()));
         }
+        if word.starts_with('%') {
+            return Err(refuse("word starts with '%'".into()));
+        }
         if let Some(c) = word.chars().find(|c| {
             !(c.is_ascii_alphanumeric()
                 || matches!(c, '-' | '_' | '.' | '/' | ':' | '=' | '@' | ',' | '+' | '%'))
@@ -71,6 +90,18 @@ fn check_words(command: &str) -> Result<()> {
         }
     }
     Ok(())
+}
+
+/// `NAME=value`, as shells read an assignment in front of a command.
+fn is_assignment(word: &str) -> bool {
+    let Some((name, _)) = word.split_once('=') else {
+        return false;
+    };
+    let mut chars = name.chars();
+    chars
+        .next()
+        .is_some_and(|c| c.is_ascii_alphabetic() || c == '_')
+        && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
 struct WardenSshHandler {
@@ -126,7 +157,10 @@ pub async fn run(
     let known_hosts = crate::executor::known_hosts::known_hosts_path(preset.known_hosts.as_deref());
     let cmd_timeout = Duration::from_secs(preset.timeout_seconds.unwrap_or(120));
 
-    let response: Result<SshExecResponse> = async {
+    // The timeout covers the whole call — connecting, key exchange,
+    // authentication and the command — so a host that stalls at any step
+    // cannot hold the call open.
+    let call = async {
         let private_key = ssh_key::PrivateKey::from_openssh(key_secret.expose())
             .map_err(|e| WardenError::Executor(format!("parse private key: {e}")))?;
         drop(key_secret);
@@ -161,24 +195,34 @@ pub async fn run(
             .await
             .map_err(|e| WardenError::Executor(format!("exec: {e}")))?;
 
-        let drain = async {
-            let mut stdout = Vec::<u8>::new();
-            let mut stderr = Vec::<u8>::new();
-            let mut exit_code: Option<u32> = None;
-            while let Some(msg) = channel.wait().await {
-                match msg {
-                    ChannelMsg::Data { ref data } => stdout.extend_from_slice(data),
-                    ChannelMsg::ExtendedData { ref data, ext: 1 } => stderr.extend_from_slice(data),
-                    ChannelMsg::ExitStatus { exit_status } => exit_code = Some(exit_status),
-                    ChannelMsg::Eof | ChannelMsg::Close => break,
-                    _ => {}
+        // At most MAX_SSH_OUTPUT_BYTES of each stream: a host that keeps
+        // writing gets its output cut and the call ends there.
+        let max = super::limits::MAX_SSH_OUTPUT_BYTES;
+        let mut stdout = Vec::<u8>::new();
+        let mut stderr = Vec::<u8>::new();
+        let mut exit_code: Option<u32> = None;
+        let mut cut = false;
+        while let Some(msg) = channel.wait().await {
+            let (buf, data) = match msg {
+                ChannelMsg::Data { ref data } => (&mut stdout, data),
+                ChannelMsg::ExtendedData { ref data, ext: 1 } => (&mut stderr, data),
+                ChannelMsg::ExitStatus { exit_status } => {
+                    exit_code = Some(exit_status);
+                    continue;
                 }
+                ChannelMsg::Eof | ChannelMsg::Close => break,
+                _ => continue,
+            };
+            let room = max - buf.len();
+            buf.extend_from_slice(&data[..data.len().min(room)]);
+            if data.len() > room {
+                cut = true;
+                break;
             }
-            Ok::<(Vec<u8>, Vec<u8>, Option<u32>), WardenError>((stdout, stderr, exit_code))
-        };
-        let (stdout, stderr, exit_code) = tokio::time::timeout(cmd_timeout, drain)
-            .await
-            .map_err(|_| WardenError::Executor("ssh timeout".into()))??;
+        }
+        if cut {
+            channel.close().await.ok();
+        }
 
         session
             .disconnect(russh::Disconnect::ByApplication, "done", "en")
@@ -189,9 +233,17 @@ pub async fn run(
             stdout: String::from_utf8_lossy(&stdout).into_owned(),
             stderr: String::from_utf8_lossy(&stderr).into_owned(),
             exit_code,
+            notice: cut.then(|| {
+                format!(
+                    "output over the limit of {max} bytes per stream; the rest was not read \
+                     and the command may still be running"
+                )
+            }),
         })
-    }
-    .await;
+    };
+    let response: Result<SshExecResponse> = tokio::time::timeout(cmd_timeout, call)
+        .await
+        .unwrap_or_else(|_| Err(WardenError::Executor("ssh timeout".into())));
 
     match &response {
         Ok(r) => actx.audit.record_outcome(
@@ -243,7 +295,85 @@ mod tests {
             expires_at: None,
             max_response_bytes: None,
             response_fields: vec![],
+            allowed_local_paths: vec![],
         }
+    }
+
+    use crate::executor::test_ssh::{Behaviour, TestSshServer};
+    use crate::testutil::{CountingApproval, CountingKeychain};
+    use mcp_warden_core::approval::ApprovalDecision;
+
+    /// An executor whose keychain holds `server`'s client key as `k`, and a
+    /// preset for `server` that allows every command without a prompt.
+    fn against(
+        server: &TestSshServer,
+        timeout: u64,
+    ) -> (ActionExecutor, Preset, tempfile::TempDir) {
+        let dir = tempfile::tempdir().unwrap();
+        let exec = ActionExecutor::new(
+            CountingKeychain::with(&[("k", &server.client_key)]),
+            CountingApproval::new(ApprovalDecision::Approved),
+            None,
+            Arc::new(
+                mcp_warden_core::audit::sqlite_sink::LocalSqlite::open(
+                    &dir.path().join("audit.db"),
+                )
+                .unwrap(),
+            ),
+        );
+        let mut preset = p();
+        preset.host = Some("127.0.0.1".into());
+        preset.port = Some(server.port);
+        preset.allowed_commands = vec![".*".into()];
+        preset.known_hosts = Some(server.known_hosts.display().to_string());
+        preset.timeout_seconds = Some(timeout);
+        (exec, preset, dir)
+    }
+
+    #[tokio::test]
+    async fn runs_the_command_on_a_real_server() {
+        let server = TestSshServer::start(Behaviour::Echo).await;
+        let (exec, preset, _dir) = against(&server, 10);
+        let out = run(&exec, &preset, "git pull".into()).await.unwrap();
+        assert_eq!(out.stdout, "ran: git pull\n");
+        assert_eq!(out.exit_code, Some(0));
+        assert_eq!(*server.commands.lock().unwrap(), ["git pull"]);
+    }
+
+    /// A hostile or broken host that never stops writing must not fill
+    /// memory: output is cut at the limit and the call ends at once.
+    #[tokio::test]
+    async fn endless_output_is_cut_at_the_limit() {
+        let server = TestSshServer::start(Behaviour::Flood).await;
+        let (exec, preset, _dir) = against(&server, 2);
+        let started = std::time::Instant::now();
+        let out = run(&exec, &preset, "yes".into()).await.unwrap();
+        let max = crate::executor::limits::MAX_SSH_OUTPUT_BYTES;
+        assert_eq!(out.stdout.len(), max);
+        assert!(out.stderr.len() <= max);
+        assert!(
+            out.notice.as_deref().unwrap().contains("limit"),
+            "{:?}",
+            out.notice
+        );
+        assert!(
+            started.elapsed() < Duration::from_secs(2),
+            "{:?}",
+            started.elapsed()
+        );
+    }
+
+    /// The command timeout covers the whole call, not only reading the
+    /// output: a host that accepts the key and then stalls ends the call.
+    #[tokio::test]
+    async fn a_host_that_stalls_after_authentication_times_out() {
+        let server = TestSshServer::start(Behaviour::HangAfterAuth).await;
+        let (exec, preset, _dir) = against(&server, 1);
+        let res = tokio::time::timeout(Duration::from_secs(10), run(&exec, &preset, "id".into()))
+            .await
+            .expect("ssh_exec hung past its own timeout");
+        let err = res.expect_err("must fail").to_string();
+        assert!(err.contains("timeout"), "{err}");
     }
 
     #[test]
@@ -294,6 +424,89 @@ mod tests {
         ] {
             validate_command(&q, ok).unwrap();
         }
+    }
+
+    #[test]
+    fn permitted_characters_that_are_not_plain_words_are_refused() {
+        let mut q = p();
+        q.allowed_commands = vec![".*".into()];
+        for evil in [
+            "LD_PRELOAD=/tmp/x.so git pull",
+            "A=1 B=2 git pull",
+            "kill %self",
+            "%1",
+        ] {
+            let err = validate_command(&q, evil).unwrap_err().to_string();
+            assert!(err.contains("may only contain"), "{evil:?}: {err}");
+        }
+        // `=` and `%` inside a word, and assignments after the command
+        // name, are ordinary arguments.
+        for ok in [
+            "make TARGET=x",
+            "journalctl --since=1h",
+            "date +%F",
+            "git log --format=%H",
+            "env",
+        ] {
+            validate_command(&q, ok).unwrap();
+        }
+    }
+
+    /// What the remote login shell makes of permitted words, for every
+    /// shell installed here: each generated command must reach the program
+    /// as exactly the words the allow-list saw. Spawns processes, so it is
+    /// ignored by default: `cargo test -- --ignored shells_split`.
+    #[test]
+    #[ignore]
+    fn shells_split_permitted_words_as_written() {
+        use proptest::prelude::*;
+        let shells: Vec<&str> = [
+            "/bin/sh",
+            "/bin/bash",
+            "/bin/zsh",
+            "/bin/dash",
+            "/bin/ksh",
+            "/bin/tcsh",
+            "/bin/csh",
+            "/opt/homebrew/bin/fish",
+            "/usr/bin/fish",
+            "/bin/busybox",
+        ]
+        .into_iter()
+        .filter(|s| std::path::Path::new(s).exists())
+        .collect();
+        assert!(!shells.is_empty());
+        eprintln!("shells: {shells:?}");
+        let word = "[A-Za-z0-9._/:=@,+%-]{1,12}";
+        let mut runner = proptest::test_runner::TestRunner::new(ProptestConfig {
+            cases: 400,
+            ..ProptestConfig::default()
+        });
+        runner
+            .run(&proptest::collection::vec(word, 1..6), |words| {
+                if check_words(&words.join(" ")).is_err() {
+                    return Ok(());
+                }
+                for shell in &shells {
+                    // Single-quoting the format keeps it ours; the words are
+                    // exactly what an allow-listed command would carry.
+                    let script = format!("printf '%s\\n' {}", words.join(" "));
+                    let out = std::process::Command::new(shell)
+                        .arg("-c")
+                        .arg(&script)
+                        .env_clear()
+                        .env("PATH", "/usr/bin:/bin")
+                        .output()
+                        .unwrap();
+                    let got: Vec<String> = String::from_utf8_lossy(&out.stdout)
+                        .lines()
+                        .map(str::to_string)
+                        .collect();
+                    prop_assert_eq!(&got, &words, "{} -c {:?}", shell, script);
+                }
+                Ok(())
+            })
+            .unwrap();
     }
 
     #[test]

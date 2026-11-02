@@ -334,3 +334,39 @@ fn audit_events_name_the_client_and_session() {
         "one session per server process"
     );
 }
+
+/// A14: what reaches stdin that is not a well-formed message — broken JSON,
+/// a line far beyond any real request, wrong types — is answered or skipped,
+/// never the end of the server, and never anything but JSON on stdout.
+#[test]
+fn malformed_and_oversized_messages_do_not_stop_the_server() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut session = McpSession::start(tmp.path());
+
+    writeln!(session.stdin, "{{not json").unwrap();
+    writeln!(session.stdin, "[1, 2, 3]").unwrap();
+    // 32 MiB on one line, without a newline until the end.
+    let huge = format!(
+        "{{\"jsonrpc\":\"2.0\",\"id\":7,\"method\":\"tools/call\",\"params\":{{\"name\":\"list_presets\",\"arguments\":{{\"x\":\"{}\"}}}}}}",
+        "a".repeat(32 << 20)
+    );
+    session.stdin.write_all(huge.as_bytes()).unwrap();
+    session.stdin.write_all(b"\n").unwrap();
+    session.stdin.flush().unwrap();
+
+    // Wrong types and nulls get an error response, not a crash.
+    let wrong = session.call_tool(
+        8,
+        "proxy_http",
+        json!({ "preset_name": null, "path": 5, "method": ["GET"] }),
+    );
+    assert!(
+        wrong.get("error").is_some() || wrong["result"]["isError"] == json!(true),
+        "{wrong}"
+    );
+
+    // And the server still answers.
+    let listed = session.request(9, "tools/list", json!({}));
+    assert!(listed["result"]["tools"].is_array(), "{listed}");
+    assert!(session.child.try_wait().unwrap().is_none(), "server exited");
+}

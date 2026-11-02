@@ -101,6 +101,72 @@ pub fn validate_request(preset: &Preset, method: &str, path: &str) -> Result<()>
     )))
 }
 
+/// Parameter names that tell a framework to run the request as another
+/// method — Laravel and Symfony read `_method` from the query string and
+/// (Laravel) the JSON body, Express `method-override` can be set up the
+/// same way, and the override header names turn up as parameters too — in
+/// the form `override_key` normalises them to.
+const METHOD_OVERRIDE_KEYS: [&str; 4] = [
+    "_method",
+    "x_http_method_override",
+    "x_http_method",
+    "x_method_override",
+];
+
+/// Refuse query parameters and top-level JSON body keys that could make the
+/// upstream run another method than the one the allow-list checked — `POST
+/// /x?_method=DELETE` is a DELETE to Laravel — and query keys with control
+/// characters, which upstreams split, truncate or log differently.
+/// Runs before any credential is read (invariant 3, T6).
+pub(crate) fn check_query_and_body_keys(
+    query: Option<&std::collections::BTreeMap<String, String>>,
+    body: Option<&serde_json::Value>,
+) -> Result<()> {
+    let refuse = |key: &str| {
+        WardenError::Validation(format!(
+            "parameter '{}' could override the HTTP method; method-override parameters \
+             (_method, X-HTTP-Method-Override, ...) are refused",
+            key.escape_debug()
+        ))
+    };
+    for key in query.into_iter().flat_map(|q| q.keys()) {
+        if key.chars().any(char::is_control) {
+            return Err(WardenError::Validation(format!(
+                "query parameter name '{}' contains control characters",
+                key.escape_debug()
+            )));
+        }
+        if is_method_override(key) {
+            return Err(refuse(key));
+        }
+    }
+    if let Some(serde_json::Value::Object(map)) = body
+        && let Some(key) = map.keys().find(|k| is_method_override(k))
+    {
+        return Err(refuse(key));
+    }
+    Ok(())
+}
+
+/// `key`, or the name in front of its PHP array suffix (`_method[]`),
+/// normalised as PHP and header-style names would be: case folded, leading
+/// and trailing spaces dropped, and `.`, ` `, `[` and `-` read as `_`.
+fn is_method_override(key: &str) -> bool {
+    let normalise = |k: &str| -> String {
+        k.trim()
+            .chars()
+            .map(|c| match c {
+                '.' | ' ' | '[' | '-' => '_',
+                c => c.to_ascii_lowercase(),
+            })
+            .collect()
+    };
+    let base = key.split('[').next().unwrap_or(key);
+    [normalise(key), normalise(base)]
+        .iter()
+        .any(|k| METHOD_OVERRIDE_KEYS.contains(&k.as_str()))
+}
+
 /// Every `%` in `path` starts an escape of exactly two hex digits.
 fn well_formed_escapes(path: &str) -> bool {
     let bytes = path.as_bytes();
@@ -187,7 +253,8 @@ pub async fn execute(
     req: HttpRequest,
 ) -> Result<HttpResponse> {
     let method_upper = req.method.to_uppercase();
-    let summary = crate::executor::summary::http(&method_upper, &req.path);
+    let summary =
+        crate::executor::summary::http(&method_upper, preset.base_url.as_deref(), &req.path);
     let request = Request::Http {
         method: &method_upper,
         path: &req.path,
@@ -232,26 +299,30 @@ pub async fn execute(
         builder = builder.json(&body);
     }
 
-    // `secret` stays alive until the body has been scrubbed of it below.
+    // An upstream that reflects the request would otherwise hand the agent
+    // the credential (invariants 1–2): the body, and any error text, are
+    // scrubbed of every form it was sent in.
+    let forms = CredentialForms::http(&preset.auth, &secret);
+    drop(secret);
     let resp = match builder.send().await {
         Ok(r) => r,
         Err(e) => {
+            let mut message = e.to_string();
+            forms.scrub_text(&mut message);
             let _ = exec.audit.record_outcome(
                 event_id,
                 AuditOutcome::Err {
-                    message: e.to_string(),
+                    message: message.clone(),
                 },
             );
-            return Err(WardenError::Executor(e.to_string()));
+            return Err(WardenError::Executor(message));
         }
     };
     let status = resp.status().as_u16();
     // At most `max_response_bytes` of it; `null` if it isn't JSON.
     let (mut body, mut notice) = super::response::read_body(resp, preset).await;
-    // An upstream that reflects the request would otherwise hand the agent
-    // the credential (invariants 1–2).
-    let redacted = CredentialForms::http(&preset.auth, &secret).scrub(&mut body);
-    drop(secret);
+    let redacted = forms.scrub(&mut body);
+    drop(forms);
     if let Some(selected) = super::response::select_fields(&body, preset) {
         body = selected;
         notice = Some("only this preset's response_fields are returned".into());
@@ -334,6 +405,7 @@ mod tests {
             expires_at: None,
             max_response_bytes: None,
             response_fields: vec![],
+            allowed_local_paths: vec![],
         }
     }
 
@@ -613,6 +685,89 @@ mod tests {
                 check_accepted(&path)?;
             }
         }
+
+        /// End to end: whatever a preset allows reaches the upstream as it
+        /// was checked — the raw path inside `base_url`'s path, its decoded
+        /// form matching the allow-list, and exactly the query pairs given.
+        #[test]
+        fn an_allowed_request_reaches_the_upstream_as_checked() {
+            use crate::approval::always_deny::AlwaysDeny;
+            use mcp_warden_core::audit::sqlite_sink::LocalSqlite;
+            use mcp_warden_core::keychain::KeychainStore;
+            use mcp_warden_core::keychain::memory::InMemoryKeychain;
+            use std::collections::BTreeMap;
+            use std::sync::Arc;
+
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let server = rt.block_on(async {
+                let server = MockServer::start().await;
+                wiremock::Mock::given(wiremock::matchers::any())
+                    .respond_with(
+                        wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})),
+                    )
+                    .mount(&server)
+                    .await;
+                server
+            });
+            let keychain = InMemoryKeychain::new();
+            keychain.set("k", Secret::new("tok".into())).unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let exec = ActionExecutor::new(
+                Arc::new(keychain),
+                Arc::new(AlwaysDeny),
+                None,
+                Arc::new(LocalSqlite::open(&dir.path().join("audit.db")).unwrap()),
+            );
+            let pattern = "/[a-zA-Z0-9_~ +%/\\-]*|/[^/]+/[^/]+";
+            let mut preset = p();
+            preset.base_url = Some(format!("{}/v1", server.uri()));
+            preset.auth = Some(Auth::Bearer { secret: "k".into() });
+            preset.allowed_paths = vec![pattern.into()];
+            let allow = mcp_warden_core::config::anchored_regex(pattern).unwrap();
+            let query_part = prop::collection::btree_map("[a-z_.\\[ -]{1,6}", "[ -~é]{0,8}", 0..4);
+            let mut runner =
+                proptest::test_runner::TestRunner::new(ProptestConfig::with_cases(256));
+            let sent = std::sync::atomic::AtomicUsize::new(0);
+            runner
+                .run(
+                    &(prop_oneof![hostile_path(), plausible_path()], query_part),
+                    |(path, query): (String, BTreeMap<String, String>)| {
+                        let before = rt
+                            .block_on(server.received_requests())
+                            .unwrap_or_default()
+                            .len();
+                        let req = HttpRequest {
+                            preset_name: preset.name.clone(),
+                            path: path.clone(),
+                            method: "GET".into(),
+                            body: None,
+                            query: Some(query.clone()),
+                        };
+                        let allowed = rt.block_on(execute(&exec, &preset, req)).is_ok();
+                        let got = rt.block_on(server.received_requests()).unwrap_or_default();
+                        if !allowed {
+                            prop_assert_eq!(
+                                got.len(),
+                                before,
+                                "a refused request was sent: {:?}",
+                                path
+                            );
+                            return Ok(());
+                        }
+                        sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let url = &got.last().unwrap().url;
+                        prop_assert_eq!(url.path(), format!("/v1{path}"));
+                        prop_assert!(allow.is_match(&decode(&path)), "{:?}", path);
+                        let pairs: BTreeMap<String, String> =
+                            url.query_pairs().into_owned().collect();
+                        prop_assert_eq!(pairs, query);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            let sent = sent.into_inner();
+            assert!(sent > 20, "only {sent} generated requests were allowed");
+        }
     }
 
     #[test]
@@ -802,6 +957,67 @@ mod tests {
             query: None,
         };
         execute(&exec, &preset, req).await.unwrap()
+    }
+
+    /// Without `max_response_bytes` the body was read in full — and reqwest
+    /// decompresses gzip on the way, so 11 KiB on the wire became 11 MiB in
+    /// memory and in the agent's context. A fixed ceiling now applies.
+    #[tokio::test]
+    async fn a_gzip_bomb_is_withheld_without_max_response_bytes() {
+        use std::io::Write;
+        let huge = format!(
+            "\"{}\"",
+            "a".repeat(crate::executor::limits::MAX_RESPONSE_BYTES + 1)
+        );
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        gz.write_all(huge.as_bytes()).unwrap();
+        let compressed = gz.finish().unwrap();
+        assert!(compressed.len() < 64 * 1024, "{}", compressed.len());
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-encoding", "gzip")
+                    .insert_header("content-type", "application/json")
+                    .set_body_bytes(compressed),
+            )
+            .mount(&server)
+            .await;
+        let resp = call_preset(&server, "/bomb", |p| p.max_response_bytes = None).await;
+        assert_eq!(resp.status, 200);
+        assert!(
+            resp.body.is_null(),
+            "body returned: {} bytes",
+            resp.body.to_string().len()
+        );
+        let notice = resp.notice.expect("a notice says why the body is missing");
+        assert!(notice.contains("10485760"), "{notice}");
+
+        // A preset can lower the ceiling but not raise it.
+        let resp = call_preset(&server, "/bomb", |p| p.max_response_bytes = Some(u64::MAX)).await;
+        assert!(
+            resp.body.is_null(),
+            "body returned: {} bytes",
+            resp.body.to_string().len()
+        );
+    }
+
+    /// serde_json stops at 128 levels of nesting, so a deeply nested body
+    /// never reaches the recursive scrub and field selection.
+    #[tokio::test]
+    async fn deeply_nested_json_is_not_parsed() {
+        let server = MockServer::start().await;
+        let deep = format!("{}{}", "[".repeat(100_000), "]".repeat(100_000));
+        Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(deep))
+            .mount(&server)
+            .await;
+        let resp = call_preset(&server, "/deep", |p| {
+            p.response_fields = vec!["[].x".into()];
+        })
+        .await;
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, Value::Null);
     }
 
     #[tokio::test]

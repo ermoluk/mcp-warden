@@ -24,6 +24,11 @@ pub enum PresetCmd {
     /// End access to a preset now. Takes effect when the MCP server next
     /// starts; `mcp-warden lock` stops running servers immediately.
     Revoke { name: String },
+    /// Confirm `auto` presets through the approval prompt. An `auto` preset
+    /// runs without asking only in the exact form a human confirmed; any
+    /// edit to it voids the confirmation. Without names: every `auto`
+    /// preset not confirmed as it is now.
+    Confirm { names: Vec<String> },
     /// Generate a preset from a built-in template for common APIs
     /// (github-read, notion-read, openai-chat, …). Use `--list` to see
     /// available templates.
@@ -161,14 +166,36 @@ pub struct AddQueryArgs {
     pub readonly: bool,
 }
 
-pub async fn run(cmd: PresetCmd, config_path: &Path, kc: &dyn KeychainStore) -> Result<()> {
+pub async fn run(
+    cmd: PresetCmd,
+    config_path: &Path,
+    store: std::sync::Arc<dyn KeychainStore>,
+) -> Result<()> {
+    let kc = store.as_ref();
     match cmd {
-        PresetCmd::Add(args) => add(*args, config_path, kc),
-        PresetCmd::AddQuery(args) => add_query(args, config_path, kc),
+        PresetCmd::Add(args) => {
+            let name = args.name.clone();
+            add(*args, config_path, kc)?;
+            // An auto preset counts only once a human confirms it.
+            crate::cli::confirm::confirm_if_auto(&name, config_path, store).await
+        }
+        PresetCmd::AddQuery(args) => {
+            let name = args.preset.clone();
+            add_query(args, config_path, kc)?;
+            crate::cli::confirm::confirm_if_auto(&name, config_path, store).await
+        }
         PresetCmd::List => list(config_path),
         PresetCmd::Test(args) => test_preset(args, config_path, kc),
-        PresetCmd::Grant(args) => grant(args, config_path),
+        PresetCmd::Grant(args) => {
+            let name = args.name.clone();
+            grant(args, config_path)?;
+            // A longer window for an auto preset is a new confirmation.
+            crate::cli::confirm::confirm_if_auto(&name, config_path, store).await
+        }
         PresetCmd::Revoke { name } => revoke(&name, config_path),
+        PresetCmd::Confirm { names } => {
+            crate::cli::confirm::confirm_cmd(names, config_path, store).await
+        }
         PresetCmd::Scaffold(args) => scaffold(args, config_path),
         PresetCmd::FromOpenapi(args) => from_openapi(args, config_path).await,
     }
@@ -398,6 +425,7 @@ fn add(args: AddArgs, config_path: &Path, kc: &dyn KeychainStore) -> Result<()> 
         expires_at: None,
         max_response_bytes: args.max_response_bytes,
         response_fields: args.response_fields,
+        allowed_local_paths: vec![],
     };
     if let Some(w) = unrestricted_paths_warning(&preset) {
         eprintln!("warning: {w}");

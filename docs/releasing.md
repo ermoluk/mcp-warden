@@ -54,7 +54,10 @@ Before tagging:
    `.claude-plugin/marketplace.json` and `plugins/mcp-warden/.claude-plugin/plugin.json`.
 2. `CHANGELOG.md` has a `## [VERSION]` section.
 3. `cargo publish --workspace --dry-run` passes.
-4. A dry run of the release workflow passes:
+4. `cargo deny check` and `cargo audit` pass (CI runs both). Every accepted
+   advisory in `deny.toml` / `.cargo/audit.toml` still has a valid reason;
+   drop the ones a dependency update has fixed.
+5. A dry run of the release workflow passes:
    `gh workflow run release.yml --ref <branch>`.
 
 Then, in this order:

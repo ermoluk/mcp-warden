@@ -7,12 +7,16 @@
 //! of the JSON body is searched for each form the credential was sent in,
 //! raw or percent-encoded, and each occurrence becomes [`MARKER`].
 //!
-//! A credential that comes back truncated, split across fields, hashed or
-//! otherwise transformed cannot be detected.
+//! Besides the forms it was sent in, base64, base64url and hex of the bare
+//! credential are found, and matching ignores ASCII case. A credential that
+//! comes back truncated, split across fields, hashed, inside a larger
+//! base64 blob at another alignment or otherwise transformed cannot be
+//! detected.
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD;
 use mcp_warden_core::config::Auth;
+use mcp_warden_core::error::WardenError;
 use mcp_warden_core::secret::Secret;
 use serde_json::Value;
 use zeroize::Zeroizing;
@@ -28,8 +32,12 @@ impl CredentialForms {
     /// The bare secret plus every form `http::inject_auth` sends it in:
     /// `<prefix><secret>` for `Auth::Header`, `base64(username:secret)`
     /// (padded or not) for `Auth::Basic`. Bearer's `Bearer ` scheme word is
-    /// left visible, as is Basic's.
+    /// left visible, as is Basic's. On top of those, forms an upstream may
+    /// reflect it in: base64 and base64url of the bare secret (padded or
+    /// not) and its hex. Matching ignores ASCII case, so `GHP_…`, upper-case
+    /// hex and a re-cased base64 are found too.
     pub fn http(auth: &Option<Auth>, secret: &Secret) -> Self {
+        use base64::engine::general_purpose::URL_SAFE;
         let raw = secret.expose();
         if raw.is_empty() {
             return Self(Vec::new());
@@ -41,13 +49,61 @@ impl CredentialForms {
             }) => forms.push(Zeroizing::new(format!("{p}{raw}"))),
             Some(Auth::Basic { username, .. }) => {
                 let pair = Zeroizing::new(format!("{username}:{raw}"));
-                let encoded = Zeroizing::new(STANDARD.encode(pair.as_bytes()));
-                forms.push(Zeroizing::new(encoded.trim_end_matches('=').to_string()));
-                forms.push(encoded);
+                for engine in [&STANDARD, &URL_SAFE] {
+                    let encoded = Zeroizing::new(engine.encode(pair.as_bytes()));
+                    forms.push(Zeroizing::new(encoded.trim_end_matches('=').to_string()));
+                    forms.push(encoded);
+                }
             }
             _ => {}
         }
+        for engine in [&STANDARD, &URL_SAFE] {
+            let encoded = Zeroizing::new(engine.encode(raw.as_bytes()));
+            forms.push(Zeroizing::new(encoded.trim_end_matches('=').to_string()));
+            forms.push(encoded);
+        }
+        let mut hex = Zeroizing::new(String::with_capacity(raw.len() * 2));
+        for b in raw.bytes() {
+            hex.push(char::from(b"0123456789abcdef"[usize::from(b >> 4)]));
+            hex.push(char::from(b"0123456789abcdef"[usize::from(b & 0xf)]));
+        }
+        forms.push(hex);
+        // Matched ignoring ASCII case (see `spans`), so keep them lower-case.
+        let mut forms: Vec<Zeroizing<String>> = forms
+            .iter()
+            .map(|f| Zeroizing::new(f.to_ascii_lowercase()))
+            .collect();
+        forms.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+        forms.dedup_by(|a, b| a.as_str() == b.as_str());
         Self(forms)
+    }
+
+    /// The forms of a secret that was not sent as an HTTP header — a database
+    /// password, an SSH key — for scrubbing rows, output and error text.
+    pub fn raw(secret: &Secret) -> Self {
+        Self::http(&None, secret)
+    }
+
+    /// Replace every occurrence of a form in `text`; return how many.
+    pub fn scrub_text(&self, text: &mut String) -> usize {
+        if self.0.is_empty() {
+            return 0;
+        }
+        self.scrub_string(text)
+    }
+
+    /// `err` with every form of the secret in its message replaced. Error
+    /// text can come from the upstream (a driver quoting the server).
+    pub fn scrub_error(&self, err: WardenError) -> WardenError {
+        let scrub = |mut msg: String| {
+            self.scrub_text(&mut msg);
+            msg
+        };
+        match err {
+            WardenError::Executor(msg) => WardenError::Executor(scrub(msg)),
+            WardenError::Validation(msg) => WardenError::Validation(scrub(msg)),
+            other => other,
+        }
     }
 
     /// Replace every occurrence of a form in `body`'s keys, strings and
@@ -114,9 +170,13 @@ impl CredentialForms {
     /// prefixed and the bare form of one occurrence make a single marker.
     fn spans(&self, text: &str) -> Vec<(usize, usize)> {
         let mut spans = Vec::new();
+        // ASCII lower-casing keeps every byte offset, so spans found in
+        // `lower` are spans of `text`. It can hold the secret: zeroized.
+        let lower = Zeroizing::new(text.to_ascii_lowercase());
         for form in &self.0 {
             spans.extend(
-                text.match_indices(form.as_str())
+                lower
+                    .match_indices(form.as_str())
                     .map(|(i, m)| (i, i + m.len())),
             );
         }
@@ -138,8 +198,9 @@ impl CredentialForms {
     }
 }
 
-/// Push the byte ranges of `text` that decode to one of `forms` when `%XX`
-/// (either hex case) — and `+` when `plus_is_space` — are decoded. Any mix
+/// Push the byte ranges of `text` that decode to one of `forms` (which are
+/// lower-case) when `%XX` (either hex case) — and `+` when `plus_is_space` —
+/// are decoded, ignoring ASCII case. Any mix
 /// of encoded and literal bytes matches, so a form reflected through any URL
 /// or form encoder is found whichever characters that encoder escapes.
 fn find_encoded(
@@ -163,7 +224,7 @@ fn find_encoded(
             (b'+', _) if plus_is_space => (b' ', 1),
             (b, _) => (b, 1),
         };
-        decoded.push(byte);
+        decoded.push(byte.to_ascii_lowercase());
         i += width;
     }
     starts.push(src.len());
@@ -267,6 +328,49 @@ mod tests {
         let mut values: Vec<_> = map.values().map(|v| v.as_i64().unwrap()).collect();
         values.sort_unstable();
         assert_eq!(values, [1, 2]);
+    }
+
+    /// Forms an upstream may reflect a token in besides the ones it was sent
+    /// in: base64 and base64url of the bare token (padded or not), hex, and
+    /// another letter case.
+    #[test]
+    fn encoded_and_recased_echoes_are_redacted() {
+        use base64::engine::general_purpose::{STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+        // `~~~?` encodes to `+`/`/` in standard base64 and `-`/`_` in url-safe.
+        let token = "ghp_Tok3n~~~?xyz";
+        let hex: String = token.bytes().map(|b| format!("{b:02x}")).collect();
+        let reflected = [
+            STANDARD.encode(token),
+            STANDARD_NO_PAD.encode(token),
+            URL_SAFE.encode(token),
+            URL_SAFE_NO_PAD.encode(token),
+            hex.clone(),
+            hex.to_ascii_uppercase(),
+            token.to_ascii_uppercase(),
+            token.to_ascii_lowercase(),
+            format!("{{\"inner\":\"{token}\"}}"),
+        ];
+        for form in reflected {
+            let mut body = json!({ "echo": format!("seen: {form}!") });
+            assert_eq!(bearer(token).scrub(&mut body), 1, "{form}");
+            let shown = body["echo"].as_str().unwrap().to_string();
+            assert!(
+                shown.starts_with("seen: ") && shown.contains(MARKER),
+                "{shown}"
+            );
+            assert!(!shown.contains(&form), "{form}: {shown}");
+        }
+    }
+
+    #[test]
+    fn plain_text_is_scrubbed_like_a_json_string() {
+        let forms = CredentialForms::raw(&Secret::new("pw-PG-0123".into()));
+        let mut text = "FATAL: password \"pw-PG-0123\" (cHctUEctMDEyMw==) rejected".to_string();
+        assert_eq!(forms.scrub_text(&mut text), 2);
+        assert_eq!(
+            text,
+            format!("FATAL: password \"{MARKER}\" ({MARKER}) rejected")
+        );
     }
 
     #[test]

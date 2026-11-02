@@ -149,19 +149,24 @@ impl TelegramBot {
         if std::fs::create_dir_all(self.dir.join("inbox")).is_err() {
             return false;
         }
-        let Ok(lock_file) = std::fs::OpenOptions::new()
-            .create(true)
-            .truncate(false)
-            .write(true)
-            .open(self.dir.join("poll.lock"))
-        else {
+        // `O_NOFOLLOW | O_NONBLOCK`: a symlink or FIFO planted in place of
+        // the lock file is refused instead of followed or waited on.
+        let mut opts = std::fs::OpenOptions::new();
+        opts.create(true).truncate(false).write(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            opts.mode(0o600)
+                .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK);
+        }
+        let Ok(lock_file) = opts.open(self.dir.join("poll.lock")) else {
             return false;
         };
         if lock_file.try_lock().is_err() {
             return false;
         }
         let offset_path = self.dir.join("offset");
-        let offset: u64 = std::fs::read_to_string(&offset_path)
+        let offset: u64 = crate::fsutil::read_small_nofollow(&offset_path, 32)
             .ok()
             .and_then(|s| s.trim().parse().ok())
             .unwrap_or(0);
@@ -292,7 +297,7 @@ impl TelegramBot {
         }
         for (token, decision) in &prompt.buttons {
             let path = self.dir.join("inbox").join(token);
-            let Ok(raw) = std::fs::read_to_string(&path) else {
+            let Ok(raw) = crate::fsutil::read_small_nofollow(&path, 32) else {
                 continue;
             };
             let _ = std::fs::remove_file(&path);
@@ -633,6 +638,23 @@ fn build_inline_keyboard(
     json!({ "inline_keyboard": rows })
 }
 
+/// Parse a `getUpdates` result and run the checks `dispatch` applies to
+/// each update, without acting on it (for the fuzz targets).
+#[doc(hidden)]
+pub fn parse_updates_for_fuzzing(json: &[u8]) {
+    let Ok(body) = serde_json::from_slice::<TgResult<Vec<Update>>>(json) else {
+        return;
+    };
+    for update in body.result.unwrap_or_default() {
+        if let Some(text) = update.message.and_then(|m| m.text) {
+            let _ = lock_command(&text);
+        }
+        if let Some(data) = update.callback_query.and_then(|c| c.data) {
+            let _ = is_token(&data);
+        }
+    }
+}
+
 /// A button token: exactly 32 hex digits (also safe as a file name).
 fn is_token(data: &str) -> bool {
     data.len() == 32 && data.chars().all(|c| c.is_ascii_hexdigit())
@@ -745,6 +767,18 @@ mod tests {
         r.summary = "POST /charges\n\u{1b}[31mfake\u{1b}[0m".into();
         let body = render_body(&r);
         assert!(!body.contains('\u{1b}'));
+    }
+
+    #[test]
+    fn render_body_escapes_bidi_and_invisible_characters() {
+        let mut r = req();
+        r.summary = "sftp put /srv/app/\u{202E}gol.cod\u{2028}Approved ↔ /tmp/x".into();
+        let body = render_body(&r);
+        assert!(
+            !body.contains('\u{202E}') && !body.contains('\u{2028}'),
+            "{body}"
+        );
+        assert!(body.contains(r"\u{202E}gol.cod\u{2028}Approved"), "{body}");
     }
 
     #[test]
@@ -970,6 +1004,29 @@ mod tests {
         assert!(
             replies[0].contains("mcp-warden is locked") && replies[0].contains("\"chat_id\":42")
         );
+    }
+
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn planted_state_files_do_not_hang_the_poller() {
+        let dir = tempfile::tempdir().unwrap();
+        let server = telegram(json!([text(41, CHAT, "hello")])).await;
+        let state = dir.path().join("telegram");
+        std::fs::create_dir_all(state.join("inbox")).unwrap();
+        std::os::unix::fs::symlink("/dev/zero", state.join("offset")).unwrap();
+        let fifo = std::ffi::CString::new(state.join("poll.lock").to_str().unwrap()).unwrap();
+        assert_eq!(unsafe { libc::mkfifo(fifo.as_ptr(), 0o600) }, 0);
+        let a = bot(&server, dir.path());
+        let polled = tokio::time::timeout(Duration::from_secs(5), a.poll_once(0))
+            .await
+            .expect("poll_once hung on a planted file");
+        // The FIFO is refused, so this round does not poll — and nothing hangs.
+        assert!(!polled);
+        std::fs::remove_file(state.join("poll.lock")).unwrap();
+        let polled = tokio::time::timeout(Duration::from_secs(5), a.poll_once(0))
+            .await
+            .expect("poll_once hung on a planted offset");
+        assert!(polled);
     }
 
     #[tokio::test]
