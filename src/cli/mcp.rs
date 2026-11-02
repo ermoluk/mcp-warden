@@ -14,7 +14,7 @@ use mcp_warden_core::config::{Config, TelegramConfig};
 use mcp_warden_core::error::{Result, WardenError};
 use mcp_warden_core::keychain::KeychainStore;
 use mcp_warden_core::presets::frozen::FrozenSource;
-use rmcp::{ServiceExt, transport::stdio};
+use rmcp::ServiceExt;
 use std::path::Path;
 use std::sync::Arc;
 
@@ -87,7 +87,7 @@ pub async fn cmd(config_dir: &Path) -> Result<()> {
     let server = WardenServer::new(presets, executor).with_revealable(revealable);
 
     let running = server
-        .serve(stdio())
+        .serve(stdio_transport())
         .await
         .map_err(|e| WardenError::Executor(format!("serve: {e}")))?;
     running
@@ -108,6 +108,84 @@ fn presets_to_serve(
     let mut presets = cfg.preset.clone();
     let warnings = mcp_warden_core::stamp::demote_unconfirmed_auto(&mut presets, kc);
     (presets, warnings)
+}
+
+/// Longest JSON-RPC message accepted on stdin. Real calls are far smaller —
+/// a `proxy_http` body is capped at 1 MiB (T8), which JSON escaping can at
+/// most multiply by six — and a longer line is skipped rather than buffered.
+const MAX_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+
+/// The stdio transport, with two differences from rmcp's `stdio()`: a line
+/// over `MAX_MESSAGE_BYTES` is skipped instead of buffered without limit,
+/// and an unreadable line (broken JSON, not a JSON-RPC message, too long)
+/// is logged and skipped instead of ending the session — rmcp treats any
+/// decode error as the end of input, so one bad line stopped the server.
+fn stdio_transport() -> (
+    impl futures::Sink<
+        rmcp::service::TxJsonRpcMessage<rmcp::RoleServer>,
+        Error = rmcp::transport::async_rw::JsonRpcMessageCodecError,
+    > + Send
+    + Unpin
+    + 'static,
+    impl futures::Stream<Item = rmcp::service::RxJsonRpcMessage<rmcp::RoleServer>>
+    + Send
+    + Unpin
+    + 'static,
+) {
+    use rmcp::transport::async_rw::JsonRpcMessageCodec;
+    let read = tokio_util::codec::FramedRead::new(
+        tokio::io::stdin(),
+        Lenient(JsonRpcMessageCodec::new_with_max_length(MAX_MESSAGE_BYTES)),
+    );
+    // `Lenient` turns every decode error into a skipped line; what is left
+    // is an I/O error on stdin, which does end the session.
+    let read = futures::StreamExt::filter_map(read, |msg| async move { msg.ok() });
+    let write =
+        tokio_util::codec::FramedWrite::new(tokio::io::stdout(), JsonRpcMessageCodec::default());
+    (write, Box::pin(read))
+}
+
+/// rmcp's line codec, except that a line it cannot decode — too long, not
+/// JSON, not a JSON-RPC message — is logged and skipped. (A framed stream
+/// ends at the first decoder error, so the skipping has to happen here.)
+struct Lenient<C>(C);
+
+impl<T: serde::de::DeserializeOwned> tokio_util::codec::Decoder
+    for Lenient<rmcp::transport::async_rw::JsonRpcMessageCodec<T>>
+{
+    type Item = T;
+    type Error = std::io::Error;
+
+    fn decode(&mut self, buf: &mut bytes::BytesMut) -> std::io::Result<Option<T>> {
+        self.skip_bad_lines(buf, |c, b| c.decode(b))
+    }
+
+    fn decode_eof(&mut self, buf: &mut bytes::BytesMut) -> std::io::Result<Option<T>> {
+        self.skip_bad_lines(buf, |c, b| c.decode_eof(b))
+    }
+}
+
+impl<T: serde::de::DeserializeOwned> Lenient<rmcp::transport::async_rw::JsonRpcMessageCodec<T>> {
+    fn skip_bad_lines(
+        &mut self,
+        buf: &mut bytes::BytesMut,
+        mut decode: impl FnMut(
+            &mut rmcp::transport::async_rw::JsonRpcMessageCodec<T>,
+            &mut bytes::BytesMut,
+        ) -> std::result::Result<
+            Option<T>,
+            rmcp::transport::async_rw::JsonRpcMessageCodecError,
+        >,
+    ) -> std::io::Result<Option<T>> {
+        use rmcp::transport::async_rw::JsonRpcMessageCodecError as E;
+        loop {
+            match decode(&mut self.0, buf) {
+                Ok(item) => return Ok(item),
+                Err(E::Io(e)) => return Err(e),
+                Err(e) => tracing::warn!("skipped an unreadable MCP message: {e}"),
+            }
+        }
+    }
 }
 
 /// A short random id for this server process (not a secret).

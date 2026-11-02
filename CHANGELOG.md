@@ -29,6 +29,8 @@ All notable changes to this project will be documented in this file. The format 
 - **A lock or an ended `preset grant` window did not stop a call whose prompt was already open, and parallel calls stacked dialogs.** The lock and the preset's expiry were checked before the prompt only, so an Approve clicked minutes later on the dialog still on screen ran the call anyway. Both are now checked again after the answer (`not run: …` in the audit log). A server also shows one prompt at a time now, so a second dialog cannot appear under the cursor of a human about to click the first, and calls queued behind an approve-for-window answer go through as `windowed` (R9). **Behaviour change:** prompts from one server are shown one after another.
 - **The kill switch latched only on the next call.** An agent that deleted `<config dir>/lock` right after `mcp-warden lock`, before its next call, escaped it. Servers now also check the file once a second and latch on their own (R13).
 
+- **One malformed line on stdin stopped the MCP server, and lines had no length limit.** rmcp's stdio codec ends the session at the first line it cannot decode and buffers a line of any length. The server now uses its own framing: a line over 16 MiB or one that is not a JSON-RPC message is skipped with a warning on stderr, and the session continues (T8).
+
 ### Added
 
 - **`mcp-warden preset confirm [NAME]…`** confirms `auto` presets through the approval prompt (all unconfirmed ones without names). `mcp-warden-core` gains the `stamp` module.

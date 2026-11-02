@@ -84,6 +84,8 @@ Up to v0.5.2 nothing capped what an agent could send: a megabyte-long path or co
 
 A refused call returns an error naming the field and the limit, never the input, and is audited as `refused` like any other validation failure. Its agent-supplied text is still capped at 1024 characters in the audit log (T4).
 
+**The MCP channel itself.** Up to v0.5.3 the server read stdin with rmcp's line codec, which has no length limit and treats any undecodable line as the end of input: one line of broken JSON made the server exit (and the client restart it — with whatever config it then finds, T7), and a single huge line was buffered whole. Since v0.5.4 a line longer than 16 MiB, or one that is not a JSON-RPC message, is logged to stderr and skipped; the session goes on. Tested in `tests/mcp_integration.rs` with broken JSON, a JSON array, a 32 MiB line and wrongly typed arguments.
+
 ### T10. Oversized or stalling upstream responses
 
 The upstream can be hostile too — or simply broken — and up to v0.5.3 several of its answers had no bound:
