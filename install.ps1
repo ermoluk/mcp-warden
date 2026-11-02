@@ -13,6 +13,10 @@
 #                            (default: %LOCALAPPDATA%\Programs\mcp-warden\bin)
 #   MCP_WARDEN_DOWNLOAD_URL  base URL of the release assets, for mirrors and
 #                            tests (default: GitHub releases)
+#   MCP_WARDEN_VERIFY_ATTESTATION=1
+#                            also check the zip's GitHub build provenance with
+#                            `gh attestation verify` (needs the GitHub CLI,
+#                            logged in); refuse to install if it fails
 
 & {
     $ErrorActionPreference = 'Stop'
@@ -58,6 +62,19 @@
             throw "mcp-warden install: checksum mismatch for ${archive}: expected $want, got $got"
         }
         Write-Host 'mcp-warden install: checksum ok'
+        # SHA256SUMS comes from the same release as the zip: it shows the
+        # download is intact, not who built it. The attestation shows the zip
+        # was built by this repository's release workflow.
+        if ($env:MCP_WARDEN_VERIFY_ATTESTATION -eq '1') {
+            if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
+                throw 'mcp-warden install: MCP_WARDEN_VERIFY_ATTESTATION=1 needs the GitHub CLI (gh)'
+            }
+            & gh attestation verify $zip --repo ermoluk/mcp-warden
+            if ($LASTEXITCODE -ne 0) {
+                throw "mcp-warden install: build provenance of $archive could not be verified"
+            }
+            Write-Host 'mcp-warden install: build provenance verified'
+        }
 
         $unpacked = Join-Path $tmp 'unpacked'
         Expand-Archive -Path $zip -DestinationPath $unpacked

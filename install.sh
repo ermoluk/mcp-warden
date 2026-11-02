@@ -13,6 +13,10 @@
 #   MCP_WARDEN_INSTALL_DIR   where the binary goes (default: ~/.local/bin)
 #   MCP_WARDEN_DOWNLOAD_URL  base URL of the release assets, for mirrors and
 #                            tests (default: GitHub releases)
+#   MCP_WARDEN_VERIFY_ATTESTATION=1
+#                            also check the archive's GitHub build provenance
+#                            with `gh attestation verify` (needs the GitHub
+#                            CLI, logged in); refuse to install if it fails
 set -eu
 
 repo=https://github.com/ermoluk/mcp-warden
@@ -92,6 +96,17 @@ main() {
 	got=$(sha256 "$tmp/$archive")
 	[ "$want" = "$got" ] || die "checksum mismatch for $archive: expected $want, got $got"
 	say "checksum ok"
+	# SHA256SUMS comes from the same release as the archive: it shows the
+	# download is intact, not who built it. The attestation shows the
+	# archive was built by this repository's release workflow.
+	if [ "${MCP_WARDEN_VERIFY_ATTESTATION:-}" = 1 ]; then
+		command -v gh >/dev/null 2>&1 || die "MCP_WARDEN_VERIFY_ATTESTATION=1 needs the GitHub CLI (gh)"
+		gh attestation verify "$tmp/$archive" --repo ermoluk/mcp-warden >&2 ||
+			die "build provenance of $archive could not be verified"
+		say "build provenance verified"
+	elif command -v gh >/dev/null 2>&1; then
+		say "tip: MCP_WARDEN_VERIFY_ATTESTATION=1 also verifies the build provenance with gh"
+	fi
 
 	mkdir "$tmp/unpacked"
 	tar -xzf "$tmp/$archive" -C "$tmp/unpacked"
