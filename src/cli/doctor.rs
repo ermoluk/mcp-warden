@@ -1,10 +1,15 @@
 use crate::cli::preset::unrestricted_paths_warning;
+use crate::executor::ActionExecutor;
+use crate::executor::credential_echo::CredentialForms;
 use clap::Args;
+use mcp_warden_core::audit::AuditOutcome;
+use mcp_warden_core::audit::sqlite_sink::LocalSqlite;
 use mcp_warden_core::config::{ApprovalPolicy, Auth, Config, Preset, PresetType};
 use mcp_warden_core::error::Result;
 use mcp_warden_core::keychain::KeychainStore;
 use serde::Serialize;
 use std::path::Path;
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 #[derive(Debug, Args)]
@@ -24,7 +29,8 @@ pub struct DoctorArgs {
     pub format: String,
 }
 
-pub async fn run(args: DoctorArgs, config_dir: &Path, kc: &dyn KeychainStore) -> Result<()> {
+pub async fn run(args: DoctorArgs, config_dir: &Path, store: Arc<dyn KeychainStore>) -> Result<()> {
+    let kc = store.as_ref();
     let cfg_path = config_dir.join("config.toml");
     let db_path = config_dir.join("audit.db");
 
@@ -102,7 +108,20 @@ pub async fn run(args: DoctorArgs, config_dir: &Path, kc: &dyn KeychainStore) ->
         if let Some(cfg) = cfg {
             println!();
             println!("--- deep probes ---");
-            let results = run_probes(&cfg, kc, &args).await;
+            // Probes use real credentials: each goes through the approval
+            // policy and the audit log like a `proxy_http` call, so a
+            // `prompt` preset asks a human first (with --include-prompt).
+            let transports = crate::cli::mcp::build_approval(&cfg, kc, config_dir)?;
+            std::fs::create_dir_all(config_dir).map_err(mcp_warden_core::error::WardenError::Io)?;
+            let audit = Arc::new(LocalSqlite::open(&db_path)?);
+            let exec = ActionExecutor::new(
+                store.clone(),
+                transports.primary,
+                transports.fallback,
+                audit,
+            )
+            .with_lock(config_dir.join(crate::executor::lock::LOCK_FILE));
+            let results = run_probes(&cfg, kc, &args, &exec).await;
             match args.format.as_str() {
                 "json" => {
                     println!("{}", serde_json::to_string_pretty(&results).unwrap());
@@ -150,7 +169,12 @@ impl ProbeStatus {
     }
 }
 
-async fn run_probes(cfg: &Config, kc: &dyn KeychainStore, args: &DoctorArgs) -> Vec<ProbeResult> {
+async fn run_probes(
+    cfg: &Config,
+    kc: &dyn KeychainStore,
+    args: &DoctorArgs,
+    exec: &ActionExecutor,
+) -> Vec<ProbeResult> {
     let mut out = Vec::with_capacity(cfg.preset.len());
     // Never follow redirects with credentials attached — see executor/http.rs.
     let client = reqwest::Client::builder()
@@ -194,7 +218,37 @@ async fn run_probes(cfg: &Config, kc: &dyn KeychainStore, args: &DoctorArgs) -> 
 
         match p.preset_type {
             PresetType::Http => {
+                let summary = format!(
+                    "doctor --deep probe: GET {}",
+                    pick_probe_path(&p.allowed_paths)
+                );
+                let event = exec
+                    .check_lock(&p.name, "doctor_probe", &summary)
+                    .await
+                    .and(exec.authorise(p, "doctor_probe", &summary, false).await);
+                let event = match event {
+                    Ok(id) => id,
+                    Err(e) => {
+                        out.push(ProbeResult {
+                            preset: p.name.clone(),
+                            kind,
+                            status: ProbeStatus::Skipped,
+                            detail: format!("not probed: {e}"),
+                            warnings,
+                        });
+                        continue;
+                    }
+                };
                 let (status, detail) = probe_http(p, kc, client.as_ref()).await;
+                let _ = exec.audit.record_outcome(
+                    event,
+                    match status {
+                        ProbeStatus::Ok => AuditOutcome::Ok { status: 200 },
+                        _ => AuditOutcome::Err {
+                            message: detail.clone(),
+                        },
+                    },
+                );
                 out.push(ProbeResult {
                     preset: p.name.clone(),
                     kind,
@@ -276,11 +330,25 @@ async fn probe_http(
         req = inject_auth(req, auth, secret);
     }
 
+    // An upstream that reflects the credential must not get it printed:
+    // scrub every form it was sent in before anything is cut or shown.
+    let forms = secret
+        .as_ref()
+        .map(|s| CredentialForms::http(&p.auth, s))
+        .unwrap_or_else(|| {
+            CredentialForms::raw(&mcp_warden_core::secret::Secret::new(String::new()))
+        });
+    drop(secret);
+    let scrubbed = |mut text: String| {
+        forms.scrub_text(&mut text);
+        text
+    };
+
     let started = Instant::now();
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            let msg = e.to_string();
+            let msg = scrubbed(e.to_string());
             let lower = msg.to_lowercase();
             let status = if lower.contains("tls") || lower.contains("certificate") {
                 ProbeStatus::TlsError
@@ -292,9 +360,10 @@ async fn probe_http(
     };
     let elapsed = started.elapsed().as_millis();
     let code = resp.status();
-    let body_snippet = match resp.text().await {
-        Ok(t) => redact(&truncate(&t, 80)),
-        Err(_) => String::new(),
+    // At most 64 KiB of it: the snippet is 80 characters.
+    let body_snippet = match read_prefix(resp, 64 * 1024).await {
+        Some(t) => redact(&truncate(&scrubbed(t), 80)),
+        None => String::new(),
     };
 
     let status = if code.is_success() {
@@ -317,6 +386,20 @@ async fn probe_http(
             code.as_u16()
         ),
     )
+}
+
+/// The first `max` bytes of the body, as text.
+async fn read_prefix(mut resp: reqwest::Response, max: usize) -> Option<String> {
+    let mut buf = Vec::new();
+    while buf.len() < max {
+        match resp.chunk().await {
+            Ok(Some(chunk)) => buf.extend_from_slice(&chunk),
+            Ok(None) => break,
+            Err(_) => return None,
+        }
+    }
+    buf.truncate(max);
+    Some(String::from_utf8_lossy(&buf).into_owned())
 }
 
 fn pick_probe_path(allowed_paths: &[String]) -> String {
@@ -518,6 +601,9 @@ fn access_warnings(
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+    use mcp_warden_core::approval::ApprovalDecision;
+
     #[test]
     fn access_warnings_flag_expired_presets_and_missing_server_keys() {
         use mcp_warden_core::keychain::memory::InMemoryKeychain;
@@ -551,8 +637,6 @@ mod tests {
         kc.set("server/github/B", Secret::new("v".into())).unwrap();
         assert!(access_warnings(&cfg, &kc, now).is_empty());
     }
-
-    use super::*;
 
     fn ssh_with(patterns: &[&str]) -> Preset {
         let mut p: Preset = toml::from_str(
@@ -660,6 +744,127 @@ mod tests {
         assert_eq!(redact("Invalid token"), "<redacted>");
     }
 
+    /// `doctor --deep --format json` can be run by an agent with a shell, so
+    /// a probe of an upstream that reflects the credential must not print
+    /// it — whether or not the snippet happens to contain a keyword.
+    #[tokio::test]
+    async fn a_reflected_credential_is_not_printed() {
+        use mcp_warden_core::keychain::KeychainStore;
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(|req: &wiremock::Request| {
+                let key = req
+                    .headers
+                    .get("x-key")
+                    .unwrap()
+                    .to_str()
+                    .unwrap()
+                    .to_string();
+                wiremock::ResponseTemplate::new(200)
+                    .set_body_json(serde_json::json!({ "seen": key }))
+            })
+            .mount(&server)
+            .await;
+        let cfg: Config = toml::from_str(&format!(
+            r#"
+[[preset]]
+name = "echo"
+type = "http"
+description = ""
+base_url = "{}"
+auth = {{ type = "header", name = "X-Key", secret = "k" }}
+allowed_methods = ["GET"]
+allowed_paths = ["/me"]
+approval = "auto"
+"#,
+            server.uri()
+        ))
+        .unwrap();
+        let kc = mcp_warden_core::keychain::memory::InMemoryKeychain::new();
+        kc.set(
+            "k",
+            mcp_warden_core::secret::Secret::new("s3cr3t-VALUE-xyz".into()),
+        )
+        .unwrap();
+        let args = DoctorArgs {
+            deep: true,
+            include_prompt: false,
+            timeout_seconds: 5,
+            format: "json".into(),
+        };
+        let (exec, _dir, _) = probe_executor(ApprovalDecision::Denied);
+        let json = serde_json::to_string(&run_probes(&cfg, &kc, &args, &exec).await).unwrap();
+        assert!(json.contains("200"), "{json}");
+        crate::testutil::assert_no_secret("doctor --deep", &json, "s3cr3t-VALUE-xyz");
+    }
+
+    fn probe_executor(
+        decision: ApprovalDecision,
+    ) -> (
+        ActionExecutor,
+        tempfile::TempDir,
+        Arc<crate::testutil::CountingApproval>,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let approval = crate::testutil::CountingApproval::new(decision);
+        let exec = ActionExecutor::new(
+            Arc::new(mcp_warden_core::keychain::memory::InMemoryKeychain::new()),
+            approval.clone(),
+            None,
+            Arc::new(LocalSqlite::open(&dir.path().join("audit.db")).unwrap()),
+        );
+        (exec, dir, approval)
+    }
+
+    /// `--include-prompt` used to probe `prompt` presets — with the real
+    /// credential — without asking anyone, and printed the start of the
+    /// response. An agent with a shell could run it. Now each such probe
+    /// asks first, and nothing is sent when the answer is no.
+    #[tokio::test]
+    async fn probing_a_prompt_preset_asks_first() {
+        use mcp_warden_core::keychain::KeychainStore;
+        let server = wiremock::MockServer::start().await;
+        wiremock::Mock::given(wiremock::matchers::any())
+            .respond_with(wiremock::ResponseTemplate::new(200).set_body_string("private"))
+            .expect(0)
+            .mount(&server)
+            .await;
+        let cfg: Config = toml::from_str(&format!(
+            r#"
+[[preset]]
+name = "gh"
+type = "http"
+description = ""
+base_url = "{}"
+auth = {{ type = "bearer", secret = "k" }}
+allowed_methods = ["GET"]
+allowed_paths = ["/user/repos"]
+approval = "prompt"
+"#,
+            server.uri()
+        ))
+        .unwrap();
+        let kc = mcp_warden_core::keychain::memory::InMemoryKeychain::new();
+        kc.set("k", mcp_warden_core::secret::Secret::new("tok".into()))
+            .unwrap();
+        let args = DoctorArgs {
+            deep: true,
+            include_prompt: true,
+            timeout_seconds: 5,
+            format: "json".into(),
+        };
+        let (exec, _dir, approval) = probe_executor(ApprovalDecision::Denied);
+        let json = serde_json::to_value(run_probes(&cfg, &kc, &args, &exec).await).unwrap();
+        assert_eq!(approval.calls(), 1);
+        assert_eq!(json[0]["status"], "skipped", "{json}");
+        assert!(
+            json[0]["detail"].as_str().unwrap().contains("denied"),
+            "{json}"
+        );
+        let shown = approval.shown.lock().unwrap();
+        assert_eq!(shown[0].summary, "doctor --deep probe: GET /user/repos");
+    }
+
     #[tokio::test]
     async fn probe_results_carry_open_paths_warning() {
         let cfg: Config = toml::from_str(
@@ -692,8 +897,9 @@ approval = "deny"
             format: "json".into(),
         };
         let kc = mcp_warden_core::keychain::memory::InMemoryKeychain::new();
+        let (exec, _dir, _) = probe_executor(ApprovalDecision::Denied);
 
-        let json = serde_json::to_value(run_probes(&cfg, &kc, &args).await).unwrap();
+        let json = serde_json::to_value(run_probes(&cfg, &kc, &args, &exec).await).unwrap();
 
         let open = json[0]["warnings"].as_array().unwrap();
         assert_eq!(open.len(), 1, "{json}");

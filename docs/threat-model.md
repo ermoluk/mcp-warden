@@ -194,6 +194,8 @@ Since v0.4.1 `db_query` requires TLS with certificate and hostname verification 
 
 ### R11. HTTP redirects are not followed
 
+`doctor --deep` uses real credentials too, so since the release after v0.5.3 each of its probes goes through the preset's approval policy and the audit log (`doctor_probe`), `--include-prompt` asks before probing a `prompt` preset, and the printed snippet is scrubbed like a `proxy_http` body. Up to v0.5.3 it probed `prompt` presets without asking and printed 80 characters of each response, redacted only by keyword.
+
 `proxy_http` and `doctor --deep` never follow redirects: a hop could leave `base_url`'s host carrying a custom auth header (reqwest strips only `Authorization` cross-origin) or land on a path the allow-list never approved. The 3xx response is returned to the agent, which can issue a new — validated — request if the target is allowed.
 
 ### R12. A wrapped server's key is visible to whatever runs as that server

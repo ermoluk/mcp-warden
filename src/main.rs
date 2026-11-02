@@ -34,7 +34,7 @@ async fn main() -> anyhow::Result<()> {
         }
         cli::Command::Approval(args) => cli::approval::run(args, &config_path)?,
         cli::Command::Mcp => cli::mcp::cmd(&config_dir).await?,
-        cli::Command::Doctor(args) => cli::doctor::run(args, &config_dir, store.as_ref()).await?,
+        cli::Command::Doctor(args) => cli::doctor::run(args, &config_dir, store).await?,
         cli::Command::Web { port } => cli::web::run(port, &config_path, &audit_db).await?,
         cli::Command::Lock { reason } => {
             std::fs::create_dir_all(&config_dir)?;
