@@ -865,7 +865,13 @@ mod tests {
             .unwrap_err();
         assert!(matches!(err, WardenError::Validation(_)));
         assert_eq!(approval.calls.load(Ordering::SeqCst), 0);
-        assert_refused(&exec, "p", "proxy_http", "GET /admin/keys", &err);
+        assert_refused(
+            &exec,
+            "p",
+            "proxy_http",
+            "GET https://api.example.com/admin/keys",
+            &err,
+        );
     }
 
     #[tokio::test]

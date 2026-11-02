@@ -58,6 +58,8 @@ An attacker rewrites `config.toml` after `mcp-warden mcp` has started — anothe
 
 Before this was fixed (see the CHANGELOG), only the startup secret check used the frozen config; presets were re-read from the file on every call, so all of the edits above took effect live.
 
+**Edits that take effect at the next start.** MCP clients start a fresh server for every session, so "the next process start" comes soon, and an agent that can write files can make it read a config of its choosing: edit `config.toml`, or point `MCP_WARDEN_CONFIG_DIR` in a project's `.mcp.json` at a directory it controls. Such a config can bind any existing keychain entry to any `base_url`. Up to v0.5.3 the approval prompt for `proxy_http` showed only the method and path, so a `prompt` preset re-pointed at `attacker.example` looked exactly like before. Since the release after v0.5.3 the prompt and the audit summary name the destination — `GET https://api.github.com/user/repos`, `db postgres db.internal → user_by_id (1 param)` — as `ssh_exec` already did (`ssh host -- …`).
+
 ### T8. Oversized agent input
 
 Up to v0.5.2 nothing capped what an agent could send: a megabyte-long path or command went through the allow-list regexes, into the approval prompt (truncated for display only), into the audit log for approved calls and on to the upstream. Since v0.5.3 every call is checked against fixed limits first — in `policy::check_request`, before the preset kind, the patterns, percent-decoding or any credential (invariant 3). `mcp-warden preset test` applies the same limits. The constants are in `src/executor/limits.rs`:

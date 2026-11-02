@@ -313,3 +313,35 @@ async fn revealing_anything_but_a_preset_secret_is_refused_unasked() {
     assert_eq!(ok.0.value, SECRETS[0].1);
     assert_eq!(h.approval.calls(), 1);
 }
+
+/// The prompt names where the request goes. An agent that edits
+/// config.toml can point a `prompt` preset at its own host; with the host
+/// in the prompt the human sees that before approving.
+#[tokio::test]
+async fn the_prompt_names_the_destination_host() {
+    let h = Harness::wide_open().await;
+    let _ = h
+        .server
+        .proxy_http(Parameters(ProxyHttpArgs {
+            preset_name: "web".into(),
+            path: "/user/repos".into(),
+            method: "GET".into(),
+            body: None,
+            query: None,
+        }))
+        .await;
+    let _ = h
+        .server
+        .db_query(Parameters(DbQueryArgs {
+            preset_name: "pg".into(),
+            query_name: "user_by_id".into(),
+            params: vec![json!(1)],
+        }))
+        .await;
+    let shown = h.approval.shown.lock().unwrap();
+    assert_eq!(shown[0].summary, format!("GET {}/user/repos", h.http.uri()));
+    assert_eq!(
+        shown[1].summary,
+        "db postgres 127.0.0.1 → user_by_id (1 param)"
+    );
+}

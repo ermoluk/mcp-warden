@@ -4,10 +4,16 @@
 //! a preset that does not exist (the MCP server builds those).
 //!
 //! Built only from agent-supplied request fields and the preset's host /
-//! type: never from a secret, a header, a query string or a body.
+//! type: never from a secret, a header, a query string or a body. The
+//! destination (`base_url`, the database host) is part of it, so a human
+//! approving a call sees where it goes even if the config was edited to
+//! point an existing preset somewhere else.
 
-pub fn http(method: &str, path: &str) -> String {
-    format!("{} {path}", method.to_uppercase())
+/// `GET https://api.github.com/user/repos`; without a known preset (a call
+/// refused before its preset was found) just `GET /user/repos`.
+pub fn http(method: &str, base_url: Option<&str>, path: &str) -> String {
+    let base = base_url.map_or("", |b| b.trim_end_matches('/'));
+    format!("{} {base}{path}", method.to_uppercase())
 }
 
 pub fn ssh(host: &str, command: &str) -> String {
@@ -18,6 +24,11 @@ pub fn sftp(direction: &str, remote: &str, local: &str) -> String {
     format!("sftp {direction} {remote} ↔ {local}")
 }
 
-pub fn db(kind: &str, query_name: &str, params: usize) -> String {
-    format!("db {kind} → {query_name} ({params} param)")
+/// `db postgres db.example.com → user_by_id (1 param)`; the host is left out
+/// when it is not known.
+pub fn db(kind: &str, host: Option<&str>, query_name: &str, params: usize) -> String {
+    match host {
+        Some(host) => format!("db {kind} {host} → {query_name} ({params} param)"),
+        None => format!("db {kind} → {query_name} ({params} param)"),
+    }
 }

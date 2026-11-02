@@ -39,6 +39,7 @@ pub async fn run(
 ) -> Result<DbQueryResponse> {
     let summary = super::summary::db(
         preset_type_label(&preset.preset_type),
+        preset.host.as_deref(),
         &query_name,
         params.len(),
     );

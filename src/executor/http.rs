@@ -253,7 +253,8 @@ pub async fn execute(
     req: HttpRequest,
 ) -> Result<HttpResponse> {
     let method_upper = req.method.to_uppercase();
-    let summary = crate::executor::summary::http(&method_upper, &req.path);
+    let summary =
+        crate::executor::summary::http(&method_upper, preset.base_url.as_deref(), &req.path);
     let request = Request::Http {
         method: &method_upper,
         path: &req.path,

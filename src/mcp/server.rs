@@ -178,7 +178,7 @@ impl WardenServer {
             .find_preset(
                 &args.preset_name,
                 "proxy_http",
-                &summary::http(&args.method, &args.path),
+                &summary::http(&args.method, None, &args.path),
             )
             .await?;
         let req = HttpRequest {
@@ -399,7 +399,7 @@ impl WardenServer {
             .find_preset(
                 &args.preset_name,
                 "db_query",
-                &summary::db("?", &args.query_name, args.params.len()),
+                &summary::db("?", None, &args.query_name, args.params.len()),
             )
             .await?;
         let resp = crate::executor::db::run(&self.executor, &preset, args.query_name, args.params)
