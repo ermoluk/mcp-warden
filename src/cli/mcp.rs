@@ -131,10 +131,10 @@ pub(crate) fn build_approval(
     let telegram = cfg.approval.as_ref().and_then(|a| a.telegram.as_ref());
     let (primary, fallback) = plan_transports(
         env_choice.as_deref(),
-        telegram.is_some(),
+        telegram.map(|t| t.desktop_fallback),
         cfg!(any(target_os = "macos", windows)),
         std::io::stderr().is_terminal(),
-    );
+    )?;
     let bot = telegram
         .map(|tg| telegram_bot(tg, kc, config_dir))
         .transpose()?;
@@ -161,39 +161,60 @@ pub(crate) fn build_approval(
     })
 }
 
-/// Pick the primary approval transport and its fallback:
+/// Pick the primary approval transport and its fallback. `telegram` is
+/// `Some(desktop_fallback)` when `[approval.telegram]` is configured.
 ///
-/// 1. Explicit env override `MCP_WARDEN_APPROVAL_TRANSPORT` (values:
-///    `telegram` / `desktop` / `tui`). Wins over everything else.
-/// 2. `[approval.telegram]` block in the config — Telegram is primary.
-/// 3. Default: the native desktop prompt.
+/// 1. `[approval.telegram]` in the config: Telegram, and nothing else
+///    unless `desktop_fallback = true`. Users pick Telegram when the agent
+///    can drive the screen (threat model, R1); a local dialog shown after a
+///    Telegram timeout would be one the agent can click. The environment
+///    (`MCP_WARDEN_APPROVAL_TRANSPORT`) comes from the MCP client's config,
+///    which the agent may be able to edit, so it may only say `telegram`
+///    here; anything else refuses to start.
+/// 2. Without Telegram, the env override (`desktop` / `tui`), else the
+///    native desktop prompt.
 ///
-/// The fallback is asked only when the primary times out, so it must be a
+/// A fallback is asked only when the primary times out, so it must be a
 /// prompt the user can actually see. Where there is a native dialog (macOS,
-/// Windows) that is the dialog, behind Telegram. Elsewhere it is the TUI,
-/// and only when stderr is a terminal: an MCP client captures the server's
-/// stderr, so a TUI drawn there is invisible (and on macOS it cannot read
-/// keys at all while stdin is the JSON-RPC pipe). An explicit `tui` choice
-/// is honoured as is.
+/// Windows) that is the dialog. Elsewhere it is the TUI, and only when
+/// stderr is a terminal: an MCP client captures the server's stderr, so a
+/// TUI drawn there is invisible (and on macOS it cannot read keys at all
+/// while stdin is the JSON-RPC pipe). An explicit `tui` choice is honoured
+/// as is.
 fn plan_transports(
     env_choice: Option<&str>,
-    has_telegram: bool,
+    telegram: Option<bool>,
     has_native_dialog: bool,
     stderr_is_tty: bool,
-) -> (Kind, Option<Kind>) {
-    let primary = match env_choice {
-        Some("tui") => return (Kind::Tui, None),
-        Some("telegram") => Kind::Telegram,
-        Some(_) => Kind::Desktop,
-        None if has_telegram => Kind::Telegram,
-        None => Kind::Desktop,
+) -> Result<(Kind, Option<Kind>)> {
+    let local_fallback = || {
+        if has_native_dialog {
+            Some(Kind::Desktop)
+        } else {
+            stderr_is_tty.then_some(Kind::Tui)
+        }
     };
-    let fallback = if has_native_dialog {
-        (primary == Kind::Telegram).then_some(Kind::Desktop)
-    } else {
-        stderr_is_tty.then_some(Kind::Tui)
-    };
-    (primary, fallback)
+    if let Some(desktop_fallback) = telegram {
+        if env_choice.is_some_and(|e| e != "telegram") {
+            return Err(WardenError::Validation(format!(
+                "MCP_WARDEN_APPROVAL_TRANSPORT={} conflicts with [approval.telegram] in the \
+                 config: with Telegram configured, approvals go only to Telegram (set \
+                 `desktop_fallback = true` there to allow a local prompt after a timeout)",
+                env_choice.unwrap_or_default()
+            )));
+        }
+        return Ok((
+            Kind::Telegram,
+            desktop_fallback.then(local_fallback).flatten(),
+        ));
+    }
+    Ok(match env_choice {
+        Some("tui") => (Kind::Tui, None),
+        _ => (
+            Kind::Desktop,
+            (!has_native_dialog).then(local_fallback).flatten(),
+        ),
+    })
 }
 
 /// The bot for `[approval.telegram]`, with its token from the keychain.
@@ -238,56 +259,79 @@ mod tests {
     const TTY: bool = true;
     const PIPE: bool = false;
 
-    #[test]
-    fn macos_uses_the_dialog_without_a_tui_fallback() {
-        let plan = (Kind::Desktop, None);
-        assert_eq!(plan_transports(None, false, MAC, PIPE), plan);
-        assert_eq!(plan_transports(None, false, MAC, TTY), plan);
-        assert_eq!(plan_transports(Some("desktop"), true, MAC, PIPE), plan);
+    fn plan(
+        env: Option<&str>,
+        telegram: Option<bool>,
+        native_dialog: bool,
+        tty: bool,
+    ) -> (Kind, Option<Kind>) {
+        plan_transports(env, telegram, native_dialog, tty).unwrap()
     }
 
     #[test]
-    fn macos_falls_back_from_telegram_to_the_dialog() {
-        let plan = (Kind::Telegram, Some(Kind::Desktop));
-        assert_eq!(plan_transports(None, true, MAC, PIPE), plan);
-        assert_eq!(plan_transports(Some("telegram"), true, MAC, TTY), plan);
+    fn macos_uses_the_dialog_without_a_tui_fallback() {
+        let dialog = (Kind::Desktop, None);
+        assert_eq!(plan(None, None, MAC, PIPE), dialog);
+        assert_eq!(plan(None, None, MAC, TTY), dialog);
+        assert_eq!(plan(Some("desktop"), None, MAC, PIPE), dialog);
+    }
+
+    /// Telegram is chosen because the agent may control the screen (R1), so
+    /// a timed-out Telegram prompt must not reappear as a dialog the agent
+    /// could click — unless the user opted in.
+    #[test]
+    fn telegram_has_no_local_fallback_unless_opted_in() {
+        for (native, tty) in [(MAC, PIPE), (MAC, TTY), (LINUX, PIPE), (LINUX, TTY)] {
+            assert_eq!(plan(None, Some(false), native, tty), (Kind::Telegram, None));
+            assert_eq!(
+                plan(Some("telegram"), Some(false), native, tty),
+                (Kind::Telegram, None)
+            );
+        }
+        assert_eq!(
+            plan(None, Some(true), MAC, PIPE),
+            (Kind::Telegram, Some(Kind::Desktop))
+        );
+        assert_eq!(
+            plan(None, Some(true), LINUX, TTY),
+            (Kind::Telegram, Some(Kind::Tui))
+        );
+        assert_eq!(plan(None, Some(true), LINUX, PIPE), (Kind::Telegram, None));
+    }
+
+    /// The environment comes from the MCP client's config, which an agent
+    /// may be able to edit: it cannot swap Telegram for a local prompt.
+    #[test]
+    fn the_environment_cannot_replace_telegram_with_a_local_prompt() {
+        for env in ["desktop", "tui", "pigeon", ""] {
+            let err = plan_transports(Some(env), Some(false), MAC, PIPE)
+                .unwrap_err()
+                .to_string();
+            assert!(err.contains("[approval.telegram]"), "{env}: {err}");
+        }
     }
 
     #[test]
     fn elsewhere_the_tui_falls_back_only_on_a_terminal() {
         assert_eq!(
-            plan_transports(None, false, LINUX, TTY),
+            plan(None, None, LINUX, TTY),
             (Kind::Desktop, Some(Kind::Tui))
         );
-        assert_eq!(
-            plan_transports(None, false, LINUX, PIPE),
-            (Kind::Desktop, None)
-        );
-        assert_eq!(
-            plan_transports(None, true, LINUX, TTY),
-            (Kind::Telegram, Some(Kind::Tui))
-        );
-        assert_eq!(
-            plan_transports(None, true, LINUX, PIPE),
-            (Kind::Telegram, None)
-        );
+        assert_eq!(plan(None, None, LINUX, PIPE), (Kind::Desktop, None));
     }
 
     #[test]
-    fn explicit_tui_is_honoured_everywhere() {
+    fn explicit_tui_is_honoured_without_telegram() {
         for (native_dialog, stderr_is_tty) in [(MAC, PIPE), (LINUX, PIPE), (LINUX, TTY)] {
             assert_eq!(
-                plan_transports(Some("tui"), true, native_dialog, stderr_is_tty),
+                plan(Some("tui"), None, native_dialog, stderr_is_tty),
                 (Kind::Tui, None)
             );
         }
     }
 
     #[test]
-    fn unknown_env_value_means_desktop_even_with_telegram_configured() {
-        assert_eq!(
-            plan_transports(Some("pigeon"), true, MAC, PIPE),
-            (Kind::Desktop, None)
-        );
+    fn unknown_env_value_means_desktop_without_telegram() {
+        assert_eq!(plan(Some("pigeon"), None, MAC, PIPE), (Kind::Desktop, None));
     }
 }

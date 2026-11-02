@@ -19,10 +19,13 @@ regardless of transport.
 
 Resolved once when `mcp-warden mcp` starts (config is load-once-and-freeze):
 
-1. **`MCP_WARDEN_APPROVAL_TRANSPORT`** env var — `telegram`, `desktop` or
-   `tui`. Wins over everything else.
-2. **`[approval.telegram]`** block present in `config.toml` → Telegram is
-   primary.
+1. **`[approval.telegram]`** block present in `config.toml` → Telegram, and
+   only Telegram. `MCP_WARDEN_APPROVAL_TRANSPORT` may then only be
+   `telegram`; any other value refuses to start. The environment comes from
+   the MCP client's config, which an agent may be able to edit, and Telegram
+   is what you pick when the agent can drive your screen — a dialog it could
+   click must not replace it.
+2. **`MCP_WARDEN_APPROVAL_TRANSPORT`** env var — `desktop` or `tui`.
 3. **Default** → the `desktop` prompt: the native dialog on macOS, a
    notification on Linux.
 
@@ -33,8 +36,12 @@ prompt you can actually see:
 | Primary    | Fallback on macOS / Windows | Fallback on Linux                                |
 |------------|-----------------------------|--------------------------------------------------|
 | `desktop`  | none                        | `tui`, only if the server's stderr is a terminal |
-| `telegram` | the native dialog           | `tui`, only if the server's stderr is a terminal |
+| `telegram` | none; the native dialog with `desktop_fallback = true` | none; `tui` with `desktop_fallback = true`, only if stderr is a terminal |
 | `tui`      | none                        | none                                             |
+
+Up to v0.5.3 a Telegram prompt that timed out was asked again in the local
+dialog, and `MCP_WARDEN_APPROVAL_TRANSPORT=desktop` replaced Telegram
+altogether — both let an agent with screen control approve its own call.
 
 An MCP client (Claude Code, Cursor, …) captures the server's stderr and feeds
 JSON-RPC through its stdin, so a TUI prompt there can't be seen — and on
@@ -120,6 +127,7 @@ Telegram and please open an issue.
    bot_token_secret = "tg_bot_token"   # keychain entry NAME, not the token
    chat_id = 123456789                  # your numeric chat id
    timeout_seconds = 120                # optional, default 120
+   desktop_fallback = false             # optional: ask locally after a timeout
    ```
 
 `mcp-warden mcp` refuses to start if `bot_token_secret` is not in the

@@ -72,6 +72,12 @@ pub struct TelegramConfig {
     /// Optional per-prompt timeout in seconds (default 120).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub timeout_seconds: Option<u64>,
+    /// Show the local prompt (the desktop dialog, or the TUI on a terminal)
+    /// when a Telegram prompt times out. Off by default: Telegram is for
+    /// when the agent may control the screen, and a local dialog is one it
+    /// could click.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub desktop_fallback: bool,
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
