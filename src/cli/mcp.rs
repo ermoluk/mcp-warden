@@ -80,6 +80,10 @@ pub async fn cmd(config_dir: &Path) -> Result<()> {
                 .flat_map(|s| s.env.iter().map(|var| s.secret_name(var))),
         )
         .filter(|name| Some(name) != telegram_token.as_ref());
+    // Latch a lock within a second of `mcp-warden lock`, call or no call.
+    let _lock_watch = executor
+        .clone()
+        .watch_lock(std::time::Duration::from_secs(1));
     let server = WardenServer::new(presets, executor).with_revealable(revealable);
 
     let running = server

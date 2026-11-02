@@ -71,6 +71,8 @@ pub struct ActionExecutor {
     pub audit: Arc<dyn AuditSink>,
     pub clock: Arc<dyn Clock>,
     approval_windows: tokio::sync::Mutex<HashMap<(String, String), OpenWindow>>,
+    /// Held while a prompt is shown, so this process shows one at a time.
+    prompting: tokio::sync::Mutex<()>,
     /// The kill switch (`mcp-warden lock`), checked before every call.
     lock: lock::LockState,
 }
@@ -105,6 +107,7 @@ impl ActionExecutor {
             audit,
             clock,
             approval_windows: tokio::sync::Mutex::new(HashMap::new()),
+            prompting: tokio::sync::Mutex::new(()),
             lock: lock::LockState::none(),
         }
     }
@@ -142,6 +145,23 @@ impl ActionExecutor {
             return Ok(event_id);
         }
 
+        // One prompt at a time: a second dialog must not appear under the
+        // cursor of a human about to click the first. A call that waited
+        // here may find that the answer it waited behind opened a window.
+        let asks = force_prompt || preset.approval == ApprovalPolicy::Prompt;
+        let _turn = if asks {
+            Some(self.prompting.lock().await)
+        } else {
+            None
+        };
+        if asks
+            && !force_prompt
+            && let Some(approval_event) = self.active_window(&preset.name, action).await
+        {
+            self.audit.record_windowed(event_id, approval_event)?;
+            return Ok(event_id);
+        }
+
         let answer = if force_prompt {
             self.prompt(preset, action, summary, /* offer_window = */ false)
                 .await
@@ -159,6 +179,36 @@ impl ActionExecutor {
             Ok(a) => a,
             Err(e) => return Err(self.prompt_failed(event_id, e)?),
         };
+
+        // A prompt can stay open for minutes. If the kill switch was thrown
+        // or the preset's access window ended meanwhile, an Approve clicked
+        // on the dialog still in front of the human must not run the call.
+        if matches!(
+            decision,
+            ApprovalDecision::Approved | ApprovalDecision::ApprovedForWindow
+        ) {
+            let stale = if self.lock.is_locked() {
+                self.approval_windows.lock().await.clear();
+                Some(WardenError::Locked)
+            } else {
+                policy::check_expiry(preset, self.clock.now_utc()).err()
+            };
+            if let Some(err) = stale {
+                let label = if force_prompt || preset.approval != ApprovalPolicy::Auto {
+                    AuditDecision::Approved
+                } else {
+                    AuditDecision::Auto
+                };
+                self.audit.record_decision(event_id, label)?;
+                self.audit.record_outcome(
+                    event_id,
+                    AuditOutcome::Err {
+                        message: format!("not run: {err}"),
+                    },
+                )?;
+                return Err(err);
+            }
+        }
 
         // If the user approved for the window, register it BEFORE recording
         // audit so a race that observed audit decided=approved can already
@@ -215,6 +265,25 @@ impl ActionExecutor {
     pub fn with_lock(mut self, path: std::path::PathBuf) -> Self {
         self.lock = lock::LockState::at(path);
         self
+    }
+
+    /// Look at the lock file every `every`, so the server latches a lock
+    /// even if the file is gone again before the next call (an agent that
+    /// deletes it right after `mcp-warden lock`). The task ends when the
+    /// executor does.
+    pub fn watch_lock(self: Arc<Self>, every: std::time::Duration) -> tokio::task::JoinHandle<()> {
+        let exec = Arc::downgrade(&self);
+        drop(self);
+        tokio::spawn(async move {
+            while let Some(exec) = exec.upgrade() {
+                if exec.lock.is_locked() {
+                    exec.approval_windows.lock().await.clear();
+                    return;
+                }
+                drop(exec);
+                tokio::time::sleep(every).await;
+            }
+        })
     }
 
     /// Refuse every call while mcp-warden is locked, and audit the refusal.
@@ -491,6 +560,159 @@ mod tests {
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(self.decision)
         }
+    }
+
+    /// Runs `during` while the prompt is open, then gives `decision`, and
+    /// tracks how many prompts were open at once.
+    struct SlowApproval<F: Fn() + Send + Sync> {
+        decision: ApprovalDecision,
+        during: F,
+        open: AtomicUsize,
+        most_open: AtomicUsize,
+    }
+
+    #[async_trait]
+    impl<F: Fn() + Send + Sync> ApprovalTransport for SlowApproval<F> {
+        async fn request(
+            &self,
+            _r: ApprovalRequest,
+        ) -> mcp_warden_core::error::Result<ApprovalDecision> {
+            let now = self.open.fetch_add(1, Ordering::SeqCst) + 1;
+            self.most_open.fetch_max(now, Ordering::SeqCst);
+            (self.during)();
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            self.open.fetch_sub(1, Ordering::SeqCst);
+            Ok(self.decision)
+        }
+    }
+
+    fn slow<F: Fn() + Send + Sync>(decision: ApprovalDecision, during: F) -> Arc<SlowApproval<F>> {
+        Arc::new(SlowApproval {
+            decision,
+            during,
+            open: AtomicUsize::new(0),
+            most_open: AtomicUsize::new(0),
+        })
+    }
+
+    /// `mcp-warden lock` while a prompt is open: the human may still click
+    /// Approve on the dialog in front of them, but the call must not run.
+    #[tokio::test]
+    async fn a_lock_set_while_the_prompt_is_open_stops_the_call() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join(lock::LOCK_FILE);
+        let writes_lock = lock_path.clone();
+        let approval = slow(ApprovalDecision::ApprovedForWindow, move || {
+            lock::write(
+                &writes_lock,
+                &lock::LockInfo {
+                    since: chrono::Utc::now(),
+                    reason: None,
+                },
+            )
+            .unwrap();
+        });
+        let (exec, _audit_dir) = exec_with(approval, None);
+        let exec = exec.with_lock(lock_path);
+        let err = exec
+            .authorise(
+                &preset_with_window(Some(600)),
+                "proxy_http",
+                "GET /users",
+                false,
+            )
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WardenError::Locked), "{err}");
+        let e = &exec.audit.recent(1).unwrap()[0];
+        assert!(
+            matches!(&e.outcome, Some(AuditOutcome::Err { message }) if message.contains("locked")),
+            "{e:?}"
+        );
+        // No window survives either.
+        assert!(exec.active_window("p", "proxy_http").await.is_none());
+    }
+
+    /// A `preset grant` window that ends while the prompt is open: a late
+    /// Approve does not stretch it.
+    #[tokio::test]
+    async fn access_that_ends_while_the_prompt_is_open_stops_the_call() {
+        let clock = FakeClock::new();
+        let ticking = clock.clone();
+        let approval = slow(ApprovalDecision::Approved, move || {
+            ticking.advance(Duration::from_secs(120));
+        });
+        let (exec, _dir) = exec_with_clock(approval, clock.clone());
+        let mut p = preset(ApprovalPolicy::Prompt);
+        p.expires_at = Some(clock.now_utc() + chrono::Duration::seconds(60));
+        let err = exec
+            .authorise(&p, "proxy_http", "GET /users", false)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("expired"), "{err}");
+    }
+
+    /// One prompt at a time, so a second dialog cannot pop up under the
+    /// cursor of a human about to click the first; and a window opened by
+    /// the first answer lets the queued call through without asking.
+    #[tokio::test]
+    async fn prompts_are_shown_one_at_a_time() {
+        let approval = slow(ApprovalDecision::ApprovedForWindow, || {});
+        let (exec, _dir) = exec_with(approval.clone(), None);
+        let exec = Arc::new(exec);
+        let p = preset_with_window(Some(600));
+        let calls = (0..4).map(|i| {
+            let (exec, p) = (exec.clone(), p.clone());
+            tokio::spawn(async move {
+                exec.authorise(&p, "proxy_http", &format!("GET /{i}"), false)
+                    .await
+            })
+        });
+        for call in calls.collect::<Vec<_>>() {
+            call.await.unwrap().unwrap();
+        }
+        assert_eq!(approval.most_open.load(Ordering::SeqCst), 1);
+        let decisions: Vec<_> = exec
+            .audit
+            .recent(10)
+            .unwrap()
+            .into_iter()
+            .map(|e| e.decision)
+            .collect();
+        assert_eq!(
+            decisions
+                .iter()
+                .filter(|d| **d == Some(AuditDecision::Approved))
+                .count(),
+            1,
+            "{decisions:?}"
+        );
+    }
+
+    /// `mcp-warden lock`, then the agent deletes the file before its next
+    /// call: the server must have seen the lock anyway.
+    #[tokio::test]
+    async fn a_lock_deleted_before_the_next_call_still_holds() {
+        let dir = tempfile::tempdir().unwrap();
+        let lock_path = dir.path().join(lock::LOCK_FILE);
+        let (exec, _audit_dir) = exec_with(never_called(), None);
+        let exec = Arc::new(exec.with_lock(lock_path.clone()));
+        let _watcher = exec.clone().watch_lock(Duration::from_millis(10));
+        lock::write(
+            &lock_path,
+            &lock::LockInfo {
+                since: chrono::Utc::now(),
+                reason: None,
+            },
+        )
+        .unwrap();
+        tokio::time::sleep(Duration::from_millis(100)).await;
+        std::fs::remove_file(&lock_path).unwrap();
+        let err = exec
+            .check_lock("p", "proxy_http", "GET /x")
+            .await
+            .unwrap_err();
+        assert!(matches!(err, WardenError::Locked));
     }
 
     #[tokio::test]
