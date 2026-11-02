@@ -192,6 +192,8 @@ The residual risk: an agent that has the user's attention long enough to coerce 
 
 Since v0.4.1 `db_query` requires TLS with certificate and hostname verification for every non-loopback host — PostgreSQL (OS trust store + Mozilla roots), MySQL and Redis (Mozilla roots). Plaintext is used only for `localhost`, loopback IPs and Unix sockets, where traffic cannot leave the machine. There is no opt-out: a remote server without TLS, or with a certificate from a private CA the roots don't cover, is refused. Reach such servers through an SSH tunnel to `localhost` (e.g. `ssh -L 6379:localhost:6379 host`); for PostgreSQL a private CA can also be added to the OS trust store.
 
+HTTP presets follow the same rule since the release after v0.5.3. Up to v0.5.3 a `base_url` with `http://` to any host only logged a warning, and the credential crossed the network in clear text; now the server refuses to start unless such a host is `localhost`, 127.0.0.0/8 or `::1`. There is no opt-out: use https, or an SSH tunnel to localhost.
+
 ### R11. HTTP redirects are not followed
 
 `doctor --deep` uses real credentials too, so since the release after v0.5.3 each of its probes goes through the preset's approval policy and the audit log (`doctor_probe`), `--include-prompt` asks before probing a `prompt` preset, and the printed snippet is scrubbed like a `proxy_http` body. Up to v0.5.3 it probed `prompt` presets without asking and printed 80 characters of each response, redacted only by keyword.

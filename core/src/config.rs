@@ -223,6 +223,16 @@ pub enum Auth {
     },
 }
 
+/// `localhost`, 127.0.0.0/8 or `::1`: a host whose traffic cannot leave
+/// this machine.
+fn is_loopback(host: &url::Host<&str>) -> bool {
+    match host {
+        url::Host::Domain(d) => d.eq_ignore_ascii_case("localhost"),
+        url::Host::Ipv4(ip) => ip.is_loopback(),
+        url::Host::Ipv6(ip) => ip.is_loopback(),
+    }
+}
+
 impl Config {
     pub fn load_and_validate(path: &Path, kc: &dyn KeychainStore) -> Result<Self> {
         let raw = std::fs::read_to_string(path).map_err(WardenError::Io)?;
@@ -280,7 +290,20 @@ impl Config {
         })?;
         match parsed.scheme() {
             "https" => {}
-            "http" => tracing::warn!("preset '{}' uses plain http", p.name),
+            // The credential would cross the network in clear text. Only a
+            // connection that cannot leave this machine may skip TLS (as
+            // for databases, R10); reach anything else over https or an
+            // SSH tunnel to localhost.
+            "http" if parsed.host().is_some_and(|h| is_loopback(&h)) => {}
+            "http" => {
+                return Err(WardenError::Validation(format!(
+                    "preset '{}': base_url uses plain http to a host that is not loopback, so \
+                     the credential would cross the network unencrypted; use https, or an \
+                     SSH tunnel to localhost (`ssh -L 8080:localhost:80 host`, then \
+                     base_url = \"http://localhost:8080\")",
+                    p.name
+                )));
+            }
             other => {
                 return Err(WardenError::Validation(format!(
                     "preset '{}': base_url scheme '{}' not allowed",
@@ -639,6 +662,49 @@ mod tests {
         let kc = InMemoryKeychain::new();
         kc.set("gh_pat", Secret::new("ghp_x".into())).unwrap();
         cfg.validate(&kc).unwrap();
+    }
+
+    #[test]
+    fn plain_http_is_refused_unless_the_host_is_loopback() {
+        let cfg = |url: &str| -> Config {
+            toml::from_str(&format!(
+                r#"
+                [[preset]]
+                name = "p"
+                type = "http"
+                description = "x"
+                base_url = "{url}"
+                auth = {{ type = "bearer", secret = "x" }}
+                allowed_methods = ["GET"]
+                approval = "prompt"
+                "#
+            ))
+            .unwrap()
+        };
+        let kc = InMemoryKeychain::new();
+        kc.set("x", Secret::new("y".into())).unwrap();
+        for remote in [
+            "http://api.example.com",
+            "http://192.168.1.10:3000",
+            "http://10.0.0.1",
+            "http://localhost.example.com",
+            "http://evil.localhost",
+            "http://[::ffff:127.0.0.1]",
+            "http://0.0.0.0:8080",
+        ] {
+            let err = cfg(remote).validate(&kc).unwrap_err().to_string();
+            assert!(err.contains("plain http"), "{remote}: {err}");
+        }
+        for local in [
+            "http://localhost:8080",
+            "http://LOCALHOST",
+            "http://127.0.0.1:3000",
+            "http://127.1.2.3",
+            "http://[::1]:8080",
+            "https://api.example.com",
+        ] {
+            cfg(local).validate(&kc).unwrap_or_else(|e| panic!("{local}: {e}"));
+        }
     }
 
     #[test]
