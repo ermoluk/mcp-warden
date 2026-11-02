@@ -33,6 +33,8 @@ All notable changes to this project will be documented in this file. The format 
 
 - **Planted files in the config dir could hang the server or redirect audit writes.** `lock`, `telegram/offset` and the Telegram inbox were read through symlinks to the end (a link to `/dev/zero` never finished), `telegram/poll.lock` was opened through a symlink or a FIFO (which blocks), and SQLite followed a symlink at `audit.db-journal`. State files are now opened with `O_NOFOLLOW | O_NONBLOCK` and read only as small regular files, the audit log refuses symlinks at the database and its `-journal`, `-wal` and `-shm` files and opens the database with `SQLITE_OPEN_NOFOLLOW`, the config dir is created `0700` and `config.toml` `0600`, and the MCP server and `run` refuse a config dir that other users can write to or that the user does not own (R3, R13). **Behaviour change:** a group- or world-writable config dir stops the server from starting.
 
+- **Two presets could share a name.** Calls used the first, while `list_presets`, the web UI and approval windows (keyed by name) saw both, so a second `gh` with `approval = "auto"` and other methods sat behind the first. Duplicate preset names now stop the server from starting (invariant 10). **Behaviour change.**
+
 ### Added
 
 - **`mcp-warden preset confirm [NAME]…`** confirms `auto` presets through the approval prompt (all unconfirmed ones without names). `mcp-warden-core` gains the `stamp` module.

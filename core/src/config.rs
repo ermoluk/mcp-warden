@@ -255,6 +255,13 @@ impl Config {
 
     pub fn validate(&self, kc: &dyn KeychainStore) -> Result<()> {
         self.validate_servers()?;
+        let mut names = std::collections::HashSet::new();
+        if let Some(dup) = self.preset.iter().find(|p| !names.insert(&p.name)) {
+            return Err(WardenError::Validation(format!(
+                "more than one preset named '{}'",
+                dup.name
+            )));
+        }
         for p in &self.preset {
             if p.name.is_empty() {
                 return Err(WardenError::Validation("preset name empty".into()));
@@ -777,6 +784,38 @@ mod tests {
             let err = cfg.validate(&kc).unwrap_err().to_string();
             assert!(err.contains("reserved"), "{err}");
         }
+    }
+
+    /// Lookups take the first preset of a name, while `list_presets`, the
+    /// web UI and approval windows would see both: refuse duplicates.
+    #[test]
+    fn duplicate_preset_names_are_refused() {
+        let cfg: Config = toml::from_str(
+            r#"
+            [[preset]]
+            name = "gh"
+            type = "http"
+            description = "read"
+            base_url = "https://api.github.com"
+            auth = { type = "bearer", secret = "x" }
+            allowed_methods = ["GET"]
+            approval = "prompt"
+
+            [[preset]]
+            name = "gh"
+            type = "http"
+            description = "write"
+            base_url = "https://api.github.com"
+            auth = { type = "bearer", secret = "x" }
+            allowed_methods = ["DELETE"]
+            approval = "auto"
+            "#,
+        )
+        .unwrap();
+        let kc = InMemoryKeychain::new();
+        kc.set("x", Secret::new("y".into())).unwrap();
+        let err = cfg.validate(&kc).unwrap_err().to_string();
+        assert!(err.contains("more than one preset named 'gh'"), "{err}");
     }
 
     #[test]
