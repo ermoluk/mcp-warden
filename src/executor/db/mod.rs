@@ -1,4 +1,5 @@
 use crate::executor::ActionExecutor;
+use crate::executor::credential_echo::CredentialForms;
 use mcp_warden_core::audit::AuditOutcome;
 use mcp_warden_core::config::{NamedQuery, Preset};
 use mcp_warden_core::error::{Result, WardenError};
@@ -50,6 +51,19 @@ pub async fn run(
         .inspect_err(|e| actx.record_refused(&preset.name, "db_query", &summary, e))?;
     let event_id = actx.authorise(preset, "db_query", &summary, false).await?;
 
+    let password = actx
+        .keychain
+        .get(preset.secret.as_deref().unwrap_or(""))?
+        .ok_or_else(|| WardenError::MissingSecret {
+            preset: preset.name.clone(),
+            secret: preset.secret.clone().unwrap_or_default(),
+        })?;
+    // A database can hand the password back — Redis `CONFIG GET
+    // requirepass`, a server error that quotes it — so rows and errors are
+    // scrubbed of it like a `proxy_http` body (invariants 1-2). The forms
+    // live for this call only and are zeroized on drop.
+    let forms = CredentialForms::raw(&password);
+
     // Connecting, authenticating and the query, all under one timeout: a
     // database that stops answering cannot hold the call open.
     let timeout = std::time::Duration::from_secs(
@@ -60,21 +74,36 @@ pub async fn run(
     let query = async {
         match preset.preset_type {
             mcp_warden_core::config::PresetType::Postgres => {
-                postgres::run(actx, preset, &nq, &params).await
+                postgres::run(preset, &password, &nq, &params).await
             }
             mcp_warden_core::config::PresetType::Mysql => {
-                mysql::run(actx, preset, &nq, &params).await
+                mysql::run(preset, &password, &nq, &params).await
             }
             mcp_warden_core::config::PresetType::Redis => {
-                redis::run(actx, preset, &nq, &params).await
+                redis::run(preset, &password, &nq, &params).await
             }
             _ => Err(WardenError::Validation("not a db preset".into())),
         }
     };
     let result = tokio::time::timeout(timeout, query)
         .await
-        .unwrap_or_else(|_| Err(WardenError::Executor("db timeout".into())))
-        .map(withhold_oversized);
+        .unwrap_or_else(|_| Err(WardenError::Executor("db timeout".into())));
+    drop(password);
+    let result = match result {
+        Ok(mut resp) => {
+            let redacted: usize = resp.rows.iter_mut().map(|row| forms.scrub(row)).sum();
+            if redacted > 0 {
+                tracing::warn!(
+                    "preset '{}': the database returned the password; redacted {redacted} \
+                     occurrence(s) before returning the rows to the agent",
+                    preset.name
+                );
+            }
+            Ok(withhold_oversized(resp))
+        }
+        Err(e) => Err(forms.scrub_error(e)),
+    };
+    drop(forms);
 
     match &result {
         Ok(_) => {

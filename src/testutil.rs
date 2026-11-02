@@ -1,8 +1,10 @@
 //! Shared test doubles: a keychain and an approval transport that count how
 //! often they are used, a TCP listener that counts connections, the
-//! hostile-input corpus reader. Test-only.
+//! hostile-input corpus reader, fake upstreams, and checks that a text
+//! holds no form of a secret. Test-only.
 
 use async_trait::async_trait;
+use base64::Engine;
 use mcp_warden_core::approval::{ApprovalDecision, ApprovalRequest, ApprovalTransport};
 use mcp_warden_core::error::Result;
 use mcp_warden_core::keychain::KeychainStore;
@@ -173,6 +175,60 @@ async fn read_resp_command(
     Some(args)
 }
 
+/// A minimal PostgreSQL server on 127.0.0.1 that asks for the password in
+/// clear text and then rejects it with an error that quotes it back — an
+/// upstream that reflects the credential in its error message.
+pub struct FakePostgres {
+    pub port: u16,
+}
+
+impl FakePostgres {
+    pub async fn start() -> Self {
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        tokio::spawn(async move {
+            while let Ok((mut s, _)) = listener.accept().await {
+                tokio::spawn(async move {
+                    // Startup message: length, then the rest.
+                    let len = s.read_u32().await.ok()? as usize;
+                    let mut rest = vec![0; len.checked_sub(4)?];
+                    s.read_exact(&mut rest).await.ok()?;
+                    // AuthenticationCleartextPassword.
+                    s.write_all(&[b'R', 0, 0, 0, 8, 0, 0, 0, 3]).await.ok()?;
+                    // PasswordMessage: 'p', length, password NUL.
+                    if s.read_u8().await.ok()? != b'p' {
+                        return None;
+                    }
+                    let len = s.read_u32().await.ok()? as usize;
+                    let mut pw = vec![0; len.checked_sub(4)?];
+                    s.read_exact(&mut pw).await.ok()?;
+                    let pw =
+                        String::from_utf8_lossy(&pw[..pw.len().saturating_sub(1)]).into_owned();
+                    let mut fields = Vec::new();
+                    for (code, value) in [
+                        (b'S', "FATAL".to_string()),
+                        (b'V', "FATAL".to_string()),
+                        (b'C', "28P01".to_string()),
+                        (b'M', format!("password authentication failed: \"{pw}\"")),
+                    ] {
+                        fields.push(code);
+                        fields.extend_from_slice(value.as_bytes());
+                        fields.push(0);
+                    }
+                    fields.push(0);
+                    let mut msg = vec![b'E'];
+                    msg.extend_from_slice(&(fields.len() as u32 + 4).to_be_bytes());
+                    msg.extend_from_slice(&fields);
+                    s.write_all(&msg).await.ok()?;
+                    Some(())
+                });
+            }
+        });
+        Self { port }
+    }
+}
+
 /// `tests/corpus/*.txt` entries as `(line, input, note)`. The format is
 /// described at the top of each file.
 pub fn corpus(text: &str) -> Vec<(usize, String, String)> {
@@ -230,4 +286,87 @@ pub fn unescape(raw: &str, line: usize) -> String {
         }
     }
     out
+}
+/// The forms a leaked secret could take in text: raw, upper and lower case,
+/// base64 (standard and URL-safe, padded or not), hex and percent-encoded.
+pub fn secret_forms(secret: &str) -> Vec<String> {
+    use base64::engine::general_purpose::{STANDARD, STANDARD_NO_PAD, URL_SAFE, URL_SAFE_NO_PAD};
+    let bytes = secret.as_bytes();
+    let mut forms = vec![
+        secret.to_string(),
+        secret.to_ascii_lowercase(),
+        secret.to_ascii_uppercase(),
+        STANDARD.encode(bytes),
+        STANDARD_NO_PAD.encode(bytes),
+        URL_SAFE.encode(bytes),
+        URL_SAFE_NO_PAD.encode(bytes),
+        bytes.iter().map(|b| format!("{b:02x}")).collect(),
+        bytes.iter().map(|b| format!("{b:02X}")).collect(),
+        percent_encoding::utf8_percent_encode(secret, percent_encoding::NON_ALPHANUMERIC)
+            .to_string(),
+    ];
+    forms.sort();
+    forms.dedup();
+    forms
+}
+
+/// Panic if `text` holds any form of `secret`; `what` names where it came from.
+pub fn assert_no_secret(what: &str, text: &str, secret: &str) {
+    for form in secret_forms(secret) {
+        assert!(
+            !text.contains(&form),
+            "{what} holds a form of the secret ({form:?}):\n{text}"
+        );
+    }
+}
+
+/// Every text column of every row of the audit database, one row per line.
+pub fn audit_text(db: &std::path::Path) -> String {
+    let conn = rusqlite::Connection::open(db).unwrap();
+    let mut stmt = conn.prepare("SELECT * FROM events").unwrap();
+    let columns = stmt.column_count();
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((0..columns)
+                .map(|i| match row.get_ref(i).unwrap() {
+                    rusqlite::types::ValueRef::Text(t) => String::from_utf8_lossy(t).into_owned(),
+                    other => format!("{other:?}"),
+                })
+                .collect::<Vec<_>>()
+                .join(" | "))
+        })
+        .unwrap();
+    rows.map(|r| r.unwrap()).collect::<Vec<_>>().join("\n")
+}
+
+/// Collect what `tracing` writes while the returned guard lives, to check
+/// what would reach stderr.
+pub fn capture_logs() -> (CapturedLogs, tracing::subscriber::DefaultGuard) {
+    let logs = CapturedLogs::default();
+    let writer = logs.clone();
+    let subscriber = tracing_subscriber::fmt()
+        .with_writer(move || writer.clone())
+        .with_max_level(tracing::Level::TRACE)
+        .with_ansi(false)
+        .finish();
+    (logs, tracing::subscriber::set_default(subscriber))
+}
+
+#[derive(Clone, Default)]
+pub struct CapturedLogs(Arc<Mutex<Vec<u8>>>);
+
+impl CapturedLogs {
+    pub fn text(&self) -> String {
+        String::from_utf8_lossy(&self.0.lock().unwrap()).into_owned()
+    }
+}
+
+impl std::io::Write for CapturedLogs {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(buf);
+        Ok(buf.len())
+    }
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
 }

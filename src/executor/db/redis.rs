@@ -1,22 +1,15 @@
-use crate::executor::ActionExecutor;
 use crate::executor::db::{DbQueryResponse, is_local_host};
 use mcp_warden_core::config::{NamedQuery, Preset};
 use mcp_warden_core::error::{Result, WardenError};
+use mcp_warden_core::secret::Secret;
 use serde_json::Value;
 
 pub async fn run(
-    actx: &ActionExecutor,
     preset: &Preset,
+    password: &Secret,
     nq: &NamedQuery,
     params: &[Value],
 ) -> Result<DbQueryResponse> {
-    let password = actx
-        .keychain
-        .get(preset.secret.as_deref().unwrap_or(""))?
-        .ok_or_else(|| WardenError::MissingSecret {
-            preset: preset.name.clone(),
-            secret: preset.secret.clone().unwrap_or_default(),
-        })?;
     let host = preset.host.as_deref().unwrap_or("").to_string();
     let port = preset.port.unwrap_or(6379);
 
@@ -33,7 +26,6 @@ pub async fn run(
             ..Default::default()
         },
     };
-    drop(password);
 
     let client =
         redis::Client::open(info).map_err(|e| WardenError::Executor(format!("redis open: {e}")))?;
