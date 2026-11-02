@@ -50,6 +50,7 @@ pub async fn run(
     Ok(DbQueryResponse {
         rows_affected: json_rows.len() as u64,
         rows: json_rows,
+        notice: None,
     })
 }
 

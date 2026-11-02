@@ -125,7 +125,8 @@ pub struct Preset {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
     /// HTTP: largest response body `proxy_http` hands the agent, in bytes.
-    /// A larger body is read no further and not returned. `None`: no limit.
+    /// A larger body is read no further and not returned. It can only lower
+    /// mcp-warden's own ceiling (10 MiB of decoded body); `None` uses that.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_response_bytes: Option<u64>,
     /// HTTP: the only JSON fields `proxy_http` returns — `id`,

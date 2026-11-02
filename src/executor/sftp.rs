@@ -172,16 +172,27 @@ pub async fn run(
         .authorise(preset, "sftp_transfer", &summary, false)
         .await?;
 
-    let bytes = transfer_inner(actx, preset, &direction, &remote, &local)
-        .await
-        .inspect_err(|e| {
-            let _ = actx.audit.record_outcome(
-                event_id,
-                AuditOutcome::Err {
-                    message: e.to_string(),
-                },
-            );
-        })?;
+    // The timeout covers the whole transfer, connecting and authenticating
+    // included, so a host that stalls at any step cannot hold the call.
+    let timeout = std::time::Duration::from_secs(
+        preset
+            .timeout_seconds
+            .unwrap_or(super::limits::DEFAULT_SFTP_TIMEOUT_SECS),
+    );
+    let bytes = tokio::time::timeout(
+        timeout,
+        transfer_inner(actx, preset, &direction, &remote, &local),
+    )
+    .await
+    .unwrap_or_else(|_| Err(WardenError::Executor("sftp timeout".into())))
+    .inspect_err(|e| {
+        let _ = actx.audit.record_outcome(
+            event_id,
+            AuditOutcome::Err {
+                message: e.to_string(),
+            },
+        );
+    })?;
 
     actx.audit
         .record_outcome(event_id, AuditOutcome::Ok { status: 200 })?;
@@ -321,6 +332,45 @@ pub(crate) mod tests {
             max_response_bytes: None,
             response_fields: vec![],
         }
+    }
+
+    /// The whole transfer — connecting and authenticating included — is
+    /// bounded by the preset's timeout, so a host that stalls ends the call.
+    #[tokio::test]
+    async fn a_host_that_stalls_after_authentication_times_out() {
+        use crate::executor::test_ssh::{Behaviour, TestSshServer};
+        use crate::testutil::{CountingApproval, CountingKeychain};
+        let server = TestSshServer::start(Behaviour::HangAfterAuth).await;
+        let dir = tempfile::tempdir().unwrap();
+        let exec = ActionExecutor::new(
+            CountingKeychain::with(&[("k", &server.client_key)]),
+            CountingApproval::new(mcp_warden_core::approval::ApprovalDecision::Approved),
+            None,
+            Arc::new(
+                mcp_warden_core::audit::sqlite_sink::LocalSqlite::open(
+                    &dir.path().join("audit.db"),
+                )
+                .unwrap(),
+            ),
+        );
+        let mut preset = p();
+        preset.host = Some("127.0.0.1".into());
+        preset.port = Some(server.port);
+        preset.known_hosts = Some(server.known_hosts.display().to_string());
+        preset.timeout_seconds = Some(1);
+        let local = allowed_local("stall.log");
+        let call = run(
+            &exec,
+            &preset,
+            SftpDirection::Get,
+            "/srv/app/x".into(),
+            local,
+        );
+        let res = tokio::time::timeout(std::time::Duration::from_secs(10), call)
+            .await
+            .expect("sftp_transfer hung past its own timeout");
+        let err = res.expect_err("must fail").to_string();
+        assert!(err.contains("timeout"), "{err}");
     }
 
     #[test]

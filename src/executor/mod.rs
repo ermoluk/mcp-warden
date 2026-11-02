@@ -18,6 +18,8 @@ pub mod response;
 pub mod sftp;
 pub mod ssh;
 pub mod summary;
+#[cfg(test)]
+pub(crate) mod test_ssh;
 
 /// Longest agent-supplied text (preset name, summary, error) kept in a
 /// `refused` audit event. Refusals are recorded without a human in the

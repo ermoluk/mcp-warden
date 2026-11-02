@@ -7,25 +7,34 @@ use serde_json::{Map, Value};
 /// The body, parsed as JSON (`null` if it isn't JSON), and a note for the
 /// agent when mcp-warden withheld or trimmed it.
 pub(crate) async fn read_body(resp: reqwest::Response, preset: &Preset) -> (Value, Option<String>) {
-    match read_limited(resp, preset.max_response_bytes).await {
+    let ceiling = super::limits::MAX_RESPONSE_BYTES as u64;
+    let max = preset
+        .max_response_bytes
+        .map_or(ceiling, |m| m.min(ceiling));
+    match read_limited(resp, max).await {
         Some(bytes) => (serde_json::from_slice(&bytes).unwrap_or(Value::Null), None),
         None => (
             Value::Null,
-            Some(format!(
-                "the response body is larger than this preset's max_response_bytes ({} bytes) \
-                 and was not returned",
-                preset.max_response_bytes.unwrap_or_default()
-            )),
+            Some(match preset.max_response_bytes {
+                Some(m) if m < ceiling => format!(
+                    "the response body is larger than this preset's max_response_bytes \
+                     ({m} bytes) and was not returned"
+                ),
+                _ => format!(
+                    "the response body is larger than mcp-warden's limit of {ceiling} bytes \
+                     and was not returned"
+                ),
+            }),
         ),
     }
 }
 
-/// Read the body, but no more than `max` bytes. `None`: it was larger. A
-/// read error counts as an empty (non-JSON) body, as before limits existed.
-async fn read_limited(mut resp: reqwest::Response, max: Option<u64>) -> Option<Vec<u8>> {
-    let Some(max) = max else {
-        return Some(resp.bytes().await.map(|b| b.to_vec()).unwrap_or_default());
-    };
+/// Read the decoded body, but no more than `max` bytes. `None`: it was
+/// larger. A read error counts as an empty (non-JSON) body, as before limits
+/// existed.
+async fn read_limited(mut resp: reqwest::Response, max: u64) -> Option<Vec<u8>> {
+    // Content-Length is the size on the wire; a compressed body can still
+    // decode to more, which the loop below catches.
     if resp.content_length().is_some_and(|n| n > max) {
         return None;
     }

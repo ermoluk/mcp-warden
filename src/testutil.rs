@@ -103,6 +103,76 @@ impl CountingListener {
     }
 }
 
+/// A TCP listener on 127.0.0.1 that accepts connections and never answers
+/// or closes them: an upstream that hangs.
+pub struct SilentListener {
+    pub port: u16,
+}
+
+impl SilentListener {
+    pub fn start() -> Self {
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let port = listener.local_addr().unwrap().port();
+        std::thread::spawn(move || {
+            let mut held = Vec::new();
+            for stream in listener.incoming() {
+                held.push(stream);
+            }
+        });
+        Self { port }
+    }
+}
+
+/// A minimal Redis server on 127.0.0.1: it reads RESP commands and answers
+/// each with what `reply` returns for its arguments.
+pub struct FakeRedis {
+    pub port: u16,
+}
+
+impl FakeRedis {
+    pub async fn start(reply: impl Fn(&[String]) -> Vec<u8> + Send + Sync + 'static) -> Self {
+        use tokio::io::AsyncWriteExt;
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let reply = Arc::new(reply);
+        tokio::spawn(async move {
+            while let Ok((stream, _)) = listener.accept().await {
+                let reply = reply.clone();
+                tokio::spawn(async move {
+                    let mut stream = tokio::io::BufReader::new(stream);
+                    while let Some(args) = read_resp_command(&mut stream).await {
+                        if stream.get_mut().write_all(&reply(&args)).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+            }
+        });
+        Self { port }
+    }
+}
+
+async fn read_resp_command(
+    r: &mut tokio::io::BufReader<tokio::net::TcpStream>,
+) -> Option<Vec<String>> {
+    use tokio::io::{AsyncBufReadExt, AsyncReadExt};
+    let mut line = String::new();
+    if r.read_line(&mut line).await.ok()? == 0 {
+        return None;
+    }
+    let n: usize = line.trim().strip_prefix('*')?.parse().ok()?;
+    let mut args = Vec::with_capacity(n);
+    for _ in 0..n {
+        line.clear();
+        r.read_line(&mut line).await.ok()?;
+        let len: usize = line.trim().strip_prefix('$')?.parse().ok()?;
+        let mut buf = vec![0; len + 2];
+        r.read_exact(&mut buf).await.ok()?;
+        args.push(String::from_utf8_lossy(&buf[..len]).into_owned());
+    }
+    Some(args)
+}
+
 /// `tests/corpus/*.txt` entries as `(line, input, note)`. The format is
 /// described at the top of each file.
 pub fn corpus(text: &str) -> Vec<(usize, String, String)> {

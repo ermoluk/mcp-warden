@@ -73,6 +73,7 @@ pub async fn run(
     Ok(DbQueryResponse {
         rows: vec![json],
         rows_affected: 1,
+        notice: None,
     })
 }
 

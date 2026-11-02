@@ -73,6 +73,28 @@ Up to v0.5.2 nothing capped what an agent could send: a megabyte-long path or co
 
 A refused call returns an error naming the field and the limit, never the input, and is audited as `refused` like any other validation failure. Its agent-supplied text is still capped at 1024 characters in the audit log (T4).
 
+### T10. Oversized or stalling upstream responses
+
+The upstream can be hostile too — or simply broken — and up to v0.5.3 several of its answers had no bound:
+
+- **HTTP bodies.** Without `max_response_bytes` the body was read in full, and reqwest decompresses gzip on the way: an 11 KiB response decoded to 11 MiB of memory, all of it handed to the agent's context.
+- **SSH output.** `ssh_exec` kept stdout and stderr for as long as the host wrote them; only the command timeout ended the call.
+- **SSH and SFTP set-up.** The timeout covered only reading the command's output, so a host that accepted the key and then never opened a channel held the call forever. `sftp_transfer` had no timeout at all.
+- **Databases.** `db_query` had no timeout, and its rows had no size limit.
+
+Since the release after v0.5.3 (constants in `src/executor/limits.rs`):
+
+| Upstream | Bound |
+|---|---|
+| `proxy_http` body | 10 MiB decoded, whatever the preset says; `max_response_bytes` can only lower it. A larger body is not returned: `body: null` and a `notice`. |
+| `ssh_exec` output | 1 MiB of stdout and 1 MiB of stderr; past that the channel is closed and `notice` says the output was cut. |
+| `ssh_exec` call | `timeout_seconds` (default 120 s) for the whole call: connecting, key exchange, authentication and the command. |
+| `sftp_transfer` call | `timeout_seconds` (default 600 s) for the whole transfer. |
+| `db_query` call | `timeout_seconds` (default 30 s) for connecting, authenticating and the query. |
+| `db_query` rows | 10 MiB serialised; larger results are not returned: no rows and a `notice`. |
+
+Deeply nested JSON never reaches the recursive scrub and field selection: serde_json refuses more than 128 levels, and such a body comes back as `null`. Known limit: the database drivers read the whole result into memory before its size is checked, so a hostile database can still make the process allocate a large result once; HTTP bodies and SSH output are cut while they are read.
+
 ### T9. DNS rebinding against `mcp-warden web`
 
 The web UI binds 127.0.0.1 only and has no login, so any local process can read it — and, up to v0.5.3, so could any web page the user opened. A hostile page re-points its own domain at 127.0.0.1 (DNS rebinding); the browser then treats `http://evil.example:7077/audit` as same-origin and lets the page read the presets (hosts, paths, secret names) and the audit log. Since the release after v0.5.3 the UI answers only requests whose `Host` header names it — `127.0.0.1:<port>`, `localhost:<port>` or `[::1]:<port>` — and refuses the rest with 421 before any handler runs; a rebinding page cannot make the browser send another `Host`. Requests other than GET / HEAD (none exist yet) must in addition carry an `Origin` naming the UI and no cross-site `Sec-Fetch-Site`, so a form on another site cannot post to future state-changing routes. Tested in `src/web/server.rs`.

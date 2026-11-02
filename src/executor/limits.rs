@@ -25,6 +25,22 @@ pub const MAX_DB_PARAMS: usize = 32;
 /// serialised as JSON.
 pub const MAX_DB_PARAM_BYTES: usize = 16 * 1024;
 
+/// The largest decoded `proxy_http` response body read, in bytes, whatever
+/// the preset says: `max_response_bytes` can only lower it. Bodies arrive
+/// decompressed (gzip), so a small compressed response can be huge.
+pub const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
+
+/// `ssh_exec` stdout and stderr, each, in bytes. Output beyond it is not
+/// read: the call ends and says so.
+pub const MAX_SSH_OUTPUT_BYTES: usize = 1024 * 1024;
+
+/// Seconds an `sftp_transfer` may take in all — connecting, authenticating
+/// and copying — when the preset sets no `timeout_seconds`.
+pub const DEFAULT_SFTP_TIMEOUT_SECS: u64 = 600;
+/// Seconds a `db_query` may take in all when the preset sets no
+/// `timeout_seconds`.
+pub const DEFAULT_DB_TIMEOUT_SECS: u64 = 30;
+
 /// Refuse a request with any field over its limit. The error names the field
 /// and the limit, never the input itself.
 pub fn check(req: &Request) -> Result<()> {
@@ -92,7 +108,7 @@ fn at_most(what: &str, n: usize, max: usize, unit: &str) -> Result<()> {
 
 /// Whether `value` serialises to more than `max` bytes. Stops writing as
 /// soon as it does, so a huge body is never serialised in full.
-fn json_longer_than(value: &Value, max: usize) -> bool {
+pub(crate) fn json_longer_than(value: &Value, max: usize) -> bool {
     struct Budget(usize);
     impl std::io::Write for Budget {
         fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {

@@ -870,6 +870,67 @@ mod tests {
         execute(&exec, &preset, req).await.unwrap()
     }
 
+    /// Without `max_response_bytes` the body was read in full — and reqwest
+    /// decompresses gzip on the way, so 11 KiB on the wire became 11 MiB in
+    /// memory and in the agent's context. A fixed ceiling now applies.
+    #[tokio::test]
+    async fn a_gzip_bomb_is_withheld_without_max_response_bytes() {
+        use std::io::Write;
+        let huge = format!(
+            "\"{}\"",
+            "a".repeat(crate::executor::limits::MAX_RESPONSE_BYTES + 1)
+        );
+        let mut gz = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::best());
+        gz.write_all(huge.as_bytes()).unwrap();
+        let compressed = gz.finish().unwrap();
+        assert!(compressed.len() < 64 * 1024, "{}", compressed.len());
+        let server = MockServer::start().await;
+        Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(
+                ResponseTemplate::new(200)
+                    .insert_header("content-encoding", "gzip")
+                    .insert_header("content-type", "application/json")
+                    .set_body_bytes(compressed),
+            )
+            .mount(&server)
+            .await;
+        let resp = call_preset(&server, "/bomb", |p| p.max_response_bytes = None).await;
+        assert_eq!(resp.status, 200);
+        assert!(
+            resp.body.is_null(),
+            "body returned: {} bytes",
+            resp.body.to_string().len()
+        );
+        let notice = resp.notice.expect("a notice says why the body is missing");
+        assert!(notice.contains("10485760"), "{notice}");
+
+        // A preset can lower the ceiling but not raise it.
+        let resp = call_preset(&server, "/bomb", |p| p.max_response_bytes = Some(u64::MAX)).await;
+        assert!(
+            resp.body.is_null(),
+            "body returned: {} bytes",
+            resp.body.to_string().len()
+        );
+    }
+
+    /// serde_json stops at 128 levels of nesting, so a deeply nested body
+    /// never reaches the recursive scrub and field selection.
+    #[tokio::test]
+    async fn deeply_nested_json_is_not_parsed() {
+        let server = MockServer::start().await;
+        let deep = format!("{}{}", "[".repeat(100_000), "]".repeat(100_000));
+        Mock::given(wiremock::matchers::method("GET"))
+            .respond_with(ResponseTemplate::new(200).set_body_string(deep))
+            .mount(&server)
+            .await;
+        let resp = call_preset(&server, "/deep", |p| {
+            p.response_fields = vec!["[].x".into()];
+        })
+        .await;
+        assert_eq!(resp.status, 200);
+        assert_eq!(resp.body, Value::Null);
+    }
+
     #[tokio::test]
     async fn body_over_max_response_bytes_is_withheld_but_status_returned() {
         let big = json!({ "data": "x".repeat(2_000) });
