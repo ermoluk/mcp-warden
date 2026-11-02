@@ -703,7 +703,9 @@ mod tests {
             "http://[::1]:8080",
             "https://api.example.com",
         ] {
-            cfg(local).validate(&kc).unwrap_or_else(|e| panic!("{local}: {e}"));
+            cfg(local)
+                .validate(&kc)
+                .unwrap_or_else(|e| panic!("{local}: {e}"));
         }
     }
 

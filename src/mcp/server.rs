@@ -22,6 +22,9 @@ use std::sync::Arc;
 pub struct WardenServer {
     pub presets: Arc<dyn PresetSource>,
     pub executor: Arc<ActionExecutor>,
+    /// The only names `get_secret_for_env` may reveal: the secrets of the
+    /// frozen presets and wrapped servers, never the Telegram bot token.
+    revealable: Arc<std::collections::HashSet<String>>,
     /// Populated by the `#[tool_router]` macro; read internally by the
     /// generated `ServerHandler` impl from `#[tool_handler]`.
     #[allow(dead_code)]
@@ -90,11 +93,24 @@ pub struct GetSecretForEnvResponse {
 #[tool_router]
 impl WardenServer {
     pub fn new(presets: Arc<dyn PresetSource>, executor: Arc<ActionExecutor>) -> Self {
+        let revealable = presets
+            .list()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(preset_secret)
+            .collect();
         Self {
             presets,
             executor,
+            revealable: Arc::new(revealable),
             tool_router: Self::tool_router(),
         }
+    }
+
+    /// Set the names `get_secret_for_env` may reveal (see `revealable`).
+    pub fn with_revealable(mut self, names: impl IntoIterator<Item = String>) -> Self {
+        self.revealable = Arc::new(names.into_iter().collect());
+        self
     }
 
     /// List available mcp-warden presets — named, scoped actions you may
@@ -197,8 +213,9 @@ impl WardenServer {
     /// approval, regardless of preset policy. Prefer `proxy_http` — only
     /// use this if a child process you are about to spawn must read the
     /// secret from an environment variable (e.g. `terraform apply` reading
-    /// AWS_SECRET_ACCESS_KEY). The returned value MUST NOT be quoted back
-    /// into your reasoning trace.
+    /// AWS_SECRET_ACCESS_KEY). Only the secret of a configured preset or
+    /// wrapped server can be revealed. The returned value MUST NOT be quoted
+    /// back into your reasoning trace.
     #[tool]
     pub async fn get_secret_for_env(
         &self,
@@ -234,6 +251,34 @@ impl WardenServer {
             .check_lock(&virtual_preset.name, "get_secret_for_env", &summary)
             .await
             .map_err(map_warden_err)?;
+        // Decided before anyone is asked: only the secret of a preset or a
+        // wrapped server, never the approval channel's own token, and no
+        // name long enough to flood the prompt or the log.
+        let refusal = if args.name.len() > crate::executor::limits::MAX_SECRET_NAME_BYTES {
+            Some(format!(
+                "get_secret_for_env name has {} bytes; the limit is {} bytes",
+                args.name.len(),
+                crate::executor::limits::MAX_SECRET_NAME_BYTES
+            ))
+        } else if !self.revealable.contains(&args.name) {
+            Some(
+                "get_secret_for_env reveals only a secret that a preset or a wrapped server \
+                 uses; this name is not one"
+                    .to_string(),
+            )
+        } else {
+            None
+        };
+        if let Some(msg) = refusal {
+            let err = mcp_warden_core::error::WardenError::Validation(msg.clone());
+            self.executor.record_refused(
+                &virtual_preset.name,
+                "get_secret_for_env",
+                &summary,
+                &err,
+            );
+            return Err(McpError::invalid_params(msg, None));
+        }
         self.executor
             .authorise(
                 &virtual_preset,
@@ -335,7 +380,7 @@ impl WardenServer {
 
     /// Run a NAMED QUERY against a database preset (PostgreSQL, MySQL,
     /// or Redis). You supply `query_name` (must match one declared in
-    /// the preset) and `params` (positional). The SQL / command is
+    /// the preset) and `params` (positional). The SQL/command is
     /// FIXED at preset definition time — you cannot send arbitrary SQL.
     /// Returns rows as JSON. Approval prompt fires per the preset's policy.
     /// If the user previously approved a time-boxed window for this
@@ -417,6 +462,17 @@ pub struct DbQueryArgs {
     /// Positional parameters; types must match the named query's `param_types`.
     #[serde(default)]
     pub params: Vec<serde_json::Value>,
+}
+
+/// The keychain entry a preset reads its credential from.
+pub(crate) fn preset_secret(p: &Preset) -> Option<String> {
+    use mcp_warden_core::config::Auth;
+    match &p.auth {
+        Some(
+            Auth::Bearer { secret } | Auth::Header { secret, .. } | Auth::Basic { secret, .. },
+        ) => Some(secret.clone()),
+        None => p.secret.clone(),
+    }
 }
 
 fn map_warden_err(e: mcp_warden_core::error::WardenError) -> McpError {
@@ -680,6 +736,40 @@ mod tests {
         let evil = client_label("x\u{1b}[31m\nspoof", &"9".repeat(100));
         assert!(!evil.contains('\u{1b}') && !evil.contains('\n'), "{evil}");
         assert!(evil.chars().count() <= 64 + 1 + 32);
+    }
+
+    /// The pinned consts are what the agent sees: rmcp builds each tool's
+    /// description from the doc comment on its method, so the two must be
+    /// the same text.
+    #[test]
+    fn pinned_descriptions_are_the_ones_served() {
+        let served: std::collections::HashMap<String, String> = WardenServer::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|t| {
+                (
+                    t.name.to_string(),
+                    t.description.unwrap_or_default().to_string(),
+                )
+            })
+            .collect();
+        let normalise = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+        for (tool, pinned) in [
+            ("list_presets", crate::mcp::tools::LIST_PRESETS_DESCRIPTION),
+            ("proxy_http", crate::mcp::tools::PROXY_HTTP_DESCRIPTION),
+            (
+                "get_secret_for_env",
+                crate::mcp::tools::GET_SECRET_FOR_ENV_DESCRIPTION,
+            ),
+            ("ssh_exec", crate::mcp::tools::SSH_EXEC_DESCRIPTION),
+            (
+                "sftp_transfer",
+                crate::mcp::tools::SFTP_TRANSFER_DESCRIPTION,
+            ),
+            ("db_query", crate::mcp::tools::DB_QUERY_DESCRIPTION),
+        ] {
+            assert_eq!(normalise(&served[tool]), normalise(pinned), "{tool}");
+        }
     }
 
     #[test]

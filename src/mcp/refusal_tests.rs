@@ -159,6 +159,14 @@ impl Harness {
         );
     }
 
+    pub async fn reveal(&self, name: &str) {
+        let res = self
+            .server
+            .get_secret_for_env(Parameters(GetSecretForEnvArgs { name: name.into() }))
+            .await;
+        assert!(res.is_err(), "get_secret_for_env {name:?} was allowed");
+    }
+
     pub async fn db(&self, query_name: &str, params: Vec<Value>) {
         let res = self
             .server
@@ -267,4 +275,41 @@ async fn other_refusals_touch_nothing_either() {
     n += 4;
 
     h.assert_all_refused_untouched(n).await;
+}
+
+/// `get_secret_for_env` reveals only the secret of a preset or a wrapped
+/// server, and decides that before anyone is asked: an unknown, oversized
+/// or crafted name never reaches a prompt, and the Telegram bot token —
+/// the approval channel itself — is never revealed.
+#[tokio::test]
+async fn revealing_anything_but_a_preset_secret_is_refused_unasked() {
+    let mut h = Harness::wide_open().await;
+    let presets = h.server.presets.list().unwrap();
+    h.server = WardenServer::new(
+        Arc::new(FrozenSource::new(presets)),
+        h.server.executor.clone(),
+    )
+    .with_revealable(["web_tok", "server/gh/GITHUB_TOKEN"].map(String::from));
+    let names = [
+        "tg_bot_token".to_string(),
+        "server/gh/OTHER".into(),
+        "pg_pw".into(),
+        "web_tok\u{202E}".into(),
+        "x".repeat(300),
+        String::new(),
+    ];
+    for name in &names {
+        h.reveal(name).await;
+    }
+    h.assert_all_refused_untouched(names.len()).await;
+
+    let ok = h
+        .server
+        .get_secret_for_env(Parameters(GetSecretForEnvArgs {
+            name: "web_tok".into(),
+        }))
+        .await
+        .unwrap();
+    assert_eq!(ok.0.value, SECRETS[0].1);
+    assert_eq!(h.approval.calls(), 1);
 }

@@ -58,7 +58,24 @@ pub async fn cmd(config_dir: &Path) -> Result<()> {
         ActionExecutor::new(keychain, transports.primary, transports.fallback, audit)
             .with_lock(config_dir.join(crate::executor::lock::LOCK_FILE)),
     );
-    let server = WardenServer::new(presets, executor);
+    // `get_secret_for_env` may reveal the secrets of these presets and
+    // wrapped servers, but never the Telegram bot token.
+    let telegram_token = cfg
+        .approval
+        .as_ref()
+        .and_then(|a| a.telegram.as_ref())
+        .map(|t| t.bot_token_secret.clone());
+    let revealable = cfg
+        .preset
+        .iter()
+        .filter_map(crate::mcp::server::preset_secret)
+        .chain(
+            cfg.server
+                .iter()
+                .flat_map(|s| s.env.iter().map(|var| s.secret_name(var))),
+        )
+        .filter(|name| Some(name) != telegram_token.as_ref());
+    let server = WardenServer::new(presets, executor).with_revealable(revealable);
 
     let running = server
         .serve(stdio())

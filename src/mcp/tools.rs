@@ -31,6 +31,7 @@ Reveal the raw secret value bound to a name. ALWAYS prompts for approval, \
 regardless of preset policy. Prefer `proxy_http` — only use this if a \
 child process you are about to spawn must read the secret from an \
 environment variable (e.g. `terraform apply` reading AWS_SECRET_ACCESS_KEY). \
+Only the secret of a configured preset or wrapped server can be revealed. \
 The returned value MUST NOT be quoted back into your reasoning trace.";
 
 pub const SSH_EXEC_DESCRIPTION: &str = "\
@@ -47,7 +48,7 @@ audit log.";
 
 pub const SFTP_TRANSFER_DESCRIPTION: &str = "\
 Transfer a file between the preset's SSH host and the local machine. \
-`direction` must be 'get' (download) or 'put' (upload). The remote path \
+`direction` must be \"get\" (download) or \"put\" (upload). The remote path \
 must match the preset's `sftp_allowed_paths` prefixes; the local path \
 must be under $HOME or /tmp. Always key-based auth, host-key verified. \
 If the user previously approved a time-boxed window for this preset+action, \

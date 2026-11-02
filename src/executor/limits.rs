@@ -25,6 +25,9 @@ pub const MAX_DB_PARAMS: usize = 32;
 /// serialised as JSON.
 pub const MAX_DB_PARAM_BYTES: usize = 16 * 1024;
 
+/// A `get_secret_for_env` name, in bytes. Keychain entry names are short.
+pub const MAX_SECRET_NAME_BYTES: usize = 256;
+
 /// The largest decoded `proxy_http` response body read, in bytes, whatever
 /// the preset says: `max_response_bytes` can only lower it. Bodies arrive
 /// decompressed (gzip), so a small compressed response can be huge.

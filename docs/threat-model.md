@@ -228,6 +228,10 @@ What it does guarantee:
 - **New grants and revokes need a restart.** Presets are frozen at startup (T7), so `preset grant` and `preset revoke` take effect when the server restarts. For an immediate stop, use `mcp-warden lock`.
 - **`get_secret_for_env` is outside the window.** It is not tied to a preset, and it always asks for approval.
 
+### R16. `get_secret_for_env` hands the agent a raw secret
+
+It is the escape hatch for tools that read a secret from their environment, so it always asks for approval and is never covered by an approval window. Up to v0.5.3 it showed a prompt for any name of any length — including the keychain entry of the Telegram bot token, so one careless click handed the agent the out-of-band approval channel itself (with the token it can read and edit the bot's messages). Since the release after v0.5.3 it reveals only a name that a frozen preset or `[[server]]` entry uses, never the Telegram bot token, and refuses anything else — or a name over 256 bytes — before any prompt, audited as `refused`.
+
 ### R15. `scan` and `import` handle plaintext they did not create
 
 **`scan`:**
