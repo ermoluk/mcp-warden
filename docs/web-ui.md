@@ -20,8 +20,7 @@ any other address.
   its own name at 127.0.0.1 and reads the UI as same-origin. Its requests
   still carry `Host: evil.example:<port>`, so every request whose `Host` is
   not `127.0.0.1:<port>`, `localhost:<port>` or `[::1]:<port>` gets `421
-  Misdirected Request` before any handler runs (since the release after
-  0.5.3). Requests other than GET / HEAD — there are none yet — also need an
+  Misdirected Request` before any handler runs (since 0.5.4). Requests other than GET / HEAD — there are none yet — also need an
   `Origin` naming the UI and no cross-site `Sec-Fetch-Site`, or get `403`.
 - **No secrets exposed.** Preset detail pages show keychain entry *names*
   (e.g. `gh_pat`) but never the values. Audit summaries never hold a secret:
