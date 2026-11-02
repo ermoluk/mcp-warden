@@ -175,17 +175,24 @@ Restart Claude Code and run `/mcp-warden:setup`. If you previously added the ser
 
 Other MCP clients: see [`docs/claude-code-setup.md`](docs/claude-code-setup.md) and [`docs/cursor-setup.md`](docs/cursor-setup.md) for manual setup.
 
-## What's new in v0.5.3
+## What's new in v0.5.4
 
-- **Two more allow-list bypasses closed** (reported on r/mcp): `proxy_http` refuses `%uXXXX` and other malformed escapes, which IIS and ASP.NET decode, and paths that Unicode normalisation would change — fullwidth `／`, `．．` and `＼`, sent percent-encoded.
-- **Hard limits on agent input** — path, query and body for `proxy_http`, the `ssh_exec` command, SFTP paths and `db_query` parameters — checked before anything else.
-- **A hostile-input corpus and property tests in CI**, so a past bypass can't come back.
-- **The approval-window button says what it allows** — `Approve for 10 min: every proxy_http call github-read allows runs without asking until 14:32` — and the window ends at exactly that time.
-- **Audit filters:** `mcp-warden audit --decision refused --decision failed`, the same filter in `mcp-warden web`, and `audit --window N` for every call one approval let through.
-- **Install without Rust:** Homebrew, Scoop, Nix, npm (`npx -y @mcp-warden/cli mcp`), `cargo binstall`, install scripts and a Claude Desktop bundle, with winget and AUR to follow; Windows and Linux arm64 binaries.
-- **[Hardening the SSH side](docs/ssh-hardening.md):** a second allow-list on the server with `command=` / `ForceCommand`.
+A security release: the result of a full audit of 0.5.3. Upgrade.
 
-Behaviour changes and the full list: [CHANGELOG.md](CHANGELOG.md).
+- **`auto` holds only in the form you confirmed.** An agent that can write files could rewrite `config.toml` (or point `MCP_WARDEN_CONFIG_DIR` at its own) so that the next session used a secret without asking. Now an `auto` preset runs without a prompt only as a human confirmed it in the approval prompt, `mcp-warden run` asks before a wrapped server's first launch and after any edit to it, and every prompt names where the request goes (`GET https://api.github.com/user/repos`).
+- **Method override refused:** `POST /x?_method=DELETE` (and `_method` in a JSON body) no longer gets past `allowed_methods` on Laravel, Symfony and the like.
+- **Telegram stays the only approver when configured;** `get_secret_for_env` reveals only a preset's or wrapped server's secret, never the bot token.
+- **SFTP keeps away from credentials and startup files** (`~/.ssh`, `~/.aws`, shell rc files, agent configs) and from hard links; `allowed_local_paths` narrows it further.
+- **Bounded upstreams:** response, output and result size limits and whole-call timeouts for HTTP, SSH, SFTP and databases; the credential scrub also finds base64, hex and re-cased echoes, and covers `db_query` rows.
+- **Plus:** DNS-rebinding protection for `mcp-warden web`, bidi and invisible characters shown as escapes in prompts, `http://` only to loopback, a kill switch that latches within a second, dependency advisories fixed, and CI checks with `cargo deny` / `cargo audit`.
+
+**After upgrading:**
+
+1. Run `mcp-warden preset confirm` once. Until you do, every `auto` preset asks before each call.
+2. Approve each wrapped server (`mcp-warden run`) the first time it starts.
+3. The server now refuses to start with an `http://` `base_url` to a host other than localhost, with a config dir other users can write to, or with two presets of the same name. `mcp-warden doctor` names what to fix.
+
+Every change, with the behaviour changes marked: [CHANGELOG.md](CHANGELOG.md). Earlier releases are there too.
 
 ## How it compares
 
