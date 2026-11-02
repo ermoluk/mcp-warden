@@ -685,6 +685,89 @@ mod tests {
                 check_accepted(&path)?;
             }
         }
+
+        /// End to end: whatever a preset allows reaches the upstream as it
+        /// was checked — the raw path inside `base_url`'s path, its decoded
+        /// form matching the allow-list, and exactly the query pairs given.
+        #[test]
+        fn an_allowed_request_reaches_the_upstream_as_checked() {
+            use crate::approval::always_deny::AlwaysDeny;
+            use mcp_warden_core::audit::sqlite_sink::LocalSqlite;
+            use mcp_warden_core::keychain::KeychainStore;
+            use mcp_warden_core::keychain::memory::InMemoryKeychain;
+            use std::collections::BTreeMap;
+            use std::sync::Arc;
+
+            let rt = tokio::runtime::Runtime::new().unwrap();
+            let server = rt.block_on(async {
+                let server = MockServer::start().await;
+                wiremock::Mock::given(wiremock::matchers::any())
+                    .respond_with(
+                        wiremock::ResponseTemplate::new(200).set_body_json(serde_json::json!({})),
+                    )
+                    .mount(&server)
+                    .await;
+                server
+            });
+            let keychain = InMemoryKeychain::new();
+            keychain.set("k", Secret::new("tok".into())).unwrap();
+            let dir = tempfile::tempdir().unwrap();
+            let exec = ActionExecutor::new(
+                Arc::new(keychain),
+                Arc::new(AlwaysDeny),
+                None,
+                Arc::new(LocalSqlite::open(&dir.path().join("audit.db")).unwrap()),
+            );
+            let pattern = "/[a-zA-Z0-9_~ +%/\\-]*|/[^/]+/[^/]+";
+            let mut preset = p();
+            preset.base_url = Some(format!("{}/v1", server.uri()));
+            preset.auth = Some(Auth::Bearer { secret: "k".into() });
+            preset.allowed_paths = vec![pattern.into()];
+            let allow = mcp_warden_core::config::anchored_regex(pattern).unwrap();
+            let query_part = prop::collection::btree_map("[a-z_.\\[ -]{1,6}", "[ -~é]{0,8}", 0..4);
+            let mut runner =
+                proptest::test_runner::TestRunner::new(ProptestConfig::with_cases(256));
+            let sent = std::sync::atomic::AtomicUsize::new(0);
+            runner
+                .run(
+                    &(prop_oneof![hostile_path(), plausible_path()], query_part),
+                    |(path, query): (String, BTreeMap<String, String>)| {
+                        let before = rt
+                            .block_on(server.received_requests())
+                            .unwrap_or_default()
+                            .len();
+                        let req = HttpRequest {
+                            preset_name: preset.name.clone(),
+                            path: path.clone(),
+                            method: "GET".into(),
+                            body: None,
+                            query: Some(query.clone()),
+                        };
+                        let allowed = rt.block_on(execute(&exec, &preset, req)).is_ok();
+                        let got = rt.block_on(server.received_requests()).unwrap_or_default();
+                        if !allowed {
+                            prop_assert_eq!(
+                                got.len(),
+                                before,
+                                "a refused request was sent: {:?}",
+                                path
+                            );
+                            return Ok(());
+                        }
+                        sent.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let url = &got.last().unwrap().url;
+                        prop_assert_eq!(url.path(), format!("/v1{path}"));
+                        prop_assert!(allow.is_match(&decode(&path)), "{:?}", path);
+                        let pairs: BTreeMap<String, String> =
+                            url.query_pairs().into_owned().collect();
+                        prop_assert_eq!(pairs, query);
+                        Ok(())
+                    },
+                )
+                .unwrap();
+            let sent = sent.into_inner();
+            assert!(sent > 20, "only {sent} generated requests were allowed");
+        }
     }
 
     #[test]
