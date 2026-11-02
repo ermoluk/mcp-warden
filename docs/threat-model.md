@@ -187,7 +187,7 @@ A deny-list cannot be complete: a preset that transfers files should set `allowe
 
 ### R7. DB named-query allow-list trust depends on the preset author
 
-`db_query` rejects agent-supplied SQL — only the preset's declared queries are runnable. But a careless preset can declare destructive queries (`DELETE FROM users WHERE id = $1`) that the agent can drive with arbitrary `$1`. The allow-list moves the trust boundary from "no SQL" to "only this set of SQL"; preset authors must treat each named query as a public API.
+`db_query` rejects agent-supplied SQL — only the preset's declared queries are runnable. But a careless preset can declare destructive queries (`DELETE FROM users WHERE id = $1`) that the agent can drive with arbitrary `$1`. The allow-list moves the trust boundary from "no SQL" to "only this set of SQL"; preset authors must treat each named query as a public API. Checked by reading the drivers rather than with a hostile server: parameters are bound, never spliced into the text — PostgreSQL and MySQL use prepared statements, which hold one statement, and Redis sends each parameter as its own RESP argument; mysql_async 0.34 answers a server's `LOCAL INFILE` request with an error when no handler is set, and mcp-warden sets none, so a hostile MySQL server cannot read local files. Since v0.5.4 `mcp-warden doctor` warns about named Redis queries whose command can run code, rewrite the server's configuration or reach every key (`EVAL`, `SCRIPT`, `FUNCTION`, `CONFIG`, `MODULE`, `DEBUG`, `ACL`, `FLUSHALL`, `KEYS`, `MIGRATE`, `REPLICAOF`, …).
 
 ### R8. Audit log integrity is policy, not crypto
 

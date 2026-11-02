@@ -93,6 +93,9 @@ pub async fn run(args: DoctorArgs, config_dir: &Path, store: Arc<dyn KeychainSto
                 for w in cfg.preset.iter().flat_map(pattern_warnings) {
                     println!("warning:    {w}");
                 }
+                for w in cfg.preset.iter().flat_map(query_warnings) {
+                    println!("warning:    {w}");
+                }
                 valid.then_some(cfg)
             }
             Err(e) => {
@@ -497,6 +500,56 @@ fn print_probe_table(results: &[ProbeResult]) {
     }
 }
 
+/// Named Redis queries whose command can run code on the server, rewrite
+/// its configuration, wipe or move data, or read it back wholesale — the
+/// agent picks the arguments, so such a query is close to raw access.
+/// mcp-warden runs only the named queries; this only points them out.
+pub(crate) fn query_warnings(p: &Preset) -> Vec<String> {
+    const RISKY: &[&str] = &[
+        "EVAL",
+        "EVALSHA",
+        "EVAL_RO",
+        "EVALSHA_RO",
+        "FCALL",
+        "FCALL_RO",
+        "FUNCTION",
+        "SCRIPT",
+        "CONFIG",
+        "MODULE",
+        "DEBUG",
+        "ACL",
+        "FLUSHALL",
+        "FLUSHDB",
+        "SHUTDOWN",
+        "REPLICAOF",
+        "SLAVEOF",
+        "MIGRATE",
+        "RESTORE",
+        "KEYS",
+        "SAVE",
+        "BGSAVE",
+        "BGREWRITEAOF",
+        "CLIENT",
+    ];
+    if p.preset_type != PresetType::Redis {
+        return Vec::new();
+    }
+    p.queries
+        .iter()
+        .filter_map(|q| {
+            let command = q.template.split_whitespace().next()?.to_ascii_uppercase();
+            RISKY.contains(&command.as_str()).then(|| {
+                format!(
+                    "preset '{}': named query '{}' runs `{command}`, which can run code, change \
+                     the server's configuration or reach every key; the agent chooses its \
+                     arguments",
+                    p.name, q.name
+                )
+            })
+        })
+        .collect()
+}
+
 /// `allowed_commands` patterns that let the agent turn an argument into an
 /// option of its own: wherever a pattern takes an argument after a space, a
 /// class that can match `-` there (`[a-z0-9_-]+`, `\S+`, `.*`, `[^ ]+`)
@@ -692,6 +745,38 @@ mod tests {
         .unwrap();
         p.allowed_commands = patterns.iter().map(|s| s.to_string()).collect();
         p
+    }
+
+    #[test]
+    fn risky_redis_queries_are_flagged() {
+        let mut p: Preset = toml::from_str(
+            r#"
+            name = "cache"
+            type = "redis"
+            description = "x"
+            host = "localhost"
+            secret = "k"
+            approval = "prompt"
+            [[queries]]
+            name = "get"
+            template = "GET"
+            [[queries]]
+            name = "run"
+            template = "eval"
+            [[queries]]
+            name = "pw"
+            template = "CONFIG"
+            "#,
+        )
+        .unwrap();
+        let w = query_warnings(&p);
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(
+            w[0].contains("'run' runs `EVAL`") && w[1].contains("`CONFIG`"),
+            "{w:?}"
+        );
+        p.preset_type = PresetType::Postgres;
+        assert!(query_warnings(&p).is_empty());
     }
 
     #[test]
