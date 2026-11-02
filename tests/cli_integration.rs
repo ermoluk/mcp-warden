@@ -670,11 +670,37 @@ fn run_execs_the_server_with_stdio_passed_through() {
     .unwrap();
     cmd()
         .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .env("MCP_WARDEN_APPROVAL_TRANSPORT", "test-approve")
         .args(["run", "echo"])
         .write_stdin("ping\n")
         .assert()
         .success()
         .stdout("got:ping\n");
+}
+
+/// The first launch of a wrapped server asks a human; denied, nothing runs.
+#[cfg(unix)]
+#[test]
+fn run_without_confirmation_starts_nothing() {
+    let tmp = tempfile::tempdir().unwrap();
+    let marker = tmp.path().join("ran");
+    fs::write(
+        tmp.path().join("config.toml"),
+        format!(
+            "[[server]]\nname = \"echo\"\ncommand = \"/usr/bin/touch\"\nargs = [\"{}\"]\n",
+            marker.display()
+        ),
+    )
+    .unwrap();
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .env("MCP_WARDEN_APPROVAL_TRANSPORT", "test-deny")
+        .args(["run", "echo"])
+        .assert()
+        .failure()
+        .stdout("")
+        .stderr(predicate::str::contains("needs confirmation"));
+    assert!(!marker.exists());
 }
 
 #[test]
@@ -688,6 +714,7 @@ fn run_refuses_missing_secret_unknown_server_and_lock_without_stdout() {
     let run = |name: &str| {
         cmd()
             .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+            .env("MCP_WARDEN_APPROVAL_TRANSPORT", "test-deny")
             .args(["run", name])
             .assert()
             .failure()

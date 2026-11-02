@@ -131,7 +131,8 @@ mcp-warden run github               # what the rewired entry runs: the server, w
 | `mcp-warden secret add <name>`             | Store a secret (value read from stdin, never argv)       |
 | `mcp-warden secret list`                   | List secret names (never values)                         |
 | `mcp-warden secret remove <name>`          | Delete a secret from the keychain                        |
-| `mcp-warden preset add <name> ...`         | Define a preset (`--confirm-auto` required for `auto`)   |
+| `mcp-warden preset add <name> ...`         | Define a preset (`--confirm-auto` required for `auto`, then an approval prompt confirms it) |
+| `mcp-warden preset confirm [name]...`      | Confirm `auto` presets through the approval prompt; an edited `auto` preset asks until confirmed again |
 | `mcp-warden preset list`                   | Show all presets                                         |
 | `mcp-warden preset test <name>`            | Validate a preset against the current keychain           |
 | `mcp-warden preset test <name> GET /path`  | Policy simulator: would this call be allowed, and why? Sends nothing (`--command`, `--get`/`--put`, `--query` for other tools) |
@@ -213,7 +214,7 @@ Compared with Keyward 0.1.1, Wundervault MCP server 2.0.1 and Janee 0.16.0, from
 - Secrets in the OS keychain only — never on disk in plaintext, never in logs.
 - A credential the upstream echoes back in a `proxy_http` response (an echo endpoint, an error that quotes the token) is replaced with `[redacted by mcp-warden]` before the agent sees it. The rest of the response is untrusted upstream data and is passed through as is.
 - Allow-list validation runs **before** credential injection.
-- Default approval policy is `prompt`; `auto` requires `--confirm-auto` at preset creation.
+- Default approval policy is `prompt`; `auto` requires `--confirm-auto` at preset creation and a human confirmation in the approval prompt, bound to the preset's exact form — an edited `auto` preset asks again until `mcp-warden preset confirm`.
 - The MCP server loads and validates `config.toml` once at startup and never re-reads it: restart the server after editing presets.
 - Audit log is append-only — the trait surface itself contains no `delete` / `clear` method.
 - `mcp-warden lock` stops every running server at its next call; a server that has seen the lock stays locked until it restarts, and `unlock` needs a human to approve it.

@@ -11,10 +11,10 @@ use std::path::Path;
 ///
 /// **stdout belongs to the launched server** (its JSON-RPC channel), so
 /// nothing here prints to stdout; errors go to stderr.
-pub fn run(
+pub async fn run(
     name: &str,
     config_dir: &Path,
-    kc: &dyn KeychainStore,
+    store: std::sync::Arc<dyn KeychainStore>,
     audit: &dyn AuditSink,
 ) -> Result<()> {
     if lock::is_present(&config_dir.join(lock::LOCK_FILE)) {
@@ -28,7 +28,32 @@ pub fn run(
             "no [[server]] named '{name}' in the config; add one with `mcp-warden server add`"
         ))
     })?;
-    let env = resolve_env(server, kc)?;
+    // Missing keys fail before anyone is asked; the index says which
+    // exist without reading a value.
+    let stored = store.list_names()?;
+    if let Some(entry) = server
+        .env
+        .iter()
+        .map(|var| server.secret_name(var))
+        .find(|entry| !stored.contains(entry))
+    {
+        return Err(WardenError::Validation(format!(
+            "server '{}': keychain has no '{entry}'; set it with \
+             `mcp-warden secret add {entry}`",
+            server.name
+        )));
+    }
+    // The keys go only to the command a human confirmed: an edit to this
+    // entry (another command, more variables) asks again first.
+    let exec = crate::cli::confirm::executor(config_dir, &cfg, store.clone())?;
+    crate::cli::confirm::ensure_server_confirmed(&exec, server)
+        .await
+        .map_err(|e| {
+            WardenError::Validation(format!(
+                "server '{name}' was not started: launching it needs confirmation ({e})"
+            ))
+        })?;
+    let env = resolve_env(server, store.as_ref())?;
 
     let id = audit.record_pending(name, "run", &command_line(server))?;
     audit.record_decision(id, AuditDecision::Auto)?;

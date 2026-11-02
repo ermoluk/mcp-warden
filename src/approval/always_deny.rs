@@ -16,6 +16,20 @@ impl ApprovalTransport for AlwaysDeny {
     }
 }
 
+/// A transport that gives one fixed answer, for CLI tests run against a
+/// debug build with the in-memory keychain (`MCP_WARDEN_APPROVAL_TRANSPORT=
+/// test-approve` / `test-deny`). Not compiled into release builds.
+#[cfg(debug_assertions)]
+pub struct Fixed(pub ApprovalDecision);
+
+#[cfg(debug_assertions)]
+#[async_trait]
+impl ApprovalTransport for Fixed {
+    async fn request(&self, _req: ApprovalRequest) -> Result<ApprovalDecision> {
+        Ok(self.0)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

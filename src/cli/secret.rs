@@ -47,7 +47,12 @@ pub(crate) fn read_value(label: &str) -> Result<Secret> {
 }
 
 fn list(store: &dyn KeychainStore) -> Result<()> {
-    let names = store.list_names()?;
+    // Confirmation stamps live in the keychain too, but are not secrets.
+    let names: Vec<String> = store
+        .list_names()?
+        .into_iter()
+        .filter(|n| !mcp_warden_core::stamp::is_stamp_name(n))
+        .collect();
     if names.is_empty() {
         println!("(no secrets)");
     } else {

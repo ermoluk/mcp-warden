@@ -54,7 +54,12 @@ pub async fn run(args: DoctorArgs, config_dir: &Path, store: Arc<dyn KeychainSto
             "absent (created on first MCP call)"
         }
     );
-    let names = kc.list_names().unwrap_or_default();
+    let names: Vec<String> = kc
+        .list_names()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|n| !mcp_warden_core::stamp::is_stamp_name(n))
+        .collect();
     println!("secrets:    {} stored", names.len());
     match crate::executor::lock::read(&config_dir.join(crate::executor::lock::LOCK_FILE)) {
         Some(info) => println!(
@@ -577,6 +582,28 @@ fn access_warnings(
     now: chrono::DateTime<chrono::Utc>,
 ) -> Vec<String> {
     let mut out = Vec::new();
+    // `auto` holds only where a human confirmed the preset as it is now;
+    // the MCP server runs the others as `prompt`.
+    let mut served = cfg.preset.clone();
+    out.extend(mcp_warden_core::stamp::demote_unconfirmed_auto(
+        &mut served,
+        kc,
+    ));
+    for s in &cfg.server {
+        let confirmed = mcp_warden_core::stamp::check(
+            kc,
+            &mcp_warden_core::stamp::server_stamp_name(&s.name),
+            &mcp_warden_core::stamp::server_fingerprint(s),
+        )
+        .is_ok_and(|c| c == mcp_warden_core::stamp::Confirmation::Confirmed);
+        if !confirmed {
+            out.push(format!(
+                "server '{}': not confirmed in its current form, so `mcp-warden run {}` asks \
+                 for approval before it starts",
+                s.name, s.name
+            ));
+        }
+    }
     for p in &cfg.preset {
         if crate::executor::policy::check_expiry(p, now).is_err() {
             out.push(format!(
@@ -629,13 +656,25 @@ mod tests {
         let kc = InMemoryKeychain::new();
         kc.set("server/github/A", Secret::new("v".into())).unwrap();
         let w = access_warnings(&cfg, &kc, now);
-        assert_eq!(w.len(), 2, "{w:?}");
-        assert!(w[0].contains("'gh': access has expired"));
-        assert!(w[1].contains("'server/github/B'"));
+        assert_eq!(w.len(), 3, "{w:?}");
+        assert!(w[0].contains("server 'github': not confirmed"));
+        assert!(w[1].contains("'gh': access has expired"));
+        assert!(w[2].contains("'server/github/B'"));
 
         cfg.preset[0].expires_at = Some(now + chrono::Duration::hours(1));
         kc.set("server/github/B", Secret::new("v".into())).unwrap();
+        mcp_warden_core::stamp::record(
+            &kc,
+            &mcp_warden_core::stamp::server_stamp_name("github"),
+            &mcp_warden_core::stamp::server_fingerprint(&cfg.server[0]),
+        )
+        .unwrap();
         assert!(access_warnings(&cfg, &kc, now).is_empty());
+
+        // An auto preset that nobody confirmed is reported too.
+        cfg.preset[0].approval = ApprovalPolicy::Auto;
+        let w = access_warnings(&cfg, &kc, now);
+        assert!(w[0].contains("has not been confirmed"), "{w:?}");
     }
 
     fn ssh_with(patterns: &[&str]) -> Preset {

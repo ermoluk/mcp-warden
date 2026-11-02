@@ -14,3 +14,4 @@ pub mod error;
 pub mod keychain;
 pub mod presets;
 pub mod secret;
+pub mod stamp;
