@@ -38,17 +38,26 @@ impl LocalSqlite {
         }
         // NOFOLLOW refuses a symlink anywhere in the path, so resolve the
         // directories first (on macOS /var and /tmp are links themselves).
-        let resolved = match (path.parent(), path.file_name()) {
-            (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => std::fs::canonicalize(dir)
-                .map_err(WardenError::Io)?
-                .join(name),
-            _ => path.to_path_buf(),
+        // Unix only: on Windows the resolved form is a `\\?\` path and the
+        // symlink checks above are what applies.
+        #[cfg(unix)]
+        let conn = {
+            let resolved = match (path.parent(), path.file_name()) {
+                (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => {
+                    std::fs::canonicalize(dir)
+                        .map_err(WardenError::Io)?
+                        .join(name)
+                }
+                _ => path.to_path_buf(),
+            };
+            Connection::open_with_flags(
+                &resolved,
+                rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+            )
         };
-        let conn = Connection::open_with_flags(
-            &resolved,
-            rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
-        )
-        .map_err(|e| WardenError::Audit(e.to_string()))?;
+        #[cfg(not(unix))]
+        let conn = Connection::open(path);
+        let conn = conn.map_err(|e| WardenError::Audit(e.to_string()))?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

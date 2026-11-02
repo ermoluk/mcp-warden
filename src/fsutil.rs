@@ -124,6 +124,7 @@ mod tests {
 
     /// Run `f` on a thread and give up after a few seconds, so a read that
     /// would block or never end fails the test instead of hanging it.
+    #[cfg(unix)]
     fn within_seconds<T: Send + 'static>(f: impl FnOnce() -> T + Send + 'static) -> T {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::spawn(move || {

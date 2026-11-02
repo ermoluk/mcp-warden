@@ -178,7 +178,7 @@ fn check_local_path(
     if let Some(home) = &home
         && SENSITIVE_UNDER_HOME
             .iter()
-            .any(|entry| within(&resolved, &home.join(entry)))
+            .any(|entry| within(&resolved, &under(home, entry)))
     {
         return Err(sensitive(
             "a sensitive location (credentials, shell or agent configuration)",
@@ -201,6 +201,13 @@ fn check_local_path(
         )));
     }
     Ok(resolved)
+}
+
+/// `rel` (components separated by `/`) below `dir`. Joined one component at
+/// a time: on Windows `canonicalize` returns `\\?\` paths, in which `/` is
+/// not a separator.
+fn under(dir: &Path, rel: &str) -> PathBuf {
+    rel.split('/').fold(dir.to_path_buf(), |p, c| p.join(c))
 }
 
 /// `path` is `dir` or below it, by whole components — ignoring case where
@@ -524,7 +531,7 @@ pub(crate) mod tests {
         let dir = tempfile::tempdir().unwrap();
         let home = std::fs::canonicalize(dir.path()).unwrap();
         for entry in entries {
-            let path = home.join(entry);
+            let path = under(&home, entry);
             std::fs::create_dir_all(path.parent().unwrap()).unwrap();
             std::fs::write(&path, "x").unwrap();
         }
@@ -550,7 +557,7 @@ pub(crate) mod tests {
         check_in(&p(), &home.join("notes.txt"), &home).unwrap();
         let allowed: Vec<String> = entries
             .iter()
-            .filter(|(_, entry, _)| check_in(&p(), &home.join(entry), &home).is_ok())
+            .filter(|(_, entry, _)| check_in(&p(), &under(&home, entry), &home).is_ok())
             .map(|(line, entry, note)| {
                 format!("  tests/corpus/local-paths.txt:{line}: {entry} — {note}")
             })
@@ -582,7 +589,7 @@ pub(crate) mod tests {
         let (_dir, home) = fake_home(&["state/config.toml"]);
         let err = check_local_path(
             &p(),
-            &home.join("state/config.toml").display().to_string(),
+            &under(&home, "state/config.toml").display().to_string(),
             Some(&home),
             &home.join("state"),
         )
@@ -596,8 +603,8 @@ pub(crate) mod tests {
         let (_dir, home) = fake_home(&["work/in.log", "other/out.log"]);
         let mut preset = p();
         preset.allowed_local_paths = vec![home.join("work").display().to_string()];
-        check_in(&preset, &home.join("work/in.log"), &home).unwrap();
-        let err = check_in(&preset, &home.join("other/out.log"), &home)
+        check_in(&preset, &under(&home, "work/in.log"), &home).unwrap();
+        let err = check_in(&preset, &under(&home, "other/out.log"), &home)
             .unwrap_err()
             .to_string();
         assert!(err.contains("allowed_local_paths"), "{err}");
