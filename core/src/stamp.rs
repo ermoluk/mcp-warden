@@ -13,13 +13,22 @@
 //!
 //! The keychain is the one store the agent cannot write without going
 //! through the OS (threat model, N2), and the CLI writes a stamp only after
-//! a human approves it in the approval prompt.
+//! a human approves it in the approval prompt: `secret add` refuses
+//! `stamp/` names and no preset may use one as its secret. Because the
+//! fingerprint itself is public (anyone can hash the config), a stamp is
+//! not the fingerprint but its HMAC-SHA256 under a random key that lives
+//! only in the keychain (`stamp/key`) and is never shown, so a stamp
+//! written by any other route does not verify.
 
 use crate::config::{ApprovalPolicy, Preset, WrappedServer};
 use crate::error::Result;
 use crate::keychain::KeychainStore;
 use crate::secret::Secret;
+use hmac::{Hmac, Mac};
 use sha2::{Digest, Sha256};
+
+/// The keychain entry with the key that signs stamps.
+const KEY_ENTRY: &str = "stamp/key";
 
 /// Whether an entry's stamp matches it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -64,17 +73,50 @@ pub fn server_stamp_name(name: &str) -> String {
 
 /// Whether the stamp under `entry` matches `fingerprint`.
 pub fn check(kc: &dyn KeychainStore, entry: &str, fingerprint: &str) -> Result<Confirmation> {
-    Ok(match kc.get(entry)? {
-        None => Confirmation::Missing,
-        Some(stamp) if stamp.expose() == fingerprint => Confirmation::Confirmed,
-        Some(_) => Confirmation::Changed,
+    let Some(stamp) = kc.get(entry)? else {
+        return Ok(Confirmation::Missing);
+    };
+    let Some(key) = kc.get(KEY_ENTRY)? else {
+        return Ok(Confirmation::Changed);
+    };
+    Ok(if sign(&key, entry, fingerprint) == stamp.expose() {
+        Confirmation::Confirmed
+    } else {
+        Confirmation::Changed
     })
 }
 
 /// Record that a human confirmed the entry with this fingerprint. Callers
-/// must have asked through the approval transport first.
+/// must have asked through the approval transport first. Creates the
+/// signing key on first use.
 pub fn record(kc: &dyn KeychainStore, entry: &str, fingerprint: &str) -> Result<()> {
-    kc.set(entry, Secret::new(fingerprint.to_string()))
+    let key = match kc.get(KEY_ENTRY)? {
+        Some(key) => key,
+        None => {
+            let mut bytes = [0u8; 32];
+            getrandom::fill(&mut bytes).map_err(|e| {
+                crate::error::WardenError::Executor(format!("no randomness for the stamp key: {e}"))
+            })?;
+            let key = Secret::new(bytes.iter().map(|b| format!("{b:02x}")).collect());
+            kc.set(KEY_ENTRY, Secret::new(key.expose().to_string()))?;
+            key
+        }
+    };
+    kc.set(entry, Secret::new(sign(&key, entry, fingerprint)))
+}
+
+/// HMAC-SHA256 over the entry name and the fingerprint, hex.
+fn sign(key: &Secret, entry: &str, fingerprint: &str) -> String {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key.expose().as_bytes())
+        .expect("HMAC takes a key of any length");
+    mac.update(entry.as_bytes());
+    mac.update(b"\n");
+    mac.update(fingerprint.as_bytes());
+    mac.finalize()
+        .into_bytes()
+        .iter()
+        .map(|b| format!("{b:02x}"))
+        .collect()
 }
 
 /// Keychain names that are stamps, not secrets.
@@ -201,6 +243,25 @@ mod tests {
         assert!(warnings[0].contains("has not been confirmed"));
         assert!(warnings[0].contains("mcp-warden preset confirm gh"));
         assert!(presets.iter().all(|p| p.approval == ApprovalPolicy::Prompt));
+    }
+
+    /// The fingerprint is public — anyone can hash the config — so a stamp
+    /// written straight into the keychain (`mcp-warden secret add
+    /// stamp/preset/gh` with the hash on stdin) must not count.
+    #[test]
+    fn a_stamp_written_without_the_key_does_not_count() {
+        let kc = InMemoryKeychain::new();
+        let p = preset("");
+        // Make sure a key exists, as it does once anything was confirmed.
+        record(&kc, &preset_stamp_name("other"), "x").unwrap();
+        kc.set(
+            &preset_stamp_name("gh"),
+            Secret::new(preset_fingerprint(&p)),
+        )
+        .unwrap();
+        let mut presets = vec![p];
+        assert_eq!(demote_unconfirmed_auto(&mut presets, &kc).len(), 1);
+        assert_eq!(presets[0].approval, ApprovalPolicy::Prompt);
     }
 
     #[test]

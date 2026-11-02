@@ -259,6 +259,23 @@ impl Config {
             if p.name.is_empty() {
                 return Err(WardenError::Validation("preset name empty".into()));
             }
+            // A preset naming a confirmation stamp (or the key that signs
+            // them) could send it upstream or reveal it to the agent.
+            let secret = match &p.auth {
+                Some(
+                    Auth::Bearer { secret }
+                    | Auth::Header { secret, .. }
+                    | Auth::Basic { secret, .. },
+                ) => Some(secret),
+                None => p.secret.as_ref(),
+            };
+            if let Some(secret) = secret.filter(|s| crate::stamp::is_stamp_name(s)) {
+                return Err(WardenError::Validation(format!(
+                    "preset '{}': keychain entry '{secret}' is reserved for mcp-warden's \
+                     confirmations and cannot be a preset's secret",
+                    p.name
+                )));
+            }
             match p.preset_type {
                 PresetType::Http => self.validate_http(p, kc)?,
                 PresetType::Ssh => self.validate_ssh(p, kc)?,
@@ -725,6 +742,40 @@ mod tests {
             cfg(local)
                 .validate(&kc)
                 .unwrap_or_else(|e| panic!("{local}: {e}"));
+        }
+    }
+
+    /// `stamp/…` entries are mcp-warden's confirmations, not secrets: a
+    /// preset that named one could send or reveal the stamp key.
+    #[test]
+    fn presets_cannot_use_a_reserved_keychain_name() {
+        let kc = InMemoryKeychain::new();
+        kc.set("stamp/key", Secret::new("k".into())).unwrap();
+        for preset in [
+            r#"
+            [[preset]]
+            name = "p"
+            type = "http"
+            description = "x"
+            base_url = "https://example.com"
+            auth = { type = "bearer", secret = "stamp/key" }
+            allowed_methods = ["GET"]
+            approval = "prompt"
+            "#,
+            r#"
+            [[preset]]
+            name = "p"
+            type = "ssh"
+            description = "x"
+            host = "h"
+            user = "u"
+            secret = "stamp/key"
+            approval = "prompt"
+            "#,
+        ] {
+            let cfg: Config = toml::from_str(preset).unwrap();
+            let err = cfg.validate(&kc).unwrap_err().to_string();
+            assert!(err.contains("reserved"), "{err}");
         }
     }
 

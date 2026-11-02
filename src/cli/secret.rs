@@ -16,6 +16,17 @@ pub enum SecretCmd {
 }
 
 pub fn run(cmd: SecretCmd, store: &dyn KeychainStore) -> Result<()> {
+    // `stamp/…` entries record what a human confirmed in an approval
+    // prompt. The CLI cannot tell a human from an agent with a shell, so it
+    // never writes or removes them.
+    if let SecretCmd::Add { name } | SecretCmd::Remove { name } = &cmd
+        && mcp_warden_core::stamp::is_stamp_name(name)
+    {
+        return Err(WardenError::Validation(format!(
+            "'{name}' is reserved for mcp-warden's confirmations; use `mcp-warden preset \
+             confirm` to confirm a preset"
+        )));
+    }
     match cmd {
         SecretCmd::Add { name } => add(name, store),
         SecretCmd::List => list(store),
@@ -67,4 +78,31 @@ fn remove(name: String, store: &dyn KeychainStore) -> Result<()> {
     store.delete(&name)?;
     eprintln!("Removed '{}'.", name);
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use mcp_warden_core::keychain::memory::InMemoryKeychain;
+
+    /// The CLI cannot tell a human from an agent with a shell, so it must
+    /// not write or remove confirmation stamps: only an approved prompt may.
+    #[test]
+    fn stamps_cannot_be_written_or_removed_from_the_cli() {
+        let kc = InMemoryKeychain::new();
+        for cmd in [
+            SecretCmd::Add {
+                name: "stamp/preset/gh".into(),
+            },
+            SecretCmd::Add {
+                name: "stamp/key".into(),
+            },
+            SecretCmd::Remove {
+                name: "stamp/key".into(),
+            },
+        ] {
+            let err = run(cmd, &kc).unwrap_err().to_string();
+            assert!(err.contains("reserved"), "{err}");
+        }
+    }
 }

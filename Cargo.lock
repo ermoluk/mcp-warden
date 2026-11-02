@@ -2843,6 +2843,8 @@ dependencies = [
  "chrono",
  "directories",
  "dirs",
+ "getrandom 0.3.4",
+ "hmac 0.12.1",
  "keyring-core",
  "linux-keyutils-keyring-store",
  "regex",
