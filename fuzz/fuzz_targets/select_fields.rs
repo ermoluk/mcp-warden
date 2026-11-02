@@ -23,6 +23,8 @@ fuzz_target!(|data: &[u8]| {
         .map(str::to_string)
         .collect();
     if let Some(picked) = mcp_warden::fuzz::select_fields(&body, &preset) {
-        assert!(picked.to_string().len() <= body.to_string().len().max(2));
+        // A scalar body comes back as `null`, an unmatched object or array as
+        // `{}` / `[]`: never more than the body or four bytes.
+        assert!(picked.to_string().len() <= body.to_string().len().max(4));
     }
 });
