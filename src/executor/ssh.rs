@@ -56,7 +56,7 @@ pub fn validate_command(preset: &Preset, command: &str) -> Result<()> {
 /// those shells reads as an environment variable for the command
 /// (`LD_PRELOAD=/tmp/x.so git pull`), and a word starting with `%`, which
 /// fish expands (`%self` is its PID) and other shells read as a job.
-fn check_words(command: &str) -> Result<()> {
+pub(crate) fn check_words(command: &str) -> Result<()> {
     let refuse = |why: String| {
         WardenError::Validation(format!(
             "command refused ({why}): ssh_exec words may only contain letters, digits \

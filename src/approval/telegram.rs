@@ -638,6 +638,23 @@ fn build_inline_keyboard(
     json!({ "inline_keyboard": rows })
 }
 
+/// Parse a `getUpdates` result and run the checks `dispatch` applies to
+/// each update, without acting on it (for the fuzz targets).
+#[doc(hidden)]
+pub fn parse_updates_for_fuzzing(json: &[u8]) {
+    let Ok(body) = serde_json::from_slice::<TgResult<Vec<Update>>>(json) else {
+        return;
+    };
+    for update in body.result.unwrap_or_default() {
+        if let Some(text) = update.message.and_then(|m| m.text) {
+            let _ = lock_command(&text);
+        }
+        if let Some(data) = update.callback_query.and_then(|c| c.data) {
+            let _ = is_token(&data);
+        }
+    }
+}
+
 /// A button token: exactly 32 hex digits (also safe as a file name).
 fn is_token(data: &str) -> bool {
     data.len() == 32 && data.chars().all(|c| c.is_ascii_hexdigit())

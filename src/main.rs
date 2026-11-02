@@ -1,18 +1,7 @@
-// Core trait surfaces (keychain, audit, approval, presets, config, error,
-// secret) live in the `mcp-warden-core` crate. This binary contains the CLI,
-// the MCP server, the action executor, the web UI, and the concrete
-// approval transports (desktop / TUI / Telegram / always_deny).
-mod approval;
-mod cli;
-mod executor;
-mod fsutil;
-mod mcp;
-mod scan;
-#[cfg(test)]
-mod testutil;
-mod web;
-
+// The binary is a thin shell around the `mcp_warden` library target
+// (src/lib.rs), which the fuzz targets in `fuzz/` link against too.
 use clap::Parser;
+use mcp_warden::{cli, fsutil};
 
 #[tokio::main(flavor = "current_thread")]
 async fn main() -> anyhow::Result<()> {

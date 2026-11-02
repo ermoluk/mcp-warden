@@ -58,7 +58,7 @@ pub(crate) fn replace_atomic(
 /// other users can write to: whoever can write it decides which presets
 /// and wrapped servers run, and can plant files where the server reads its
 /// state.
-pub(crate) fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
+pub fn ensure_private_dir(dir: &Path) -> std::io::Result<()> {
     let mut builder = std::fs::DirBuilder::new();
     builder.recursive(true);
     #[cfg(unix)]

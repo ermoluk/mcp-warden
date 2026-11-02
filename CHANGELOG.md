@@ -40,6 +40,7 @@ All notable changes to this project will be documented in this file. The format 
 
 ### Added
 
+- **Fuzzing and an end-to-end property test.** `fuzz/` (cargo-fuzz, nightly only; the build stays on stable) has targets for `policy::check_request`, the `ssh_exec` word check, `config.toml` parsing and validation, the credential scrub (with the oracle that no form of the secret survives), `response_fields` selection, known_hosts parsing, Telegram updates and `sanitise_for_prompt`. A property test drives generated paths and query maps through `proxy_http` to a wiremock upstream and checks that what arrives is what the allow-list checked. To reach the internals, `mcp-warden` now also builds as a library (`src/lib.rs`, not a stable API).
 - **`mcp-warden doctor` warns about risky named Redis queries** — `EVAL`, `SCRIPT`, `FUNCTION`, `CONFIG`, `MODULE`, `DEBUG`, `ACL`, `FLUSHALL`, `KEYS`, `MIGRATE`, `REPLICAOF` and others whose arguments the agent chooses (R7) — and about `allowed_commands` patterns that admit options.
 - **`mcp-warden preset confirm [NAME]…`** confirms `auto` presets through the approval prompt (all unconfirmed ones without names). `mcp-warden-core` gains the `stamp` module.
 - A test that the tool descriptions pinned by snapshots are the ones the server serves; it found the pinned `sftp_transfer` text had drifted (`'get'` vs `"get"`).
