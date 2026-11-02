@@ -31,6 +31,8 @@ All notable changes to this project will be documented in this file. The format 
 
 - **One malformed line on stdin stopped the MCP server, and lines had no length limit.** rmcp's stdio codec ends the session at the first line it cannot decode and buffers a line of any length. The server now uses its own framing: a line over 16 MiB or one that is not a JSON-RPC message is skipped with a warning on stderr, and the session continues (T8).
 
+- **Planted files in the config dir could hang the server or redirect audit writes.** `lock`, `telegram/offset` and the Telegram inbox were read through symlinks to the end (a link to `/dev/zero` never finished), `telegram/poll.lock` was opened through a symlink or a FIFO (which blocks), and SQLite followed a symlink at `audit.db-journal`. State files are now opened with `O_NOFOLLOW | O_NONBLOCK` and read only as small regular files, the audit log refuses symlinks at the database and its `-journal`, `-wal` and `-shm` files and opens the database with `SQLITE_OPEN_NOFOLLOW`, the config dir is created `0700` and `config.toml` `0600`, and the MCP server and `run` refuse a config dir that other users can write to or that the user does not own (R3, R13). **Behaviour change:** a group- or world-writable config dir stops the server from starting.
+
 ### Added
 
 - **`mcp-warden preset confirm [NAME]…`** confirms `auto` presets through the approval prompt (all unconfirmed ones without names). `mcp-warden-core` gains the `stamp` module.

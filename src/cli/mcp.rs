@@ -29,9 +29,9 @@ pub async fn cmd(config_dir: &Path) -> Result<()> {
 
     let config_path = config_dir.join("config.toml");
     let audit_path = config_dir.join("audit.db");
-    std::fs::create_dir_all(config_dir).map_err(WardenError::Io)?;
+    crate::fsutil::ensure_private_dir(config_dir).map_err(WardenError::Io)?;
     if !config_path.exists() {
-        std::fs::write(&config_path, "").map_err(WardenError::Io)?;
+        crate::fsutil::replace_atomic(&config_path, b"", None).map_err(WardenError::Io)?;
     }
 
     let keychain: Arc<dyn KeychainStore> = crate::cli::keychain_for_env();

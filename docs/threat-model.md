@@ -158,7 +158,7 @@ The full-screen ratatui dialog renders via `CrosstermBackend::new(std::io::stder
 
 ### R3. Audit log integrity is policy, not crypto
 
-The SQLite file is `0600`-permissioned and rejects symlinks at open time, but root or anyone with the user's UID can still mutate it with `sqlite3`. Tamper-evident logs (hash-chained, optionally signed) ship in Phase 2+.
+The SQLite file is `0600`-permissioned and rejects symlinks at open time — since v0.5.4 also at `audit.db-journal`, `-wal` and `-shm`, which SQLite would otherwise follow and write journal pages into, and the database is opened with `SQLITE_OPEN_NOFOLLOW` — but root or anyone with the user's UID can still mutate it with `sqlite3`. Tamper-evident logs (hash-chained, optionally signed) ship in Phase 2+.
 
 ### R4. SSH command-injection via careless regex (v0.2.0)
 
@@ -243,6 +243,8 @@ What it does guarantee:
 - **Deleting the file by hand** cannot reopen a server that saw the lock. A server *started after* the deletion does start unlocked, though. Restarting MCP servers is the client's job, not the agent's, but users who want the lock to survive tampering should also revoke the upstream credentials.
 - **Screen control.** As in R1, an agent that can click on the user's screen could approve the unlock dialog. Use Telegram if the agent has screen control.
 - **Telegram `/lock`** from the configured chat writes the same lock file, from whichever server is polling at that moment. It works only while at least one MCP server with `[approval.telegram]` runs. Telegram cannot unlock.
+- **State files are read defensively.** The server reads `lock`, `telegram/offset` and the inbox files it polls for, and opens `telegram/poll.lock`. Up to v0.5.3 each of these followed a symlink and read to the end, so an agent that replaced one with a link to `/dev/zero` (or a FIFO) made the server read forever or block. Since v0.5.4 they are opened with `O_NOFOLLOW | O_NONBLOCK` and read only if they are small regular files; a lock file that cannot be read still locks. The config dir is created `0700` (`config.toml` `0600`), and `mcp-warden mcp` and `run` refuse to start when it is writable by other users or not owned by the user.
+- **Telegram chat members.** A button press counts if it comes from the configured chat. In a group chat that is anyone in the group; use a private chat with the bot.
 - **The Telegram inbox.** Servers hand button presses to each other through `telegram/inbox/<button token>` files. Each button carries its own random 128-bit token, and only the asking server knows which token means Approve. Someone who can write the inbox can delete an answer, which makes the prompt time out (fail closed). They cannot forge an answer or flip one.
 
 ### R14. `preset grant` windows and frozen presets

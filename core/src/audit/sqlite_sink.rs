@@ -21,13 +21,34 @@ impl LocalSqlite {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(WardenError::Io)?;
         }
-        if path.exists() {
-            let meta = std::fs::symlink_metadata(path).map_err(WardenError::Io)?;
-            if meta.file_type().is_symlink() {
-                return Err(WardenError::Audit("audit db path is a symlink".into()));
+        // SQLite follows a symlink planted at the database or at a file it
+        // keeps next to it (the rollback journal, the WAL and its shared
+        // memory) and would write pages into whatever it names. Refuse all
+        // four, and open the database itself with SQLITE_OPEN_NOFOLLOW so a
+        // link swapped in after this check is refused too.
+        for suffix in ["", "-journal", "-wal", "-shm"] {
+            let mut file = path.as_os_str().to_owned();
+            file.push(suffix);
+            if std::fs::symlink_metadata(&file).is_ok_and(|m| m.file_type().is_symlink()) {
+                return Err(WardenError::Audit(format!(
+                    "{} is a symlink — refusing to open the audit log",
+                    std::path::Path::new(&file).display()
+                )));
             }
         }
-        let conn = Connection::open(path).map_err(|e| WardenError::Audit(e.to_string()))?;
+        // NOFOLLOW refuses a symlink anywhere in the path, so resolve the
+        // directories first (on macOS /var and /tmp are links themselves).
+        let resolved = match (path.parent(), path.file_name()) {
+            (Some(dir), Some(name)) if !dir.as_os_str().is_empty() => std::fs::canonicalize(dir)
+                .map_err(WardenError::Io)?
+                .join(name),
+            _ => path.to_path_buf(),
+        };
+        let conn = Connection::open_with_flags(
+            &resolved,
+            rusqlite::OpenFlags::default() | rusqlite::OpenFlags::SQLITE_OPEN_NOFOLLOW,
+        )
+        .map_err(|e| WardenError::Audit(e.to_string()))?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,

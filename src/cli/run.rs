@@ -20,6 +20,7 @@ pub async fn run(
     if lock::is_present(&config_dir.join(lock::LOCK_FILE)) {
         return Err(WardenError::Locked);
     }
+    crate::fsutil::ensure_private_dir(config_dir).map_err(WardenError::Io)?;
     let raw = std::fs::read_to_string(config_dir.join("config.toml")).unwrap_or_default();
     let cfg: Config = toml::from_str(&raw).map_err(|e| WardenError::Config(e.to_string()))?;
     cfg.validate_servers()?;
