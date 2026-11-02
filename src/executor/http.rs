@@ -298,26 +298,30 @@ pub async fn execute(
         builder = builder.json(&body);
     }
 
-    // `secret` stays alive until the body has been scrubbed of it below.
+    // An upstream that reflects the request would otherwise hand the agent
+    // the credential (invariants 1–2): the body, and any error text, are
+    // scrubbed of every form it was sent in.
+    let forms = CredentialForms::http(&preset.auth, &secret);
+    drop(secret);
     let resp = match builder.send().await {
         Ok(r) => r,
         Err(e) => {
+            let mut message = e.to_string();
+            forms.scrub_text(&mut message);
             let _ = exec.audit.record_outcome(
                 event_id,
                 AuditOutcome::Err {
-                    message: e.to_string(),
+                    message: message.clone(),
                 },
             );
-            return Err(WardenError::Executor(e.to_string()));
+            return Err(WardenError::Executor(message));
         }
     };
     let status = resp.status().as_u16();
     // At most `max_response_bytes` of it; `null` if it isn't JSON.
     let (mut body, mut notice) = super::response::read_body(resp, preset).await;
-    // An upstream that reflects the request would otherwise hand the agent
-    // the credential (invariants 1–2).
-    let redacted = CredentialForms::http(&preset.auth, &secret).scrub(&mut body);
-    drop(secret);
+    let redacted = forms.scrub(&mut body);
+    drop(forms);
     if let Some(selected) = super::response::select_fields(&body, preset) {
         body = selected;
         notice = Some("only this preset's response_fields are returned".into());
