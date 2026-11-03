@@ -58,7 +58,7 @@ pub async fn run(args: DoctorArgs, config_dir: &Path, store: Arc<dyn KeychainSto
         .list_names()
         .unwrap_or_default()
         .into_iter()
-        .filter(|n| !mcp_warden_core::stamp::is_stamp_name(n))
+        .filter(|n| !mcp_warden_core::stamp::is_reserved_name(n))
         .collect();
     println!("secrets:    {} stored", names.len());
     match crate::executor::lock::read(&config_dir.join(crate::executor::lock::LOCK_FILE)) {

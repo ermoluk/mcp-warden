@@ -124,6 +124,15 @@ pub fn is_stamp_name(name: &str) -> bool {
     name.starts_with("stamp/")
 }
 
+/// Keychain names mcp-warden keeps for itself: stamps (`stamp/`) and the
+/// audit anchor (`audit/`). They are not secrets, the CLI never writes or
+/// removes them, and no preset, server or transport may use one: a preset
+/// naming one could send it upstream or reveal it to the agent, and
+/// overwriting one would forge a confirmation or move the anchor.
+pub fn is_reserved_name(name: &str) -> bool {
+    is_stamp_name(name) || name.starts_with("audit/")
+}
+
 /// Run every `auto` preset, and every `auto` named command, that no human
 /// confirmed in this exact form as `prompt` instead, and say why for each.
 pub fn demote_unconfirmed_auto(presets: &mut [Preset], kc: &dyn KeychainStore) -> Vec<String> {
