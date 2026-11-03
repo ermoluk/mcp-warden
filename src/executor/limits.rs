@@ -15,8 +15,9 @@ pub const MAX_HTTP_QUERY_PAIRS: usize = 64;
 pub const MAX_HTTP_QUERY_BYTES: usize = 4096;
 /// `proxy_http` JSON body, serialised, in bytes.
 pub const MAX_HTTP_BODY_BYTES: usize = 1024 * 1024;
-/// `ssh_exec` command, in bytes.
-pub const MAX_SSH_COMMAND_BYTES: usize = 1024;
+pub use mcp_warden_core::limits::{
+    MAX_SSH_COMMAND_BYTES, MAX_SSH_OUTPUT_BYTES, MAX_SSH_RUN_PARAM_BYTES, MAX_SSH_RUN_PARAMS,
+};
 /// Each of the `sftp_transfer` remote and local paths, in bytes.
 pub const MAX_SFTP_PATH_BYTES: usize = 1024;
 /// `db_query` parameters.
@@ -32,10 +33,6 @@ pub const MAX_SECRET_NAME_BYTES: usize = 256;
 /// the preset says: `max_response_bytes` can only lower it. Bodies arrive
 /// decompressed (gzip), so a small compressed response can be huge.
 pub const MAX_RESPONSE_BYTES: usize = 10 * 1024 * 1024;
-
-/// `ssh_exec` stdout and stderr, each, in bytes. Output beyond it is not
-/// read: the call ends and says so.
-pub const MAX_SSH_OUTPUT_BYTES: usize = 1024 * 1024;
 
 /// Seconds an `sftp_transfer` may take in all — connecting, authenticating
 /// and copying — when the preset sets no `timeout_seconds`.
