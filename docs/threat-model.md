@@ -279,6 +279,15 @@ It is the escape hatch for tools that read a secret from their environment, so i
 - **Installers.** `install.sh` / `install.ps1` verify the archive against `SHA256SUMS` from the same release — proof of an intact download, not of who built it. With `MCP_WARDEN_VERIFY_ATTESTATION=1` they also run `gh attestation verify` and refuse to install unless the archive carries this repository's build-provenance attestation. Each script's body runs only once it has been downloaded completely (a function called on the last line in `install.sh`, one script block in `install.ps1`), so a truncated `curl | sh` runs nothing.
 - **npm.** The packages have no install scripts; `files` limits them to the launcher, README and binary.
 
+### R18. Query keys, token endpoints and request signing (v0.6.0)
+
+- **A key in the URL.** `query` auth puts the credential in the request URL, where an upstream's access logs, proxies and its own error pages can keep it. mcp-warden does what it can on its side: the agent cannot send a parameter of that name (any case), the prompt and the audit summary never include the query string, upstream errors are reported without the URL (before v0.6.0 reqwest's error text carried it, query string included), and an echo of `name=key` in any encoding is scrubbed. Prefer a header when the API offers one.
+- **OAuth2 token endpoints are untrusted.** The endpoint receives the client secret and the refresh token, so it must be https (or loopback). Its answer is read at most 64 KiB, within 15 s, without following redirects; an access token must be printable ASCII without spaces (no CR/LF smuggled into the `Authorization` header) and `token_type` bearer. Errors say the status and the `error` code, never `error_description` or the body, which a hostile endpoint could fill with what it was sent. Every secret involved, the minted access token included, is scrubbed from responses and errors.
+- **No token cache.** An access token is minted for each call and dropped after it (invariant 8), so each call makes one extra request to the provider.
+- **Rotation writes the keychain.** A rotated refresh token is written back to its entry under a lock shared by all mcp-warden processes. The entry may belong to that one preset only (config validation), so a hostile endpoint cannot overwrite another preset's key, a wrapped server's or the Telegram token, and a reserved entry is never written. If the write fails, the call fails: the stored token may no longer work and the user is told to authorise again.
+- **SigV4 runs AWS's signer.** Signing uses the `aws-sigv4` crate after the allow-list checks and the approval. That crate traces the access key id and the session token at TRACE level; mcp-warden signs with tracing silenced, so `RUST_LOG=trace` does not print them.
+- **Not revealable.** `get_secret_for_env` never reveals an OAuth2 preset's client secret or refresh token: in the agent's hands a refresh token outlives the call, and once rotated, the stored copy goes stale.
+
 ## Update policy
 
 This document updates with every release. Material changes are noted in `CHANGELOG.md` under a `### Security` heading.
