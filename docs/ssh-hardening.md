@@ -2,8 +2,11 @@
 
 `mcp-warden` checks every `ssh_exec` command before it connects: the preset's
 anchored `allowed_commands` patterns, a per-word character filter that refuses
-shell syntax whatever the patterns say, and a 1024-byte limit. That is the
-first allow-list. This guide sets up a second one on the server, so a pattern
+shell syntax whatever the patterns say, and a 1024-byte limit. With named
+commands (`ssh_run`, v0.6.0) the command line is fixed in the preset and the
+agent fills in typed values only; see the
+[cookbook](presets-cookbook.md#ssh--named-commands-v060). That is the first
+allow-list. This guide sets up a second one on the server, so a pattern
 that is too broad — or a key that leaks — still can't run anything you didn't
 plan for.
 

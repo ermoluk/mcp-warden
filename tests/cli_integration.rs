@@ -85,6 +85,71 @@ fn approval_command_sets_window_seconds() {
     );
 }
 
+fn seed_named_commands(dir: &Path) {
+    fs::create_dir_all(dir).unwrap();
+    fs::write(
+        dir.join("config.toml"),
+        include_str!("fixtures/named_commands.toml"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn approval_command_sets_one_named_commands_policy() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_named_commands(tmp.path());
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["approval", "deploy", "deny", "--command", "restart"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "command 'restart' of 'deploy' to deny",
+        ));
+    let cfg: toml::Value =
+        toml::from_str(&fs::read_to_string(tmp.path().join("config.toml")).unwrap()).unwrap();
+    let preset = &cfg["preset"][0];
+    assert_eq!(preset["approval"].as_str(), Some("prompt"));
+    let commands = preset["commands"].as_array().unwrap();
+    let restart = commands
+        .iter()
+        .find(|c| c["name"].as_str() == Some("restart"))
+        .unwrap();
+    assert_eq!(restart["approval"].as_str(), Some("deny"));
+    let tail = commands
+        .iter()
+        .find(|c| c["name"].as_str() == Some("tail_log"))
+        .unwrap();
+    assert!(tail.get("approval").is_none());
+
+    // auto needs --confirm-auto, like a preset's; an unknown command is named.
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["approval", "deploy", "auto", "--command", "restart"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--confirm-auto"));
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["approval", "deploy", "prompt", "--command", "nope"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no command 'nope'"));
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args([
+            "approval",
+            "deploy",
+            "prompt",
+            "--command",
+            "restart",
+            "--window",
+            "60",
+        ])
+        .assert()
+        .failure();
+}
+
 #[test]
 fn approval_command_window_zero_clears_field() {
     let tmp = tempfile::tempdir().unwrap();
@@ -469,6 +534,94 @@ fn preset_test_simulates_an_allowed_http_call() {
         .stdout(predicate::str::contains(
             "ALLOWED — would ask for approval (prompt; approve for 10 min available)",
         ));
+}
+
+#[test]
+fn preset_test_simulates_a_named_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_named_commands(tmp.path());
+    simulate(
+        tmp.path(),
+        &["deploy", "--run", "tail_log", "--param", "lines=50"],
+    )
+    .success()
+    .stdout(predicate::str::contains("ALLOWED — would ask for approval"))
+    .stdout(predicate::str::contains(
+        "runs: journalctl -u app -n 50 --no-pager",
+    ));
+    let out = simulate(
+        tmp.path(),
+        &[
+            "deploy",
+            "--run",
+            "trash_file",
+            "--param",
+            "path=/srv/app/uploads/a.png",
+            "--format",
+            "json",
+        ],
+    )
+    .success();
+    let json: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(json["tool"], "ssh_run");
+    assert_eq!(
+        json["command"],
+        "mv /srv/app/uploads/a.png /srv/app/.trash/"
+    );
+
+    // Hostile values are refused with exit code 1, and nothing is shown
+    // as what would run.
+    for param in ["lines=-rf", "lines=1;id", "lines=0", "lines=../x"] {
+        simulate(
+            tmp.path(),
+            &["deploy", "--run", "tail_log", "--param", param],
+        )
+        .code(1)
+        .stdout(predicate::str::starts_with("REFUSED — "))
+        .stdout(predicate::str::contains("runs:").not());
+    }
+    simulate(
+        tmp.path(),
+        &["deploy", "--run", "checkout", "--param", "tag=-v1.2.3"],
+    )
+    .code(1);
+    simulate(
+        tmp.path(),
+        &["deploy", "--run", "tail_log", "--param", "lines"],
+    )
+    .failure();
+}
+
+#[test]
+fn scaffold_ssh_deploy_needs_a_host_and_writes_named_commands() {
+    let tmp = tempfile::tempdir().unwrap();
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["preset", "scaffold", "ssh-deploy", "--dry-run"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("needs --host and --user"));
+    let out = cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args([
+            "preset",
+            "scaffold",
+            "ssh-deploy",
+            "--host",
+            "deploy.example.com",
+            "--user",
+            "deploy",
+            "--dry-run",
+        ])
+        .assert()
+        .success();
+    let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(text.contains("[[preset.commands]]"), "{text}");
+    assert!(
+        text.contains("journalctl -u {unit} -n {lines} --no-pager"),
+        "{text}"
+    );
+    assert!(!text.contains("allowed_paths"), "{text}");
 }
 
 #[test]

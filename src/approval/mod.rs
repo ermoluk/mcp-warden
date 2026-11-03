@@ -52,7 +52,8 @@ pub fn window_text(
     until: DateTime<Local>,
     now: DateTime<Local>,
 ) -> String {
-    let action = sanitise_for_prompt(action, 32);
+    // Room for `ssh_run:` and the longest command name.
+    let action = sanitise_for_prompt(action, 48);
     let preset = sanitise_for_prompt(preset, 64);
     format!(
         "{}: every {action} call {preset} allows runs without asking until {}",
@@ -124,6 +125,18 @@ mod tests {
             ),
             "Approve for 10 min: every proxy_http call github-read allows runs \
              without asking until 14:32"
+        );
+    }
+
+    /// A window for a named command covers that command only, and the
+    /// button says which, even for the longest command name.
+    #[test]
+    fn window_text_names_the_whole_command() {
+        let command = format!("ssh_run:{}", "c".repeat(32));
+        let text = window_text(&command, "deploy", 600, at(14, 32, 0), at(14, 22, 0));
+        assert!(
+            text.contains(&format!("every {command} call deploy")),
+            "{text}"
         );
     }
 

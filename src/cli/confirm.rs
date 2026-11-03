@@ -97,7 +97,7 @@ pub async fn confirm_cmd(
     let wanted: Vec<&Preset> = if names.is_empty() {
         cfg.preset
             .iter()
-            .filter(|p| p.approval == ApprovalPolicy::Auto && !is_confirmed(store.as_ref(), p))
+            .filter(|p| p.has_auto() && !is_confirmed(store.as_ref(), p))
             .collect()
     } else {
         names
@@ -136,10 +136,7 @@ pub async fn confirm_if_auto(
 ) -> Result<()> {
     let raw = std::fs::read_to_string(config_path).map_err(WardenError::Io)?;
     let cfg: Config = toml::from_str(&raw).map_err(|e| WardenError::Config(e.to_string()))?;
-    let Some(p) = cfg
-        .find(name)
-        .filter(|p| p.approval == ApprovalPolicy::Auto)
-    else {
+    let Some(p) = cfg.find(name).filter(|p| p.has_auto()) else {
         return Ok(());
     };
     let config_dir = config_path.parent().unwrap_or(Path::new("."));
@@ -197,8 +194,20 @@ fn describe(p: &Preset) -> String {
                 p.allowed_paths.join(", ")
             }
         )
-    } else if !p.allowed_commands.is_empty() {
-        p.allowed_commands.join(", ")
+    } else if !p.allowed_commands.is_empty() || !p.commands.is_empty() {
+        // Each named command with its own policy, if it has one: a command
+        // marked auto runs without a prompt once this is confirmed.
+        let named = p.commands.iter().map(|c| match c.approval {
+            Some(ApprovalPolicy::Auto) => format!("{} (auto)", c.template),
+            Some(ApprovalPolicy::Deny) => format!("{} (deny)", c.template),
+            _ => c.template.clone(),
+        });
+        p.allowed_commands
+            .iter()
+            .cloned()
+            .chain(named)
+            .collect::<Vec<_>>()
+            .join(", ")
     } else {
         p.queries
             .iter()
@@ -280,6 +289,21 @@ mod tests {
             "Confirm preset 'gh': auto (no prompt), secret gh_pat → https://api.github.com, \
              allows GET /user/repos"
         );
+    }
+
+    #[test]
+    fn the_prompt_lists_named_commands_and_their_policies() {
+        let cfg: Config =
+            toml::from_str(include_str!("../../tests/fixtures/named_commands.toml")).unwrap();
+        let mut p = cfg.preset[0].clone();
+        p.commands[0].approval = Some(ApprovalPolicy::Auto);
+        let text = describe(&p);
+        assert!(
+            text.contains("journalctl -u app -n {lines} --no-pager (auto)"),
+            "{text}"
+        );
+        assert!(text.contains("mv {path} /srv/app/.trash/"), "{text}");
+        assert!(text.contains("warden-deploy@deploy.example.com"), "{text}");
     }
 
     #[tokio::test]

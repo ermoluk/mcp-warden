@@ -353,6 +353,21 @@ fn render_preset_detail(p: &Preset) -> String {
         let names: Vec<&str> = p.queries.iter().map(|q| q.name.as_str()).collect();
         add(&mut rows, "Named queries", &names.join(", "));
     }
+    for c in &p.commands {
+        let policy = match mcp_warden_core::commands::effective_approval(p, c) {
+            ApprovalPolicy::Auto => "auto",
+            ApprovalPolicy::Prompt => "prompt",
+            ApprovalPolicy::Deny => "deny",
+        };
+        add(
+            &mut rows,
+            &format!("Command {}", c.name),
+            &format!("{} ({policy})", c.template),
+        );
+    }
+    if let Some(max) = p.max_output_bytes {
+        add(&mut rows, "Max output (bytes)", &max.to_string());
+    }
 
     // SECURITY: Show only the secret reference name (keychain key), never the value.
     // `p.secret` is the keychain entry name; `p.auth` contains a keychain entry name.
@@ -602,6 +617,20 @@ mod tests {
         }
         assert!(html.contains(r"p\u{202E}x") && html.contains(r"/a\u{2066}b"));
         assert!(html.contains(r"bad\u{2028}line"), "{html}");
+    }
+
+    #[test]
+    fn the_preset_page_lists_named_commands() {
+        let cfg: Config =
+            toml::from_str(include_str!("../../tests/fixtures/named_commands.toml")).unwrap();
+        let html = render_preset_detail(&cfg.preset[0]);
+        assert!(
+            html.contains(
+                "Command tail_log</dt><dd>journalctl -u app -n {lines} --no-pager (prompt)"
+            ),
+            "{html}"
+        );
+        assert!(html.contains("Max output (bytes)"), "{html}");
     }
 
     #[test]

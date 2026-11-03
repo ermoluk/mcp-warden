@@ -158,6 +158,7 @@ mcp-warden run github               # what the rewired entry runs: the server, w
 - **`list_presets`** — read-only catalogue of available actions.
 - **`proxy_http`** — execute an HTTP request through a preset; allow-list validation runs before credential injection.
 - **`ssh_exec`** *(v0.2.0)* — run a shell command on an SSH host; command must match preset's anchored regex allow-list; key-based auth + host-key verification.
+- **`ssh_run`** *(v0.6.0)* — run one of an SSH preset's named commands: the command line is fixed in the preset, the agent supplies typed values (int, enum, string or path), checked before any credential is read. Optionally each command is also its own tool (`expose_as_tools`).
 - **`sftp_transfer`** *(v0.2.0)* — get/put a file over SFTP; remote path matches preset's `sftp_allowed_paths`, local path under `$HOME` or `/tmp`.
 - **`db_query`** *(v0.2.0)* — run a NAMED QUERY against PostgreSQL / MySQL / Redis. SQL/command is fixed at preset definition; agent supplies only `query_name` + positional params.
 - **`get_secret_for_env`** — last-resort tool when a child process must read a secret from `env`. Always prompts for approval, regardless of preset policy.

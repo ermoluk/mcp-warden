@@ -4,6 +4,12 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### Added
+
+- **Named commands for SSH presets** (`[[preset.commands]]`, the new `ssh_run` tool). The preset fixes each command line; the agent names a command and supplies typed values: `int` (a range), `enum` (a list), `string` (one word matching a pattern) or `path` (an absolute path matching a pattern, no `//`, `.` or `..`). Values are checked before any credential is read, may not start with `-`, contain a space or shell syntax, and the filled-in command passes the shell-syntax check again (invariants 3 and 5). Templates are checked at startup: one bad command stops the server, naming the preset and the command (invariant 10). Each command may set its own `approval` (`mcp-warden approval PRESET POLICY --command NAME`); a command's `auto` counts only once the preset is confirmed (`preset confirm`), and the approval window is per command. `list_presets` shows each command and what its parameters accept; `expose_as_tools = true` also offers each command as its own tool, `ssh_<preset>_<command>` (at most 32). `mcp-warden preset test NAME --run CMD --param k=v` shows the verdict and the exact command it would send. `preset scaffold ssh-deploy --host H --user U` writes a preset with named commands only. See the cookbook and threat model R4.
+- **`max_output_bytes` for SSH presets**: lowers how much stdout and stderr `ssh_exec` and `ssh_run` read (default and ceiling 1 MiB per stream); a named command can lower it further.
+- **`doctor` warns** about catch-alls (`.*`, `.+`, `\S+`, `[^ ]+`) anywhere in `allowed_commands`, such as `git pull.*`, and about named commands that run `rm`, `shred`, `dd`, `mkfs*` or a recursive `chmod` / `chown`.
+
 ### Security
 
 - **Seven of the eight accepted dependency advisories are gone.** russh 0.65 (RUSTSEC-2026-0387, `crypto-bigint`), notify-rust 4.18 (RUSTSEC-2026-0194 and -0195, `quick-xml`, Windows only) and mysql_async 0.37 (RUSTSEC-2026-0391, -0398, -0403 and -0410, `zstd`). The one left is `rsa` (RUSTSEC-2023-0071, the Marvin attack): no `rsa` release fixes it, and mcp-warden only signs with RSA keys, never decrypts. A host certificate offered by an SSH server is checked by the key it certifies, which `known_hosts` must pin like any other host key; `@cert-authority` lines are still not supported.

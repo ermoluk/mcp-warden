@@ -116,6 +116,67 @@ forced command in `authorized_keys` or `ForceCommand` — so a pattern that is
 too broad or a leaked key still can't run anything else. Step by step, with a
 working gate script: [`docs/ssh-hardening.md`](ssh-hardening.md).
 
+## SSH — named commands (v0.6.0)
+
+Instead of letting the agent compose a command line that a regex then has to
+judge, declare the commands it may run and the values it may fill in. The agent
+calls `ssh_run` with the command's name and typed values; nothing else reaches
+the host.
+
+```toml
+[[preset]]
+name = "deploy"
+type = "ssh"
+description = "Production deploy host"
+host = "deploy.example.com"
+user = "warden-deploy"
+secret = "deploy_key"
+approval = "prompt"
+approval_window_seconds = 600
+max_output_bytes = 65536
+
+[[preset.commands]]
+name = "tail_log"
+description = "Last N lines of the app log"
+template = "journalctl -u app -n {lines} --no-pager"
+params.lines = { type = "int", min = 1, max = 500 }
+
+[[preset.commands]]
+name = "restart"
+description = "Restart one service"
+template = "sudo -n systemctl restart {unit}"
+params.unit = { type = "enum", values = ["app.service", "worker.service"] }
+
+[[preset.commands]]
+name = "trash_file"
+description = "Move one uploaded file to the trash folder"
+template = "mv {path} /srv/app/.trash/"
+params.path = { type = "path", pattern = "/srv/app/uploads/[a-z0-9._-]+" }
+```
+
+- **Parameter types.** `int` (`min`, `max`; a decimal number without sign or
+  leading zeros), `enum` (`values`, matched exactly), `string` (one word
+  matching `pattern`) and `path` (an absolute path matching `pattern`, with no
+  `//` and no `.` or `..` segment). No value may start with `-`, contain a
+  space or shell syntax.
+- **Placeholders.** A `string` or `path` fills a whole word; an `int` or
+  `enum` may be part of one (`--lines={n}`). Only an `enum` may be the first
+  word.
+- **Checked at startup.** A template that could ever produce shell syntax or a
+  command over 1024 bytes, an undeclared or unused parameter, or a bad pattern
+  stops the server with the preset and command named.
+- **Approval.** A command may set its own `approval`; the window is per
+  command (`ssh_run:tail_log`), and the prompt shows the full command line. A
+  command's `auto` needs `mcp-warden approval deploy auto --command tail_log
+  --confirm-auto` and counts only once the preset is confirmed.
+- **Try it first.** `mcp-warden preset test deploy --run tail_log --param
+  lines=50` prints the verdict and the exact command it would send.
+- **Tools of their own.** `expose_as_tools = true` also offers each command as
+  `ssh_deploy_tail_log` and so on (at most 32 tools across the config).
+- **Starting point.** `mcp-warden preset scaffold ssh-deploy --host H --user U`
+  writes a preset with status, logs, restart and pull commands and no
+  `allowed_commands`, so `ssh_exec` refuses everything.
+
 ## SSH + SFTP — Log fetcher
 
 ```toml
@@ -246,7 +307,7 @@ response_fields = ["[].number", "[].title", "[].state", "[].user.login"]
 
 ## Patterns to AVOID
 
-- **Wildcard SSH commands.** `^git.*$` lets the agent run `git rebase --continue || rm -rf /`. Always anchor the entire pattern with explicit alternations.
+- **Wildcard SSH commands.** `^git.*$` lets the agent pick any git subcommand and options, such as `git pull --upload-pack=/tmp/x`. Anchor the entire pattern with explicit alternations, or better, use named commands. `mcp-warden doctor` warns about catch-alls.
 - **Open-ended SFTP allow-lists.** `sftp_allowed_paths = ["/"]` is a footgun. Pick the narrowest prefix that covers your use case.
 - **Destructive named queries with `auto` approval.** `DELETE FROM users WHERE id = $1` paired with `approval = "auto"` lets the agent drop arbitrary rows. Use `prompt` (or `deny`) for any query that mutates.
 - **Sharing a preset secret across types.** A preset's `secret` is read once per call; don't reuse the same keychain entry as both an SSH key and a DB password — rotate independently.

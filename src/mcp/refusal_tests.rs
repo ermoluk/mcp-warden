@@ -65,6 +65,30 @@ impl Harness {
             sftp_allowed_paths = ["/srv/app/"]
             approval = "prompt"
 
+            [[preset.commands]]
+            name = "word"
+            description = "x"
+            template = "echo {{v}}"
+            params.v = {{ type = "string", pattern = ".*" }}
+
+            [[preset.commands]]
+            name = "path"
+            description = "x"
+            template = "cat {{v}}"
+            params.v = {{ type = "path", pattern = ".*" }}
+
+            [[preset.commands]]
+            name = "num"
+            description = "x"
+            template = "head -n {{v}} f"
+            params.v = {{ type = "int", min = 0, max = 9223372036854775807 }}
+
+            [[preset.commands]]
+            name = "opt"
+            description = "x"
+            template = "ls --color={{v}}"
+            params.v = {{ type = "enum", values = ["auto", "never"] }}
+
             [[preset]]
             name = "pg"
             type = "postgres"
@@ -141,6 +165,18 @@ impl Harness {
             }))
             .await;
         assert!(res.is_err(), "ssh_exec {command:?} was allowed");
+    }
+
+    pub async fn ssh_run(&self, command: &str, params: BTreeMap<String, Value>) {
+        let res = self
+            .server
+            .ssh_run(Parameters(SshRunArgs {
+                preset_name: "box".into(),
+                command: command.into(),
+                params,
+            }))
+            .await;
+        assert!(res.is_err(), "ssh_run {command:?} was allowed");
     }
 
     pub async fn sftp(&self, direction: &str, remote: &str, local: &str) {
@@ -226,6 +262,37 @@ async fn corpus_commands_are_refused_before_anything_is_touched() {
         h.ssh(command).await;
     }
     h.assert_all_refused_untouched(entries.len()).await;
+}
+
+#[tokio::test]
+async fn corpus_named_commands_are_refused_before_anything_is_touched() {
+    let h = Harness::wide_open().await;
+    let entries = corpus(include_str!("../../tests/corpus/named-commands.txt"));
+    for (_, input, _) in &entries {
+        let (command, json) = input.split_once(' ').unwrap();
+        h.ssh_run(command, serde_json::from_str(json).unwrap())
+            .await;
+    }
+    // A preset that is not an SSH preset, and one that does not exist.
+    let res = h
+        .server
+        .ssh_run(Parameters(SshRunArgs {
+            preset_name: "web".into(),
+            command: "word".into(),
+            params: serde_json::from_value(json!({"v": "a"})).unwrap(),
+        }))
+        .await;
+    assert!(res.is_err());
+    let res = h
+        .server
+        .ssh_run(Parameters(SshRunArgs {
+            preset_name: "nope".into(),
+            command: "word".into(),
+            params: BTreeMap::new(),
+        }))
+        .await;
+    assert!(res.is_err());
+    h.assert_all_refused_untouched(entries.len() + 2).await;
 }
 
 #[tokio::test]
