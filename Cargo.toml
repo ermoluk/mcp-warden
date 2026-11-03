@@ -61,7 +61,7 @@ crossterm = "0.29"
 russh = "0.60"
 russh-sftp = "2.1"
 tokio-postgres = { version = "0.7", features = ["with-serde_json-1", "with-chrono-0_4"] }
-mysql_async = { version = "0.34", default-features = false, features = ["minimal-rust", "rustls-tls"] }
+mysql_async = { version = "0.37", default-features = false, features = ["minimal-rust", "rustls-tls", "ring", "tls12"] }
 redis = { version = "0.27", features = ["tokio-comp", "tokio-rustls-comp", "tls-rustls-webpki-roots"] }
 openapiv3 = "2.2"
 serde_yaml = "0.9"

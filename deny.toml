@@ -17,13 +17,6 @@ ignore = [
     # pre-release (via crypto-primes). Fixed when russh moves past it
     # (russh 0.65 is a semver-breaking upgrade, left for its own change).
     { id = "RUSTSEC-2026-0387", reason = "crypto-bigint pinned by russh's rsa pre-release" },
-    # zstd 0.13 / zstd-safe 7 / zstd-sys 2.0 in mysql_common, for MySQL
-    # binlog and compressed-protocol support mcp-warden does not enable.
-    # Fixed by upgrading mysql_async (semver-breaking, its own change).
-    { id = "RUSTSEC-2026-0391", reason = "zstd unused: MySQL compression is not enabled" },
-    { id = "RUSTSEC-2026-0398", reason = "zstd unused: MySQL compression is not enabled" },
-    { id = "RUSTSEC-2026-0403", reason = "zstd unused: MySQL compression is not enabled" },
-    { id = "RUSTSEC-2026-0410", reason = "zstd-sys: WebAssembly shim, not a target we build" },
 ]
 # Unmaintained and unsound crates deep in the tree are reported, not fatal:
 # each is listed by `cargo deny check advisories` and reviewed per release.
@@ -60,10 +53,3 @@ allow-wildcard-paths = true
 unknown-registry = "deny"
 unknown-git = "deny"
 allow-registry = ["https://github.com/rust-lang/crates.io-index"]
-
-# webpki 0.22 (via mysql_async) has no `license` field; its LICENSE file
-# is ISC-style.
-[[licenses.clarify]]
-crate = "webpki"
-expression = "ISC"
-license-files = [{ path = "LICENSE", hash = 0x001c7e6c }]
