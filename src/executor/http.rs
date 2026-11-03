@@ -146,10 +146,13 @@ pub(crate) fn check_query_and_body_keys(
     Ok(())
 }
 
-/// Refuse a query parameter named like the preset's query credential,
-/// compared ignoring ASCII case: the agent could otherwise send its own
-/// value in the credential's place, or a second one for the upstream to
-/// pick from. Runs before any credential is read (invariant 3).
+/// Refuse a query parameter named like the preset's query credential: the
+/// agent could otherwise send its own value in the credential's place, or a
+/// second one for the upstream to pick from. Names are compared the way
+/// PHP and similar frameworks read them — ignoring ASCII case and
+/// surrounding spaces, with `.` and ` ` as `_`, and `key[…]` as `key` —
+/// so `KEY` and `key[]` are refused as `key` is. Runs before any
+/// credential is read (invariant 3).
 pub(crate) fn check_auth_query_name(
     preset: &Preset,
     query: Option<&std::collections::BTreeMap<String, String>>,
@@ -157,10 +160,23 @@ pub(crate) fn check_auth_query_name(
     let Some(mcp_warden_core::config::Auth::Query { name, .. }) = &preset.auth else {
         return Ok(());
     };
+    let normalise = |k: &str| -> String {
+        k.split('[')
+            .next()
+            .unwrap_or(k)
+            .trim()
+            .chars()
+            .map(|c| match c {
+                '.' | ' ' => '_',
+                c => c.to_ascii_lowercase(),
+            })
+            .collect()
+    };
+    let wanted = normalise(name);
     match query
         .into_iter()
         .flat_map(|q| q.keys())
-        .find(|k| k.trim().eq_ignore_ascii_case(name))
+        .find(|k| normalise(k) == wanted)
     {
         Some(_) => Err(WardenError::Validation(format!(
             "query parameter '{name}' carries this preset's credential and cannot be set by \
@@ -1230,7 +1246,10 @@ mod tests {
             name: "key".into(),
             secret: "k".into(),
         });
-        for name in ["key", "KEY", "Key", " key"] {
+        // PHP reads `key[]` and `key[x]` as `key` too.
+        for name in [
+            "key", "KEY", "Key", " key", "key ", "key[]", "key[0]", "KEY[x]",
+        ] {
             let query: std::collections::BTreeMap<String, String> =
                 [(name.to_string(), "mine".to_string())].into();
             let req = Request::Http {
