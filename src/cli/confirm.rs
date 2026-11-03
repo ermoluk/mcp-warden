@@ -173,6 +173,12 @@ fn describe(p: &Preset) -> String {
     } else {
         names.join(", ")
     };
+    let token_via = match &p.auth {
+        Some(mcp_warden_core::config::Auth::Oauth2 { token_url, .. }) => {
+            format!(" (token from {token_url})")
+        }
+        _ => String::new(),
+    };
     let destination = p
         .base_url
         .clone()
@@ -223,7 +229,7 @@ fn describe(p: &Preset) -> String {
             )
         })
         .unwrap_or_default();
-    format!("{policy}, secret {secret} → {destination}, allows {allows}{until}")
+    format!("{policy}, secret {secret} → {destination}{token_via}, allows {allows}{until}")
 }
 
 /// The prompt reads "confirm_preset → mcp-warden" / "confirm_server → mcp-warden".

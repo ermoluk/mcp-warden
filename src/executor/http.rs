@@ -275,8 +275,17 @@ pub async fn execute(
     req: HttpRequest,
 ) -> Result<HttpResponse> {
     let method_upper = req.method.to_uppercase();
-    let summary =
+    let mut summary =
         crate::executor::summary::http(&method_upper, preset.base_url.as_deref(), &req.path);
+    // The client secret and the refresh token go to the token endpoint:
+    // the prompt says where.
+    if let Some(mcp_warden_core::config::Auth::Oauth2 { token_url, .. }) = &preset.auth {
+        let host = url::Url::parse(token_url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_default();
+        summary.push_str(&format!(" (token via {host})"));
+    }
     let request = Request::Http {
         method: &method_upper,
         path: &req.path,

@@ -397,6 +397,9 @@ mod tests {
         }
         let token_requests = token.received_requests().await.unwrap();
         assert_eq!(token_requests.len(), 2);
+        // The audit summary (and the prompt) says where the token comes from.
+        let summary = s.audit.recent(1).unwrap()[0].summary.clone();
+        assert!(summary.ends_with(" (token via 127.0.0.1)"), "{summary}");
         let sent = &api.received_requests().await.unwrap()[0];
         assert_eq!(
             sent.headers["authorization"].to_str().unwrap(),
