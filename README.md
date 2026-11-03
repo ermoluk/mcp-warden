@@ -177,24 +177,21 @@ Restart Claude Code and run `/mcp-warden:setup`. If you previously added the ser
 
 Other MCP clients: see [`docs/claude-code-setup.md`](docs/claude-code-setup.md) and [`docs/cursor-setup.md`](docs/cursor-setup.md) for manual setup.
 
-## What's new in v0.5.4
+## What's new in v0.6.0
 
-A security release: the result of a full audit of 0.5.3. Upgrade.
-
-- **`auto` holds only in the form you confirmed.** An agent that can write files could rewrite `config.toml` (or point `MCP_WARDEN_CONFIG_DIR` at its own) so that the next session used a secret without asking. Now an `auto` preset runs without a prompt only as a human confirmed it in the approval prompt, `mcp-warden run` asks before a wrapped server's first launch and after any edit to it, and every prompt names where the request goes (`GET https://api.github.com/user/repos`).
-- **Method override refused:** `POST /x?_method=DELETE` (and `_method` in a JSON body) no longer gets past `allowed_methods` on Laravel, Symfony and the like.
-- **Telegram stays the only approver when configured;** `get_secret_for_env` reveals only a preset's or wrapped server's secret, never the bot token.
-- **SFTP keeps away from credentials and startup files** (`~/.ssh`, `~/.aws`, shell rc files, agent configs) and from hard links; `allowed_local_paths` narrows it further.
-- **Bounded upstreams:** response, output and result size limits and whole-call timeouts for HTTP, SSH, SFTP and databases; the credential scrub also finds base64, hex and re-cased echoes, and covers `db_query` rows.
-- **Plus:** DNS-rebinding protection for `mcp-warden web`, bidi and invisible characters shown as escapes in prompts, `http://` only to loopback, a kill switch that latches within a second, dependency advisories fixed, and CI checks with `cargo deny` / `cargo audit`.
+- **Named SSH commands.** Declare the commands an agent may run, with typed parameters (`int`, `enum`, `string`, `path`); the agent calls `ssh_run` with a name and values, and never composes a command line. Every template is checked at startup, every value before the key is read, and the prompt shows the full command. Each command can have its own approval policy and window, and `expose_as_tools` makes each one its own MCP tool. Try one with `mcp-warden preset test NAME --run CMD --param k=v`; start from `mcp-warden preset scaffold ssh-deploy`.
+- **More ways to authenticate HTTP:** an API key as a query parameter, OAuth2 (a fresh access token for each call, refresh-token rotation handled across processes) and AWS SigV4, with templates for Google Maps, Google Drive and S3.
+- **A tamper-evident audit log.** Every write is hash-chained, the chain is anchored in the keychain, and `mcp-warden audit verify` names any edited, deleted or rolled-back entry. A rewritten log is never anchored.
+- **Dependencies:** russh 0.65, mysql_async 0.37 and notify-rust 4.18 clear seven of the eight accepted RustSec advisories; RSA SSH keys now sign with SHA-2, so they work with current OpenSSH.
+- **Plus:** `max_output_bytes` for SSH presets, `doctor` warnings for catch-all command patterns and destructive templates, `scan` recognises AWS temporary keys and Google OAuth credentials, and upstream errors no longer include the request URL.
 
 **After upgrading:**
 
-1. Run `mcp-warden preset confirm` once. Until you do, every `auto` preset asks before each call.
-2. Approve each wrapped server (`mcp-warden run`) the first time it starts.
-3. The server now refuses to start with an `http://` `base_url` to a host other than localhost, with a config dir other users can write to, or with two presets of the same name. `mcp-warden doctor` names what to fix.
+1. Restart your MCP clients, so no 0.5.x server keeps writing to the audit log without the chain.
+2. If you give a named command `approval = "auto"`, run `mcp-warden preset confirm` for its preset; until then it asks.
+3. Building from source now needs Rust 1.94.1. Prebuilt binaries and packages are unaffected.
 
-Every change, with the behaviour changes marked: [CHANGELOG.md](CHANGELOG.md). Earlier releases are there too.
+Every change: [CHANGELOG.md](CHANGELOG.md). The re-audit of this release is in [`docs/security/security-audit-2026-11.md`](docs/security/security-audit-2026-11.md).
 
 ## How it compares
 
@@ -203,18 +200,18 @@ Other MCP credential brokers make different trade-offs:
 | | mcp-warden | [Keyward](https://github.com/arturayupov/keyward) | [Wundervault](https://github.com/wundervault/wundervault-mcp) | [Janee](https://github.com/rsdouglas/janee) |
 |---|---|---|---|---|
 | Secret stays out of the agent's context | Yes, except `get_secret_for_env`, which always asks first | Not returned to the agent; written into a project file such as `.env` | Yes, no tool returns a value | Yes |
-| What the agent can do | HTTP, SSH commands, SFTP, named SQL / Redis queries | Have a key written into a project file | HTTP, SSH commands / rsync, x402 payments, signing | HTTP (incl. AWS SigV4 / OAuth 1.0a signing), CLI tools with injected env vars |
-| Per-call allow-lists | HTTP method + path, SSH command regex, SFTP paths, named DB queries | Not yet (per-key policy is on its roadmap) | Allowed SSH hosts per key; an approval is bound to the HTTP destination, method and path | HTTP method + path rules, allowed executables |
+| What the agent can do | HTTP (bearer, header, basic, query key, OAuth2, AWS SigV4), named SSH commands with typed parameters, SSH commands, SFTP, named SQL / Redis queries | Have a key written into a project file | HTTP (incl. OAuth 1.0a signing), SSH commands / rsync, x402 payments, signing | HTTP (incl. AWS SigV4 / OAuth 1.0a signing), CLI tools with injected env vars |
+| Per-call allow-lists | HTTP method + path, SSH named commands (typed values) or command regex, SFTP paths, named DB queries | Not yet (per-key policy is on its roadmap) | Allowed SSH hosts per key (any command on them); an approval is bound to the HTTP destination, method and path | HTTP method + path rules, allowed executables |
 | Human approval | Native dialog (macOS, Windows), notification (Linux) or Telegram; on by default | Native OS dialog per request, once or for the session | Passkey, for secrets marked "ask me first" | ? |
 | Where secrets live | OS keychain | `age`-encrypted file, master key in the OS keystore | End-to-end encrypted hosted vault, used by a local broker | Encrypted file in `~/.janee/`, master key in the OS keychain or a file |
 | No cloud account or background service | Yes | Yes | No: needs a wundervault.com vault and a broker installed with admin rights | Yes (stdio; HTTP mode for containers) |
-| Audit log | Local SQLite, append-only, includes refused calls | Local JSONL of decisions | On your computer, tamper-evident | Local JSONL of requests |
+| Audit log | Local SQLite, append-only, includes refused calls; hash-chained with a keychain anchor (`audit verify`) | Local JSONL of decisions | On your computer, signed, checked against a copy of the chain on their server | Local JSONL of requests |
 | Kill switch | `mcp-warden lock`, or `/lock` in Telegram | ? | Revoke an agent in the vault | Revoke a session (`janee revoke`) |
 | Works with any MCP client | Yes | Yes | Yes | Yes |
 | License | Apache-2.0 | MIT | AGPL-3.0 (the hosted vault is not open source) | MIT |
 | Install | Homebrew, Scoop, Nix, npm, `cargo install` / `binstall`, binaries for macOS / Linux / Windows | Homebrew, Scoop, `go install`, binaries | npm plus a broker installer, free account | npm or Docker |
 
-Compared with Keyward 0.1.1, Wundervault MCP server 2.0.1 and Janee 0.16.0, from each project's README and docs as of October 2026. `?` means not documented there. If something here is wrong or out of date, please open an issue.
+Compared with Keyward 0.1.1, Wundervault MCP server 2.1.0 and Janee 0.16.0, from each project's README and docs as of November 2026. `?` means not documented there. If something here is wrong or out of date, please open an issue.
 
 ## Security model
 
