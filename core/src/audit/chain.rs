@@ -185,13 +185,16 @@ pub(crate) fn links_from(conn: &Connection, seq: i64, hash: &str) -> Result<bool
 /// before 0.6.0, whose rows the genesis record digests. Idempotent, and
 /// safe when several processes open the database at once.
 pub(crate) fn ensure_genesis(conn: &mut Connection) -> Result<()> {
+    // Every open runs this: check without the write lock first, so opening
+    // a log that has its chain never queues behind other writers.
+    if started(conn)? {
+        return Ok(());
+    }
     let tx = conn
         .transaction_with_behavior(TransactionBehavior::Immediate)
         .map_err(audit)?;
-    let started: bool = tx
-        .query_row("SELECT EXISTS (SELECT 1 FROM chain)", [], |r| r.get(0))
-        .map_err(audit)?;
-    if !started {
+    // Another process may have started it since the check above.
+    if !started(&tx)? {
         let through: i64 = tx
             .query_row("SELECT COALESCE(MAX(id), 0) FROM events", [], |r| r.get(0))
             .map_err(audit)?;
@@ -210,6 +213,11 @@ pub(crate) fn ensure_genesis(conn: &mut Connection) -> Result<()> {
         tx.pragma_update(None, "user_version", 1).map_err(audit)?;
     }
     tx.commit().map_err(audit)
+}
+
+fn started(conn: &Connection) -> Result<bool> {
+    conn.query_row("SELECT EXISTS (SELECT 1 FROM chain)", [], |r| r.get(0))
+        .map_err(audit)
 }
 
 /// The raw columns of every row up to `through`, in id order, as JSON
