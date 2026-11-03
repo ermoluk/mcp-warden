@@ -164,6 +164,19 @@ pub struct Preset {
     pub commands: Vec<NamedCommand>,
 }
 
+impl Preset {
+    /// Whether a call through this preset could run without a prompt: the
+    /// preset's policy, or any named command's, is `auto`. Each counts only
+    /// once a human confirmed the preset (`stamp::demote_unconfirmed_auto`).
+    pub fn has_auto(&self) -> bool {
+        self.approval == ApprovalPolicy::Auto
+            || self
+                .commands
+                .iter()
+                .any(|c| c.approval == Some(ApprovalPolicy::Auto))
+    }
+}
+
 /// One step of a `response_fields` path.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum FieldStep {
