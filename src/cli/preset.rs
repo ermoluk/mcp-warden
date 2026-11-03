@@ -3,6 +3,7 @@ use clap::{Args, Subcommand};
 use mcp_warden_core::config::{ApprovalPolicy, Auth, Config, NamedQuery, Preset, PresetType};
 use mcp_warden_core::error::{Result, WardenError};
 use mcp_warden_core::keychain::KeychainStore;
+use std::collections::BTreeMap;
 use std::fs;
 use std::path::Path;
 
@@ -668,8 +669,14 @@ pub struct TestArgs {
     /// HTTP path of the simulated call, e.g. `/repos/OWNER/REPO`.
     pub path: Option<String>,
     /// Simulate `ssh_exec` with this command.
-    #[arg(long, conflicts_with_all = ["method", "get", "put", "query"])]
+    #[arg(long, conflicts_with_all = ["method", "get", "put", "query", "run"])]
     pub command: Option<String>,
+    /// Simulate `ssh_run` with this named command (values with `--param`).
+    #[arg(long, value_name = "COMMAND", conflicts_with_all = ["method", "get", "put", "query"])]
+    pub run: Option<String>,
+    /// A parameter of the `--run` command, `NAME=VALUE`; repeat for each.
+    #[arg(long = "param", value_name = "NAME=VALUE", requires = "run")]
+    pub param: Vec<String>,
     /// Simulate an SFTP download.
     #[arg(long, num_args = 2, value_names = ["REMOTE", "LOCAL"], conflicts_with_all = ["method", "put", "query"])]
     pub get: Option<Vec<String>>,
@@ -689,10 +696,20 @@ pub struct TestArgs {
 
 impl TestArgs {
     /// The simulated call. `--params N` stands for N `null` parameters,
-    /// which `params` must hold.
-    fn request<'a>(&'a self, params: &'a [serde_json::Value]) -> Option<Request<'a>> {
+    /// which `params` must hold; `named` holds the `--param` values.
+    fn request<'a>(
+        &'a self,
+        params: &'a [serde_json::Value],
+        named: &'a BTreeMap<String, serde_json::Value>,
+    ) -> Option<Request<'a>> {
         if let (Some(method), Some(path)) = (&self.method, &self.path) {
             return Some(Request::http(method, path));
+        }
+        if let Some(command) = &self.run {
+            return Some(Request::SshRun {
+                command,
+                params: named,
+            });
         }
         if let Some(command) = &self.command {
             return Some(Request::Ssh { command });
@@ -710,7 +727,8 @@ fn test_preset(args: TestArgs, config_path: &Path, kc: &dyn KeychainStore) -> Re
     let raw = fs::read_to_string(config_path).map_err(WardenError::Io)?;
     let cfg: Config = toml::from_str(&raw).map_err(|e| WardenError::Config(e.to_string()))?;
     let nulls = vec![serde_json::Value::Null; args.params];
-    let Some(request) = args.request(&nulls) else {
+    let named = named_params(&args.param)?;
+    let Some(request) = args.request(&nulls, &named) else {
         cfg.validate(kc)?;
         let p = cfg
             .find(&args.name)
@@ -736,16 +754,49 @@ fn test_preset(args: TestArgs, config_path: &Path, kc: &dyn KeychainStore) -> Re
         simulate(p, &request, chrono::Utc::now())
     };
     let allowed = matches!(verdict, Verdict::Allowed { .. });
+    // What an allowed ssh_run call would send, exactly.
+    let runs = match request {
+        Request::SshRun { command, params } if allowed => {
+            mcp_warden_core::commands::render(p, command, params)
+                .ok()
+                .map(|r| r.command)
+        }
+        _ => None,
+    };
     if args.format == "json" {
-        println!("{}", verdict_json(p, &request, &verdict));
+        let mut json = verdict_json(p, &request, &verdict);
+        if let Some(command) = &runs {
+            json["command"] = command.clone().into();
+        }
+        println!("{json}");
     } else {
         println!("{}", verdict_line(&verdict));
+        if let Some(command) = &runs {
+            println!("  runs: {command}");
+        }
     }
     if !allowed {
         // The verdict is the output; exit 1 so scripts can branch on it.
         std::process::exit(1);
     }
     Ok(())
+}
+
+/// `--param NAME=VALUE` values. Each is passed as a string, which every
+/// parameter type accepts in its text form (an int as `50`).
+fn named_params(raw: &[String]) -> Result<BTreeMap<String, serde_json::Value>> {
+    let mut out = BTreeMap::new();
+    for p in raw {
+        let (name, value) = p.split_once('=').ok_or_else(|| {
+            WardenError::Validation(format!("--param '{p}': expected NAME=VALUE"))
+        })?;
+        if out.insert(name.to_string(), value.into()).is_some() {
+            return Err(WardenError::Validation(format!(
+                "--param '{name}' is given more than once"
+            )));
+        }
+    }
+    Ok(out)
 }
 
 fn verdict_line(verdict: &Verdict) -> String {

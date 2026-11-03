@@ -537,6 +537,62 @@ fn preset_test_simulates_an_allowed_http_call() {
 }
 
 #[test]
+fn preset_test_simulates_a_named_command() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_named_commands(tmp.path());
+    simulate(
+        tmp.path(),
+        &["deploy", "--run", "tail_log", "--param", "lines=50"],
+    )
+    .success()
+    .stdout(predicate::str::contains("ALLOWED — would ask for approval"))
+    .stdout(predicate::str::contains(
+        "runs: journalctl -u app -n 50 --no-pager",
+    ));
+    let out = simulate(
+        tmp.path(),
+        &[
+            "deploy",
+            "--run",
+            "trash_file",
+            "--param",
+            "path=/srv/app/uploads/a.png",
+            "--format",
+            "json",
+        ],
+    )
+    .success();
+    let json: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(json["tool"], "ssh_run");
+    assert_eq!(
+        json["command"],
+        "mv /srv/app/uploads/a.png /srv/app/.trash/"
+    );
+
+    // Hostile values are refused with exit code 1, and nothing is shown
+    // as what would run.
+    for param in ["lines=-rf", "lines=1;id", "lines=0", "lines=../x"] {
+        simulate(
+            tmp.path(),
+            &["deploy", "--run", "tail_log", "--param", param],
+        )
+        .code(1)
+        .stdout(predicate::str::starts_with("REFUSED — "))
+        .stdout(predicate::str::contains("runs:").not());
+    }
+    simulate(
+        tmp.path(),
+        &["deploy", "--run", "checkout", "--param", "tag=-v1.2.3"],
+    )
+    .code(1);
+    simulate(
+        tmp.path(),
+        &["deploy", "--run", "tail_log", "--param", "lines"],
+    )
+    .failure();
+}
+
+#[test]
 fn preset_test_refuses_a_path_outside_the_allow_list() {
     let tmp = tempfile::tempdir().unwrap();
     seed_simulator_presets(tmp.path());
