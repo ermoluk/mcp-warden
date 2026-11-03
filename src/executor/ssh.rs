@@ -96,7 +96,28 @@ pub async fn run(
     super::policy::check_request(preset, &request)
         .inspect_err(|e| actx.record_refused(&preset.name, "ssh_exec", &summary, e))?;
     let event_id = actx.authorise(preset, "ssh_exec", &summary, false).await?;
+    execute(
+        actx,
+        preset,
+        event_id,
+        command,
+        super::limits::MAX_SSH_OUTPUT_BYTES,
+    )
+    .await
+}
 
+/// Run `command` on the preset's host once the call was authorised as
+/// `event_id`: read the key (only now, after the checks and the approval),
+/// connect, check the host key, run the command, read at most `max_output`
+/// bytes of each stream and record the outcome. Shared by `ssh_exec` and
+/// `ssh_run`.
+pub(crate) async fn execute(
+    actx: &ActionExecutor,
+    preset: &Preset,
+    event_id: i64,
+    command: String,
+    max_output: usize,
+) -> Result<SshExecResponse> {
     let key_secret = actx
         .keychain
         .get(preset.secret.as_deref().unwrap_or(""))?
@@ -153,9 +174,9 @@ pub async fn run(
             .await
             .map_err(|e| WardenError::Executor(format!("exec: {e}")))?;
 
-        // At most MAX_SSH_OUTPUT_BYTES of each stream: a host that keeps
+        // At most `max_output` bytes of each stream: a host that keeps
         // writing gets its output cut and the call ends there.
-        let max = super::limits::MAX_SSH_OUTPUT_BYTES;
+        let max = max_output;
         let mut stdout = Vec::<u8>::new();
         let mut stderr = Vec::<u8>::new();
         let mut exit_code: Option<u32> = None;
