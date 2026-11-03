@@ -2576,6 +2576,7 @@ dependencies = [
  "flate2",
  "futures",
  "getrandom 0.3.4",
+ "getrandom 0.4.2",
  "insta",
  "is-terminal",
  "libc",

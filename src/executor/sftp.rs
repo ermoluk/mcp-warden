@@ -393,11 +393,9 @@ async fn transfer_inner(
     let mut session = client::connect(config, (host.as_str(), port), handler)
         .await
         .map_err(|e| WardenError::Executor(format!("connect: {e}")))?;
+    let key = super::ssh::signing_key(&session, private_key).await?;
     let auth = session
-        .authenticate_publickey(
-            &user,
-            russh::keys::PrivateKeyWithHashAlg::new(Arc::new(private_key), None),
-        )
+        .authenticate_publickey(&user, key)
         .await
         .map_err(|e| WardenError::Executor(format!("auth: {e}")))?;
     if !auth.success() {
