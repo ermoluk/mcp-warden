@@ -180,7 +180,7 @@ pub async fn mint(
 
 fn store_rotated(kc: &dyn KeychainStore, preset: &str, entry: &str, token: &Secret) -> Result<()> {
     // Config validation already keeps reserved names out; never write one.
-    if mcp_warden_core::stamp::is_stamp_name(entry) {
+    if mcp_warden_core::stamp::is_reserved_name(entry) {
         return Err(WardenError::Validation(format!(
             "preset '{preset}': refusing to write a rotated refresh token to '{entry}'"
         )));

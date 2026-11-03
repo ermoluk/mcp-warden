@@ -1,7 +1,7 @@
 # Design: tamper-evident audit log
 
-Status: approved for 0.6.0 (2026-11-03). Replaces the "policy, not crypto"
-wording of threat-model R3 and R8 once it ships.
+Status: implemented in 0.6.0 (approved 2026-11-03). Threat model R3 describes
+what it covers.
 
 ## Problem
 

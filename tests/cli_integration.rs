@@ -353,6 +353,63 @@ fn seed_event(dir: &Path, summary: &str, decision: mcp_warden_core::audit::Audit
 }
 
 #[test]
+fn audit_verify_checks_the_chain_and_exits_1_on_tampering() {
+    use mcp_warden_core::audit::AuditDecision;
+    let tmp = tempfile::tempdir().unwrap();
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["audit", "verify"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("no audit log yet"));
+    seed_event(
+        tmp.path(),
+        "GET https://api.github.com/user",
+        AuditDecision::Approved,
+    );
+    seed_event(
+        tmp.path(),
+        "GET https://api.github.com/repos",
+        AuditDecision::Denied,
+    );
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["audit", "verify"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("chain:  intact, 5 records"))
+        .stdout(predicate::str::contains("anchor: not anchored yet"));
+    // Listing still works beside the subcommand.
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["audit", "--last", "1"])
+        .assert()
+        .success()
+        .stdout(predicate::str::contains("/repos"));
+
+    let db = rusqlite::Connection::open(tmp.path().join("audit.db")).unwrap();
+    db.execute_batch("UPDATE events SET decision = 'approved' WHERE id = 2")
+        .unwrap();
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["audit", "verify"])
+        .assert()
+        .code(1)
+        .stdout(predicate::str::contains("chain:  BROKEN"))
+        .stdout(predicate::str::contains(
+            "event 2 changed after it was recorded: decision",
+        ));
+    let out = cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["audit", "verify", "--format", "json"])
+        .assert()
+        .code(1);
+    let json: serde_json::Value = serde_json::from_slice(&out.get_output().stdout).unwrap();
+    assert_eq!(json["intact"], false);
+    assert_eq!(json["records"], 5);
+}
+
+#[test]
 fn audit_filters_by_decision_and_repeats_the_flag() {
     use mcp_warden_core::audit::AuditDecision;
     let tmp = tempfile::tempdir().unwrap();

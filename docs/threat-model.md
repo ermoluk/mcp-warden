@@ -25,7 +25,7 @@ Without scoping, a GitHub PAT lets the agent do everything. Presets restrict by 
 
 ### T4. Silent credential reuse for unintended actions
 
-Every call lands in `audit.db` next to the config file (`mcp-warden doctor` prints the path). The user can review what the agent did. Append-only by trait-surface design (no `delete` / `clear` method).
+Every call lands in `audit.db` next to the config file (`mcp-warden doctor` prints the path). The user can review what the agent did. Append-only by trait-surface design (no `delete` / `clear` method), and since v0.6.0 hash-chained and anchored in the keychain, so an edit made outside mcp-warden shows in `mcp-warden audit verify` (R3).
 
 The log also shows what the agent *tried*. Calls refused before authorisation — unknown preset, method / path / command / remote or local path / named query outside the allow-list, `allow_sftp` off, bad `direction` — are recorded with `decision = "refused"`, the preset name the agent sent (even if no such preset exists), the raw request summary (`GET /raw/path`, `ssh host -- command`, `sftp get remote ↔ local`, `db postgres → query (N param)`) and the validation error as the outcome. `mcp-warden audit` prints each event's summary. Refused events never carry a secret: the summary is built from the agent's own request fields (never headers, the `query` map or the body), and validation runs before any credential is read (invariants 1 and 3). Because refusals are written without a human in the loop, the agent-supplied text of each refused event (preset name, summary, error) is capped at 1024 characters, and the `audit` CLI strips control characters from it and truncates it for display so it cannot drive the terminal; the web UI HTML-escapes it. An agent can still fill the log with many refused calls — the log grows, but nothing is executed.
 
@@ -156,9 +156,13 @@ Up to v0.4.3 macOS had no working prompt under an MCP client: the notification h
 
 The full-screen ratatui dialog renders via `CrosstermBackend::new(std::io::stderr())` so it never touches stdout (the JSON-RPC channel). Under an MCP client stderr is captured and stdin is the JSON-RPC pipe, so the dialog cannot be seen (and on macOS cannot read keys). It is therefore a fallback only on Linux / Windows when stderr is a terminal, or chosen explicitly with `MCP_WARDEN_APPROVAL_TRANSPORT=tui`. Whenever a transport fails to show its prompt, the call is refused and audited as `failed` — never approved. The TUI restores the terminal state on exit (alt-screen + raw mode), but a process kill mid-dialog can leave the terminal in raw mode — the panic hook should reset.
 
-### R3. Audit log integrity is policy, not crypto
+### R3. Audit log integrity: a hash chain and a keychain anchor (v0.6.0)
 
-The SQLite file is `0600`-permissioned and rejects symlinks at open time — since v0.5.4 also at `audit.db-journal`, `-wal` and `-shm`, which SQLite would otherwise follow and write journal pages into, and the database is opened with `SQLITE_OPEN_NOFOLLOW` — but root or anyone with the user's UID can still mutate it with `sqlite3`. Tamper-evident logs (hash-chained, optionally signed) ship in Phase 2+.
+The SQLite file is `0600`-permissioned and rejects symlinks at open time — since v0.5.4 also at `audit.db-journal`, `-wal` and `-shm`, which SQLite would otherwise follow and write journal pages into, and the database is opened with `SQLITE_OPEN_NOFOLLOW` — but root or anyone with the user's UID can still open it with `sqlite3`. Since v0.6.0 such an edit shows (design: [`docs/design/audit-hash-chain.md`](design/audit-hash-chain.md)):
+
+- **The chain.** Every write to the log appends a record to a `chain` table in the same transaction — what was stored, as canonical JSON — linked to the previous record by SHA-256. Triggers refuse updates and deletes of the chain and deletes of events. `mcp-warden audit verify` recomputes the links and checks every event against its records, and names the first broken record, each changed field, deleted or unchained events and changed pre-0.6.0 rows. This alone catches corruption and naive edits, but whoever can write the file can also recompute the whole chain or cut off its end.
+- **The anchor.** How far the chain reached is kept in the keychain (`audit/anchor/…`), moved by a running MCP server about once a minute while the log grows, when it stops, and by `lock`, `unlock` and a clean `audit verify`. It moves only if the record it names still has the hash it names and the links from there hold, so a rewritten log — even one whose chain was recomputed so it verifies — is not blessed by `mcp-warden lock`: the anchor stays, an error goes to stderr, and `audit verify` reports the log as rewritten, cut short, rolled back or replaced. Nothing else happens: the kill switch is not latched.
+- **What it does not cover.** Records after the last anchor (up to about a minute while a server runs, or since the last session ended) can still be rewritten or dropped. An attacker who can write the keychain directly can move the anchor too (N2), and root is out of scope. The web UI never reads the keychain, so it checks the chain inside the database only. On Linux, keyutils entries may not survive a reboot, and `audit verify` then reports "not anchored yet". Rows written before 0.6.0 are not chained; their digest at upgrade shows whether they changed since. A 0.5.x server still running after the upgrade writes unchained rows: restart MCP clients after upgrading.
 
 ### R4. SSH command-injection via careless regex (v0.2.0)
 
@@ -191,9 +195,9 @@ A deny-list cannot be complete: a preset that transfers files should set `allowe
 
 `db_query` rejects agent-supplied SQL — only the preset's declared queries are runnable. But a careless preset can declare destructive queries (`DELETE FROM users WHERE id = $1`) that the agent can drive with arbitrary `$1`. The allow-list moves the trust boundary from "no SQL" to "only this set of SQL"; preset authors must treat each named query as a public API. Checked by reading the drivers rather than with a hostile server: parameters are bound, never spliced into the text — PostgreSQL and MySQL use prepared statements, which hold one statement, and Redis sends each parameter as its own RESP argument; mysql_async 0.37 answers a server's `LOCAL INFILE` request with an error when no handler is set, and mcp-warden sets none, so a hostile MySQL server cannot read local files. Since v0.5.4 `mcp-warden doctor` warns about named Redis queries whose command can run code, rewrite the server's configuration or reach every key (`EVAL`, `SCRIPT`, `FUNCTION`, `CONFIG`, `MODULE`, `DEBUG`, `ACL`, `FLUSHALL`, `KEYS`, `MIGRATE`, `REPLICAOF`, …).
 
-### R8. Audit log integrity is policy, not crypto
+### R8. (merged into R3)
 
-The SQLite file is `0600`-permissioned and rejects symlinks at open time, but root or anyone with the user's UID can still mutate it directly. Tamper-evident logs (hash-chained, optionally signed) are deferred to a later phase.
+Since v0.6.0 audit log integrity is described in R3.
 
 ### R9. Time-boxed approvals are convenience, not deeper trust
 

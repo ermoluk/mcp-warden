@@ -529,11 +529,11 @@ impl Config {
             if let Some(secret) = p
                 .secret_names()
                 .into_iter()
-                .find(|s| crate::stamp::is_stamp_name(s))
+                .find(|s| crate::stamp::is_reserved_name(s))
             {
                 return Err(WardenError::Validation(format!(
-                    "preset '{}': keychain entry '{secret}' is reserved for mcp-warden's \
-                     confirmations and cannot be a preset's secret",
+                    "preset '{}': keychain entry '{secret}' is reserved for mcp-warden's own \
+                     records and cannot be a preset's secret",
                     p.name
                 )));
             }
@@ -563,6 +563,13 @@ impl Config {
                 return Err(WardenError::Validation(
                     "approval.telegram.bot_token_secret is empty".into(),
                 ));
+            }
+            if crate::stamp::is_reserved_name(&tg.bot_token_secret) {
+                return Err(WardenError::Validation(format!(
+                    "approval.telegram.bot_token_secret '{}' is reserved for mcp-warden's own \
+                     records",
+                    tg.bot_token_secret
+                )));
             }
             if tg.chat_id == 0 {
                 return Err(WardenError::Validation(
@@ -1114,7 +1121,13 @@ mod tests {
     #[test]
     fn presets_cannot_use_a_reserved_keychain_name() {
         let kc = InMemoryKeychain::new();
-        kc.set("stamp/key", Secret::new("k".into())).unwrap();
+        for name in [
+            "stamp/key",
+            "audit/anchor/0123456789abcdef",
+            "audit/anchor/x",
+        ] {
+            kc.set(name, Secret::new("k".into())).unwrap();
+        }
         for preset in [
             r#"
             [[preset]]
@@ -1135,6 +1148,21 @@ mod tests {
             user = "u"
             secret = "stamp/key"
             approval = "prompt"
+            "#,
+            r#"
+            [[preset]]
+            name = "p"
+            type = "http"
+            description = "x"
+            base_url = "https://example.com"
+            auth = { type = "query", name = "key", secret = "audit/anchor/0123456789abcdef" }
+            allowed_methods = ["GET"]
+            approval = "prompt"
+            "#,
+            r#"
+            [approval.telegram]
+            bot_token_secret = "audit/anchor/x"
+            chat_id = 42
             "#,
         ] {
             let cfg: Config = toml::from_str(preset).unwrap();
