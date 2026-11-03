@@ -292,7 +292,7 @@ pub async fn execute(
     let resp = match builder.send().await {
         Ok(r) => r,
         Err(e) => {
-            let mut message = e.to_string();
+            let mut message = error_text(e);
             forms.scrub_text(&mut message);
             let _ = exec.audit.record_outcome(
                 event_id,
@@ -326,6 +326,21 @@ pub async fn execute(
         body,
         notice,
     })
+}
+
+/// reqwest's error and its causes, without the request URL: the query
+/// string can hold a credential (`query` auth) or values the agent sent,
+/// and neither belongs in the error the agent and the audit log get.
+pub(crate) fn error_text(e: reqwest::Error) -> String {
+    let e = e.without_url();
+    let mut text = e.to_string();
+    let mut source = std::error::Error::source(&e);
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
 }
 
 /// Redirects are never followed: a hop could leave `base_url`'s host —
@@ -890,6 +905,50 @@ mod tests {
             query: None,
         };
         execute(&exec, &preset, req).await.unwrap()
+    }
+
+    /// reqwest puts the request URL in its error text. A query-parameter
+    /// credential would ride along with it, so the URL never reaches the
+    /// agent or the audit log.
+    #[tokio::test]
+    async fn upstream_errors_do_not_carry_the_url() {
+        use crate::approval::always_deny::AlwaysDeny;
+        use mcp_warden_core::audit::AuditSink;
+        use mcp_warden_core::audit::sqlite_sink::LocalSqlite;
+        use mcp_warden_core::keychain::KeychainStore;
+        use mcp_warden_core::keychain::memory::InMemoryKeychain;
+        use std::sync::Arc;
+
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let keychain = InMemoryKeychain::new();
+        keychain.set("k", Secret::new("test-token".into())).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let audit = Arc::new(LocalSqlite::open(&dir.path().join("audit.db")).unwrap());
+        let exec = ActionExecutor::new(
+            Arc::new(keychain),
+            Arc::new(AlwaysDeny),
+            None,
+            audit.clone(),
+        );
+        let mut preset = p();
+        preset.base_url = Some(format!("http://127.0.0.1:{port}"));
+        let req = HttpRequest {
+            preset_name: preset.name.clone(),
+            path: "/users/abc".into(),
+            method: "GET".into(),
+            body: None,
+            query: Some([("page".to_string(), "url-marker".to_string())].into()),
+        };
+        let err = execute(&exec, &preset, req).await.unwrap_err().to_string();
+        let logged = format!("{:?}", audit.recent(1).unwrap()[0].outcome);
+        for text in [&err, &logged] {
+            assert!(!text.contains("url-marker"), "{text}");
+            assert!(!text.contains("/users/abc"), "{text}");
+        }
     }
 
     /// `GET path` through `execute` against `server`, with the preset

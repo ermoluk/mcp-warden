@@ -340,7 +340,7 @@ async fn probe_http(
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            let msg = scrubbed(e.to_string());
+            let msg = scrubbed(crate::executor::http::error_text(e));
             let lower = msg.to_lowercase();
             let status = if lower.contains("tls") || lower.contains("certificate") {
                 ProbeStatus::TlsError
