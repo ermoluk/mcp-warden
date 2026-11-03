@@ -4,7 +4,7 @@ use crate::executor::credential_echo::CredentialForms;
 use clap::Args;
 use mcp_warden_core::audit::AuditOutcome;
 use mcp_warden_core::audit::sqlite_sink::LocalSqlite;
-use mcp_warden_core::config::{ApprovalPolicy, Auth, Config, Preset, PresetType};
+use mcp_warden_core::config::{ApprovalPolicy, Config, Preset, PresetType};
 use mcp_warden_core::error::Result;
 use mcp_warden_core::keychain::KeychainStore;
 use serde::Serialize;
@@ -131,7 +131,8 @@ pub async fn run(args: DoctorArgs, config_dir: &Path, store: Arc<dyn KeychainSto
                 transports.fallback,
                 audit,
             )
-            .with_lock(config_dir.join(crate::executor::lock::LOCK_FILE));
+            .with_lock(config_dir.join(crate::executor::lock::LOCK_FILE))
+            .with_state_dir(config_dir.to_path_buf());
             let results = run_probes(&cfg, kc, &args, &exec).await;
             match args.format.as_str() {
                 "json" => {
@@ -250,7 +251,8 @@ async fn run_probes(
                         continue;
                     }
                 };
-                let (status, detail) = probe_http(p, kc, client.as_ref()).await;
+                let (status, detail) =
+                    probe_http(p, kc, exec.state_dir.as_deref(), client.as_ref()).await;
                 let _ = exec.audit.record_outcome(
                     event,
                     match status {
@@ -285,6 +287,7 @@ async fn run_probes(
 async fn probe_http(
     p: &Preset,
     kc: &dyn KeychainStore,
+    state_dir: Option<&Path>,
     client: Option<&reqwest::Client>,
 ) -> (ProbeStatus, String) {
     let Some(client) = client else {
@@ -310,46 +313,35 @@ async fn probe_http(
     let probe_path = pick_probe_path(&p.allowed_paths);
     let url = format!("{}{}", base_url.trim_end_matches('/'), probe_path);
 
-    // Fetch the secret (if any) from keychain.
-    let secret = if let Some(auth) = &p.auth {
-        let secret_name = match auth {
-            Auth::Bearer { secret } => Some(secret),
-            Auth::Header { secret, .. } => Some(secret),
-            Auth::Basic { secret, .. } => Some(secret),
-        };
-        match secret_name {
-            Some(name) => match kc.get(name) {
-                Ok(Some(s)) => Some(s),
-                Ok(None) => {
+    // The credential, if the preset has one; put on the request and turned
+    // into scrub forms the way proxy_http does.
+    let mut req = client.get(&url);
+    let forms = match &p.auth {
+        Some(_) => match crate::executor::auth::load(kc, p) {
+            Ok(mut credential) => {
+                // OAuth2 mints a token, as a real call would.
+                if let Err(e) = credential.prepare(kc, state_dir, p).await {
+                    let e = credential.forms().scrub_error(e);
                     return (
-                        ProbeStatus::Skipped,
-                        format!("secret '{name}' not found in keychain"),
+                        ProbeStatus::AuthFailed,
+                        redact(&truncate(&e.to_string(), 200)),
                     );
                 }
-                Err(e) => {
-                    return (ProbeStatus::Skipped, format!("keychain read failed: {e}"));
-                }
-            },
-            None => None,
-        }
-    } else {
-        None
+                req = credential.apply(req);
+                credential.forms()
+            }
+            Err(mcp_warden_core::error::WardenError::MissingSecret { secret, .. }) => {
+                return (
+                    ProbeStatus::Skipped,
+                    format!("secret '{secret}' not found in keychain"),
+                );
+            }
+            Err(e) => {
+                return (ProbeStatus::Skipped, format!("keychain read failed: {e}"));
+            }
+        },
+        None => CredentialForms::raw(&mcp_warden_core::secret::Secret::new(String::new())),
     };
-
-    let mut req = client.get(&url);
-    if let (Some(auth), Some(secret)) = (&p.auth, secret.as_ref()) {
-        req = inject_auth(req, auth, secret);
-    }
-
-    // An upstream that reflects the credential must not get it printed:
-    // scrub every form it was sent in before anything is cut or shown.
-    let forms = secret
-        .as_ref()
-        .map(|s| CredentialForms::http(&p.auth, s))
-        .unwrap_or_else(|| {
-            CredentialForms::raw(&mcp_warden_core::secret::Secret::new(String::new()))
-        });
-    drop(secret);
     let scrubbed = |mut text: String| {
         forms.scrub_text(&mut text);
         text
@@ -359,7 +351,7 @@ async fn probe_http(
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            let msg = scrubbed(e.to_string());
+            let msg = scrubbed(crate::executor::http::error_text(e));
             let lower = msg.to_lowercase();
             let status = if lower.contains("tls") || lower.contains("certificate") {
                 ProbeStatus::TlsError
@@ -426,24 +418,6 @@ fn pick_probe_path(allowed_paths: &[String]) -> String {
         }
     }
     "/".into()
-}
-
-fn inject_auth(
-    b: reqwest::RequestBuilder,
-    auth: &Auth,
-    secret: &mcp_warden_core::secret::Secret,
-) -> reqwest::RequestBuilder {
-    match auth {
-        Auth::Bearer { .. } => b.bearer_auth(secret.expose()),
-        Auth::Header { name, prefix, .. } => {
-            let value = match prefix {
-                Some(p) => format!("{p}{}", secret.expose()),
-                None => secret.expose().to_string(),
-            };
-            b.header(name, value)
-        }
-        Auth::Basic { username, .. } => b.basic_auth(username, Some(secret.expose())),
-    }
 }
 
 fn truncate(s: &str, max: usize) -> String {

@@ -208,6 +208,32 @@ pub async fn run(
     }
 }
 
+/// The keychain entries a template's preset reads, with its defaults.
+fn template_secrets(t: &crate::cli::preset_templates::Template) -> Vec<String> {
+    let p = (t.build)(&crate::cli::preset_templates::Choices {
+        name: t.name,
+        secret_name: t.default_secret_name,
+        host: "",
+        user: "",
+    });
+    p.secret_names().into_iter().map(str::to_string).collect()
+}
+
+/// `mcp-warden secret add …` for each entry the preset reads; an SSH key
+/// comes from its file.
+fn secret_add_commands(p: &Preset, from_file: bool) -> Vec<String> {
+    p.secret_names()
+        .into_iter()
+        .map(|name| {
+            if from_file {
+                format!("mcp-warden secret add {name} < ./private-key")
+            } else {
+                format!("mcp-warden secret add {name}")
+            }
+        })
+        .collect()
+}
+
 fn scaffold(args: ScaffoldArgs, config_path: &Path) -> Result<()> {
     use crate::cli::preset_templates::{TEMPLATES, find};
 
@@ -219,6 +245,7 @@ fn scaffold(args: ScaffoldArgs, config_path: &Path) -> Result<()> {
                     "name": t.name,
                     "description": t.description,
                     "default_secret_name": t.default_secret_name,
+                    "secrets": template_secrets(t),
                 })
             })
             .collect();
@@ -230,8 +257,10 @@ fn scaffold(args: ScaffoldArgs, config_path: &Path) -> Result<()> {
         println!("Available templates:");
         for t in TEMPLATES {
             println!(
-                "  {:<22} {}  (default secret: {})",
-                t.name, t.description, t.default_secret_name
+                "  {:<22} {}  (secrets: {})",
+                t.name,
+                t.description,
+                template_secrets(t).join(", ")
             );
         }
         return Ok(());
@@ -270,6 +299,7 @@ fn scaffold(args: ScaffoldArgs, config_path: &Path) -> Result<()> {
         host,
         user,
     });
+    let secret_commands = secret_add_commands(&preset, template.needs_host);
     let open_paths_warning = unrestricted_paths_warning(&preset);
 
     if args.dry_run {
@@ -280,13 +310,12 @@ fn scaffold(args: ScaffoldArgs, config_path: &Path) -> Result<()> {
         let rendered =
             toml::to_string_pretty(&wrapper).map_err(|e| WardenError::Config(e.to_string()))?;
         println!("# Generated from template '{}'", template.name);
-        println!("# Secret '{secret_name}' must exist in the keychain:");
-        if template.needs_host {
-            println!("#   mcp-warden secret add {secret_name} < ./private-key");
-            println!("# Edit the unit names and paths in the commands to match the host;");
-            println!("# docs/ssh-hardening.md shows how to pin the key to a gate script.");
-        } else {
-            println!("#   mcp-warden secret add {secret_name}");
+        println!("# These secrets must exist in the keychain:");
+        for line in &secret_commands {
+            println!("#   {line}");
+        }
+        for line in template.setup_note {
+            println!("# {line}");
         }
         if let Some(comment) = open_paths_comment {
             print!("{comment}");
@@ -311,10 +340,17 @@ fn scaffold(args: ScaffoldArgs, config_path: &Path) -> Result<()> {
     let rendered = toml::to_string_pretty(&cfg).map_err(|e| WardenError::Config(e.to_string()))?;
     fs::write(config_path, rendered).map_err(WardenError::Io)?;
     eprintln!(
-        "✓ scaffolded preset '{}' from template '{}'. Add the secret next:",
-        preset_name, template.name
+        "✓ scaffolded preset '{}' from template '{}'. Add the secret{} next:",
+        preset_name,
+        template.name,
+        if secret_commands.len() > 1 { "s" } else { "" }
     );
-    eprintln!("    mcp-warden secret add {secret_name}");
+    for line in &secret_commands {
+        eprintln!("    {line}");
+    }
+    for line in template.setup_note {
+        eprintln!("  {line}");
+    }
     if let Some(w) = open_paths_warning {
         eprintln!("warning: {w}");
     }

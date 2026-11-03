@@ -8,7 +8,7 @@ use crate::approval::{
 use crate::executor::ActionExecutor;
 use crate::mcp::server::WardenServer;
 use is_terminal::IsTerminal;
-use mcp_warden_core::approval::{ApprovalDecision, ApprovalTransport};
+use mcp_warden_core::approval::ApprovalTransport;
 use mcp_warden_core::audit::{AuditSink, sqlite_sink::LocalSqlite};
 use mcp_warden_core::config::{Config, TelegramConfig};
 use mcp_warden_core::error::{Result, WardenError};
@@ -61,7 +61,8 @@ pub async fn cmd(config_dir: &Path) -> Result<()> {
 
     let executor = Arc::new(
         ActionExecutor::new(keychain, transports.primary, transports.fallback, audit)
-            .with_lock(config_dir.join(crate::executor::lock::LOCK_FILE)),
+            .with_lock(config_dir.join(crate::executor::lock::LOCK_FILE))
+            .with_state_dir(config_dir.to_path_buf()),
     );
     // `get_secret_for_env` may reveal the secrets of these presets and
     // wrapped servers, but never the Telegram bot token.
@@ -73,7 +74,8 @@ pub async fn cmd(config_dir: &Path) -> Result<()> {
     let revealable = cfg
         .preset
         .iter()
-        .filter_map(crate::mcp::server::preset_secret)
+        .flat_map(|p| p.revealable_secrets())
+        .map(str::to_string)
         .chain(
             cfg.server
                 .iter()
@@ -234,8 +236,8 @@ pub(crate) fn build_approval(
     #[cfg(debug_assertions)]
     if std::env::var("MCP_WARDEN_BACKEND").as_deref() == Ok("memory") {
         let fixed = match env_choice.as_deref() {
-            Some("test-approve") => Some(ApprovalDecision::Approved),
-            Some("test-deny") => Some(ApprovalDecision::Denied),
+            Some("test-approve") => Some(mcp_warden_core::approval::ApprovalDecision::Approved),
+            Some("test-deny") => Some(mcp_warden_core::approval::ApprovalDecision::Denied),
             _ => None,
         };
         if let Some(decision) = fixed {

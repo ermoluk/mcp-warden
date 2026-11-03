@@ -53,6 +53,16 @@ impl Harness {
             approval = "prompt"
 
             [[preset]]
+            name = "webq"
+            type = "http"
+            description = "web with a query-parameter key"
+            base_url = "{http}"
+            auth = {{ type = "query", name = "key", secret = "web_tok" }}
+            allowed_methods = ["GET", "POST"]
+            allowed_paths = [".*"]
+            approval = "prompt"
+
+            [[preset]]
             name = "box"
             type = "ssh"
             description = "box"
@@ -141,12 +151,23 @@ impl Harness {
     }
 
     pub async fn http(&self, method: &str, path: &str, query: Option<Value>, body: Option<Value>) {
+        self.http_via("web", method, path, query, body).await
+    }
+
+    pub async fn http_via(
+        &self,
+        preset: &str,
+        method: &str,
+        path: &str,
+        query: Option<Value>,
+        body: Option<Value>,
+    ) {
         let query: Option<BTreeMap<String, String>> =
             query.map(|q| serde_json::from_value(q).unwrap());
         let res = self
             .server
             .proxy_http(Parameters(ProxyHttpArgs {
-                preset_name: "web".into(),
+                preset_name: preset.into(),
                 path: path.into(),
                 method: method.into(),
                 body,
@@ -252,6 +273,25 @@ async fn corpus_query_keys_are_refused_before_anything_is_touched() {
     h.http("POST", "/x", None, Some(json!({ "_method": "DELETE" })))
         .await;
     h.assert_all_refused_untouched(entries.len() + 1).await;
+}
+
+/// A preset that sends its key as a query parameter: the hostile query keys
+/// are refused there too, and so is any spelling of the key's own name.
+#[tokio::test]
+async fn query_auth_presets_refuse_the_same_keys_and_their_own_name() {
+    let h = Harness::wide_open().await;
+    let entries = corpus(include_str!("../../tests/corpus/queries.txt"));
+    for (_, key, _) in &entries {
+        h.http_via("webq", "POST", "/x", Some(json!({ key: "DELETE" })), None)
+            .await;
+    }
+    let names = ["key", "KEY", "Key", " key "];
+    for name in names {
+        h.http_via("webq", "GET", "/x", Some(json!({ name: "mine" })), None)
+            .await;
+    }
+    h.assert_all_refused_untouched(entries.len() + names.len())
+        .await;
 }
 
 #[tokio::test]

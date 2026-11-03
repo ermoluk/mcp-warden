@@ -55,7 +55,7 @@ nix profile install github:ermoluk/mcp-warden
 
 The binary for your platform comes from an optional dependency; nothing is downloaded at install or run time. `npx @mcp-warden/cli init` and the other subcommands work the same way.
 
-**Rust** — prebuilt with [cargo-binstall](https://github.com/cargo-bins/cargo-binstall), or from source (Rust 1.89+):
+**Rust** — prebuilt with [cargo-binstall](https://github.com/cargo-bins/cargo-binstall), or from source (Rust 1.94.1+):
 
 ```bash
 cargo binstall mcp-warden

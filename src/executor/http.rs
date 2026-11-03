@@ -1,10 +1,8 @@
 use crate::executor::ActionExecutor;
-use crate::executor::credential_echo::CredentialForms;
 use crate::executor::policy::{Request, check_request};
 use mcp_warden_core::audit::AuditOutcome;
-use mcp_warden_core::config::{Auth, Preset};
+use mcp_warden_core::config::Preset;
 use mcp_warden_core::error::{Result, WardenError};
-use mcp_warden_core::secret::Secret;
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -148,6 +146,30 @@ pub(crate) fn check_query_and_body_keys(
     Ok(())
 }
 
+/// Refuse a query parameter named like the preset's query credential,
+/// compared ignoring ASCII case: the agent could otherwise send its own
+/// value in the credential's place, or a second one for the upstream to
+/// pick from. Runs before any credential is read (invariant 3).
+pub(crate) fn check_auth_query_name(
+    preset: &Preset,
+    query: Option<&std::collections::BTreeMap<String, String>>,
+) -> Result<()> {
+    let Some(mcp_warden_core::config::Auth::Query { name, .. }) = &preset.auth else {
+        return Ok(());
+    };
+    match query
+        .into_iter()
+        .flat_map(|q| q.keys())
+        .find(|k| k.trim().eq_ignore_ascii_case(name))
+    {
+        Some(_) => Err(WardenError::Validation(format!(
+            "query parameter '{name}' carries this preset's credential and cannot be set by \
+             the caller"
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// `key`, or the name in front of its PHP array suffix (`_method[]`),
 /// normalised as PHP and header-style names would be: case folded, leading
 /// and trailing spaces dropped, and `.`, ` `, `[` and `-` read as `_`.
@@ -253,8 +275,17 @@ pub async fn execute(
     req: HttpRequest,
 ) -> Result<HttpResponse> {
     let method_upper = req.method.to_uppercase();
-    let summary =
+    let mut summary =
         crate::executor::summary::http(&method_upper, preset.base_url.as_deref(), &req.path);
+    // The client secret and the refresh token go to the token endpoint:
+    // the prompt says where.
+    if let Some(mcp_warden_core::config::Auth::Oauth2 { token_url, .. }) = &preset.auth {
+        let host = url::Url::parse(token_url)
+            .ok()
+            .and_then(|u| u.host_str().map(str::to_string))
+            .unwrap_or_default();
+        summary.push_str(&format!(" (token via {host})"));
+    }
     let request = Request::Http {
         method: &method_upper,
         path: &req.path,
@@ -268,19 +299,21 @@ pub async fn execute(
         .authorise(preset, "proxy_http", &summary, false)
         .await?;
 
-    let secret = match &preset.auth {
-        Some(Auth::Bearer { secret })
-        | Some(Auth::Header { secret, .. })
-        | Some(Auth::Basic { secret, .. }) => {
-            exec.keychain
-                .get(secret)?
-                .ok_or_else(|| WardenError::MissingSecret {
-                    preset: preset.name.clone(),
-                    secret: secret.clone(),
-                })?
-        }
-        None => return Err(WardenError::Validation("preset missing auth".into())),
-    };
+    let mut credential = super::auth::load(exec.keychain.as_ref(), preset)?;
+    // OAuth2: this call's access token, minted now and dropped with the call.
+    if let Err(e) = credential
+        .prepare(exec.keychain.as_ref(), exec.state_dir.as_deref(), preset)
+        .await
+    {
+        let e = credential.forms().scrub_error(e);
+        let _ = exec.audit.record_outcome(
+            event_id,
+            AuditOutcome::Err {
+                message: e.to_string(),
+            },
+        );
+        return Err(e);
+    }
 
     if let Some(q) = &req.query {
         let mut pairs = url.query_pairs_mut();
@@ -293,21 +326,41 @@ pub async fn execute(
     let method = method_upper
         .parse::<reqwest::Method>()
         .map_err(|_| WardenError::Validation(format!("bad method {method_upper}")))?;
-    let mut builder = client.request(method, url);
-    builder = inject_auth(builder, &preset.auth, &secret);
+    credential.apply_to_url(&mut url);
+    let mut builder = credential.apply(client.request(method, url));
     if let Some(body) = req.body {
         builder = builder.json(&body);
     }
+    let request = builder
+        .build()
+        .map_err(|e| WardenError::Executor(error_text(e)))
+        .and_then(|mut request| {
+            credential.sign(&mut request, exec.clock.now_utc().into())?;
+            Ok(request)
+        });
+    let request = match request {
+        Ok(r) => r,
+        Err(e) => {
+            let e = credential.forms().scrub_error(e);
+            let _ = exec.audit.record_outcome(
+                event_id,
+                AuditOutcome::Err {
+                    message: e.to_string(),
+                },
+            );
+            return Err(e);
+        }
+    };
 
     // An upstream that reflects the request would otherwise hand the agent
     // the credential (invariants 1–2): the body, and any error text, are
     // scrubbed of every form it was sent in.
-    let forms = CredentialForms::http(&preset.auth, &secret);
-    drop(secret);
-    let resp = match builder.send().await {
+    let forms = credential.forms();
+    drop(credential);
+    let resp = match client.execute(request).await {
         Ok(r) => r,
         Err(e) => {
-            let mut message = e.to_string();
+            let mut message = error_text(e);
             forms.scrub_text(&mut message);
             let _ = exec.audit.record_outcome(
                 event_id,
@@ -343,6 +396,21 @@ pub async fn execute(
     })
 }
 
+/// reqwest's error and its causes, without the request URL: the query
+/// string can hold a credential (`query` auth) or values the agent sent,
+/// and neither belongs in the error the agent and the audit log get.
+pub(crate) fn error_text(e: reqwest::Error) -> String {
+    let e = e.without_url();
+    let mut text = e.to_string();
+    let mut source = std::error::Error::source(&e);
+    while let Some(cause) = source {
+        text.push_str(": ");
+        text.push_str(&cause.to_string());
+        source = cause.source();
+    }
+    text
+}
+
 /// Redirects are never followed: a hop could leave `base_url`'s host —
 /// reqwest strips `Authorization` cross-origin but not custom auth headers
 /// (`Auth::Header`) — or land on a path the allow-list never approved.
@@ -356,29 +424,11 @@ fn http_client() -> Result<reqwest::Client> {
         .map_err(|e| WardenError::Executor(e.to_string()))
 }
 
-fn inject_auth(
-    b: reqwest::RequestBuilder,
-    auth: &Option<Auth>,
-    secret: &Secret,
-) -> reqwest::RequestBuilder {
-    match auth {
-        Some(Auth::Bearer { .. }) => b.bearer_auth(secret.expose()),
-        Some(Auth::Header { name, prefix, .. }) => {
-            let value = match prefix {
-                Some(p) => format!("{p}{}", secret.expose()),
-                None => secret.expose().to_string(),
-            };
-            b.header(name, value)
-        }
-        Some(Auth::Basic { username, .. }) => b.basic_auth(username, Some(secret.expose())),
-        None => b,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use mcp_warden_core::config::{ApprovalPolicy, Auth, Preset, PresetType};
+    use mcp_warden_core::secret::Secret;
 
     fn p() -> Preset {
         Preset {
@@ -925,6 +975,50 @@ mod tests {
         execute(&exec, &preset, req).await.unwrap()
     }
 
+    /// reqwest puts the request URL in its error text. A query-parameter
+    /// credential would ride along with it, so the URL never reaches the
+    /// agent or the audit log.
+    #[tokio::test]
+    async fn upstream_errors_do_not_carry_the_url() {
+        use crate::approval::always_deny::AlwaysDeny;
+        use mcp_warden_core::audit::AuditSink;
+        use mcp_warden_core::audit::sqlite_sink::LocalSqlite;
+        use mcp_warden_core::keychain::KeychainStore;
+        use mcp_warden_core::keychain::memory::InMemoryKeychain;
+        use std::sync::Arc;
+
+        let port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let keychain = InMemoryKeychain::new();
+        keychain.set("k", Secret::new("test-token".into())).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let audit = Arc::new(LocalSqlite::open(&dir.path().join("audit.db")).unwrap());
+        let exec = ActionExecutor::new(
+            Arc::new(keychain),
+            Arc::new(AlwaysDeny),
+            None,
+            audit.clone(),
+        );
+        let mut preset = p();
+        preset.base_url = Some(format!("http://127.0.0.1:{port}"));
+        let req = HttpRequest {
+            preset_name: preset.name.clone(),
+            path: "/users/abc".into(),
+            method: "GET".into(),
+            body: None,
+            query: Some([("page".to_string(), "url-marker".to_string())].into()),
+        };
+        let err = execute(&exec, &preset, req).await.unwrap_err().to_string();
+        let logged = format!("{:?}", audit.recent(1).unwrap()[0].outcome);
+        for text in [&err, &logged] {
+            assert!(!text.contains("url-marker"), "{text}");
+            assert!(!text.contains("/users/abc"), "{text}");
+        }
+    }
+
     /// `GET path` through `execute` against `server`, with the preset
     /// adjusted by `tweak`.
     async fn call_preset(
@@ -1095,6 +1189,136 @@ mod tests {
                 "{form:?} reached the agent in {text:?}"
             );
         }
+    }
+
+    /// `query` auth: the credential goes as the named query parameter,
+    /// after the agent's own, and an upstream that echoes the URL in any
+    /// encoding gets it scrubbed.
+    #[tokio::test]
+    async fn query_auth_sends_the_key_as_a_parameter_and_scrubs_echoes() {
+        let key = "AIzaTEST key+/=0123456789";
+        let server = echo_server(|req: &wiremock::Request| {
+            serde_json::json!({
+                "url": req.url.to_string(),
+                "query": req.url.query().unwrap_or(""),
+                "decoded": req.url.query_pairs().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>(),
+            })
+        })
+        .await;
+        let auth = Auth::Query {
+            name: "key".into(),
+            secret: "k".into(),
+        };
+        let resp = call_upstream(&server, auth, key, "/maps/api/geocode/json").await;
+        let requests = server.received_requests().await.unwrap();
+        let pairs: Vec<(String, String)> = requests[0]
+            .url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert_eq!(pairs, [("key".to_string(), key.to_string())]);
+        assert!(requests[0].headers.get("authorization").is_none());
+        for form in [key, "AIzaTEST", "AIzaTEST+key%2B%2F%3D0123456789"] {
+            assert_absent(&resp.body, form);
+        }
+    }
+
+    #[test]
+    fn the_caller_cannot_send_the_query_credentials_parameter() {
+        let mut preset = p();
+        preset.auth = Some(Auth::Query {
+            name: "key".into(),
+            secret: "k".into(),
+        });
+        for name in ["key", "KEY", "Key", " key"] {
+            let query: std::collections::BTreeMap<String, String> =
+                [(name.to_string(), "mine".to_string())].into();
+            let req = Request::Http {
+                method: "GET",
+                path: "/users",
+                query: Some(&query),
+                body: None,
+            };
+            assert!(check_request(&preset, &req).is_err(), "{name:?}");
+        }
+        let query: std::collections::BTreeMap<String, String> =
+            [("keys".to_string(), "x".to_string())].into();
+        let req = Request::Http {
+            method: "GET",
+            path: "/users",
+            query: Some(&query),
+            body: None,
+        };
+        check_request(&preset, &req).unwrap();
+    }
+
+    /// The prompt and the audit log never show the query string, so the
+    /// credential never reaches them.
+    #[test]
+    fn the_summary_has_no_query_string() {
+        let s = crate::executor::summary::http("GET", Some("https://maps.example.com"), "/geo");
+        assert_eq!(s, "GET https://maps.example.com/geo");
+    }
+
+    /// `aws_sigv4`: the request reaches the upstream signed, and an echo of
+    /// the keys is scrubbed.
+    #[tokio::test]
+    async fn sigv4_requests_are_signed_and_echoes_scrubbed() {
+        use crate::approval::always_deny::AlwaysDeny;
+        use mcp_warden_core::audit::sqlite_sink::LocalSqlite;
+        use mcp_warden_core::keychain::KeychainStore;
+        use mcp_warden_core::keychain::memory::InMemoryKeychain;
+        use std::sync::Arc;
+
+        let secret_key = "wJalrXUtnFEMI-K7MDENG-bPxRfiCYEXAMPLEKEY";
+        let server = echo_server(|req: &wiremock::Request| {
+            serde_json::json!({
+                "authorization": req.headers["authorization"].to_str().unwrap(),
+                "echo": "wJalrXUtnFEMI-K7MDENG-bPxRfiCYEXAMPLEKEY",
+            })
+        })
+        .await;
+        let keychain = InMemoryKeychain::new();
+        keychain
+            .set("akid", Secret::new("AKIDEXAMPLE".into()))
+            .unwrap();
+        keychain.set("sk", Secret::new(secret_key.into())).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let exec = ActionExecutor::new(
+            Arc::new(keychain),
+            Arc::new(AlwaysDeny),
+            None,
+            Arc::new(LocalSqlite::open(&dir.path().join("audit.db")).unwrap()),
+        );
+        let mut preset = p();
+        preset.base_url = Some(server.uri());
+        preset.auth = Some(Auth::AwsSigv4 {
+            region: "eu-central-1".into(),
+            service: "execute-api".into(),
+            access_key_id: "akid".into(),
+            secret_access_key: "sk".into(),
+            session_token: None,
+        });
+        let req = HttpRequest {
+            preset_name: preset.name.clone(),
+            path: "/users".into(),
+            method: "POST".into(),
+            body: Some(serde_json::json!({"q": 1})),
+            query: Some([("page".to_string(), "2".to_string())].into()),
+        };
+        let resp = execute(&exec, &preset, req).await.unwrap();
+        let sent = &server.received_requests().await.unwrap()[0];
+        let auth = sent.headers["authorization"].to_str().unwrap();
+        assert!(
+            auth.starts_with("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/"),
+            "{auth}"
+        );
+        assert!(
+            auth.contains("SignedHeaders=content-type;host;x-amz-date"),
+            "{auth}"
+        );
+        assert!(sent.headers.contains_key("x-amz-date"));
+        assert_absent(&resp.body, secret_key);
     }
 
     #[tokio::test]

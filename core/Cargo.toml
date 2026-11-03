@@ -35,6 +35,10 @@ regex = "1"
 # it transitively; refactoring to a binary-local newtype is on the roadmap.
 russh = "0.65"
 
+# O_NOFOLLOW for lock files (`fslock`).
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 # OS credential stores (see `keychain/system.rs`). Not the `keyring` crate: its
 # 4.2 release removed the API we used without a major version bump.
 [target.'cfg(target_os = "macos")'.dependencies]

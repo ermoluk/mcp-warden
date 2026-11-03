@@ -10,7 +10,7 @@
 use crate::executor::ActionExecutor;
 use mcp_warden_core::audit::AuditOutcome;
 use mcp_warden_core::audit::sqlite_sink::LocalSqlite;
-use mcp_warden_core::config::{ApprovalPolicy, Auth, Config, Preset, WrappedServer};
+use mcp_warden_core::config::{ApprovalPolicy, Config, Preset, WrappedServer};
 use mcp_warden_core::error::{Result, WardenError};
 use mcp_warden_core::keychain::KeychainStore;
 use mcp_warden_core::stamp::{self, Confirmation};
@@ -167,13 +167,18 @@ fn describe(p: &Preset) -> String {
         ApprovalPolicy::Prompt => "prompt",
         ApprovalPolicy::Deny => "deny",
     };
-    let secret = match &p.auth {
-        Some(
-            Auth::Bearer { secret } | Auth::Header { secret, .. } | Auth::Basic { secret, .. },
-        ) => Some(secret.as_str()),
-        None => p.secret.as_deref(),
-    }
-    .unwrap_or("none");
+    let names = p.secret_names();
+    let secret = if names.is_empty() {
+        "none".to_string()
+    } else {
+        names.join(", ")
+    };
+    let token_via = match &p.auth {
+        Some(mcp_warden_core::config::Auth::Oauth2 { token_url, .. }) => {
+            format!(" (token from {token_url})")
+        }
+        _ => String::new(),
+    };
     let destination = p
         .base_url
         .clone()
@@ -224,7 +229,7 @@ fn describe(p: &Preset) -> String {
             )
         })
         .unwrap_or_default();
-    format!("{policy}, secret {secret} → {destination}, allows {allows}{until}")
+    format!("{policy}, secret {secret} → {destination}{token_via}, allows {allows}{until}")
 }
 
 /// The prompt reads "confirm_preset → mcp-warden" / "confirm_server → mcp-warden".

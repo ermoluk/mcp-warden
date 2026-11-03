@@ -32,7 +32,7 @@ pub(crate) async fn read_body(resp: reqwest::Response, preset: &Preset) -> (Valu
 /// Read the decoded body, but no more than `max` bytes. `None`: it was
 /// larger. A read error counts as an empty (non-JSON) body, as before limits
 /// existed.
-async fn read_limited(mut resp: reqwest::Response, max: u64) -> Option<Vec<u8>> {
+pub(crate) async fn read_limited(mut resp: reqwest::Response, max: u64) -> Option<Vec<u8>> {
     // Content-Length is the size on the wire; a compressed body can still
     // decode to more, which the loop below catches.
     if resp.content_length().is_some_and(|n| n > max) {

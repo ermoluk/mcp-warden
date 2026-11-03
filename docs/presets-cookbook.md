@@ -271,6 +271,89 @@ approval = "prompt"
 
 The Redis `template` is the command name; `param_types` is the positional arg schema.
 
+## HTTP — other ways to authenticate (v0.6.0)
+
+Besides `bearer`, `header` and `basic`, an HTTP preset can send its key as a
+query parameter, use OAuth2, or sign requests with AWS SigV4. Every field that
+names a secret holds a **keychain entry name**, as `secret` does elsewhere.
+
+**Query parameter** — for APIs that want `?key=…` (Google Maps):
+
+```toml
+[[preset]]
+name = "google-maps"
+type = "http"
+description = "Google Maps Platform web services"
+base_url = "https://maps.googleapis.com"
+auth = { type = "query", name = "key", secret = "gmaps_key" }
+allowed_methods = ["GET"]
+allowed_paths = ["/maps/api/geocode/json", "/maps/api/place/textsearch/json"]
+approval = "prompt"
+```
+
+The key is appended after the agent's own query parameters. A parameter of
+the same name from the agent, in any case, is refused before the key is read.
+The prompt and the audit log never show the query string, and upstream errors
+no longer include the URL.
+
+**OAuth2** — a fresh access token from the provider for every call
+(`refresh_token` or `client_credentials` grant), sent as a bearer token and
+never kept between calls:
+
+```toml
+[[preset]]
+name = "google-drive-read"
+type = "http"
+description = "Google Drive (read-only)"
+base_url = "https://www.googleapis.com"
+allowed_methods = ["GET"]
+allowed_paths = ["/drive/v3/files", "/drive/v3/files/[A-Za-z0-9_-]+"]
+approval = "prompt"
+
+[preset.auth]
+type = "oauth2"
+grant = "refresh_token"            # or "client_credentials"
+token_url = "https://oauth2.googleapis.com/token"
+client_id = "YOUR_CLIENT_ID.apps.googleusercontent.com"
+client_secret = "gdrive_client_secret"
+refresh_token = "gdrive_refresh_token"
+scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+# client_auth = "body"             # client id and secret in the form body, not HTTP Basic
+```
+
+- `token_url` must be https (plain http only to localhost): it receives the
+  client secret and the refresh token.
+- When the provider rotates the refresh token, the new one is written back to
+  `refresh_token`'s keychain entry, under a lock shared by every mcp-warden
+  process. That entry may not be used by anything else. If storing it fails,
+  the call fails and says so.
+- `get_secret_for_env` never reveals an OAuth2 preset's secrets.
+- A failing token endpoint is reported by status and `error` code only.
+
+**AWS SigV4** — for AWS APIs, signed after every allow-list check:
+
+```toml
+[[preset]]
+name = "aws-s3-read"
+type = "http"
+description = "Amazon S3 bucket (read-only)"
+base_url = "https://your-bucket.s3.eu-central-1.amazonaws.com"
+allowed_methods = ["GET"]
+allowed_paths = ["/", "/[A-Za-z0-9!_.*'()/-]+"]
+approval = "prompt"
+
+[preset.auth]
+type = "aws_sigv4"
+region = "eu-central-1"
+service = "s3"
+access_key_id = "aws_s3_access_key_id"
+secret_access_key = "aws_s3_secret_access_key"
+# session_token = "aws_s3_session_token"   # for temporary credentials
+```
+
+`mcp-warden preset scaffold google-maps`, `google-drive-read` and `aws-s3-read`
+write these presets; each prints the `secret add` commands it needs.
+
 ## HTTP — limit what the agent sees
 
 A list endpoint can return megabytes, and most of it is noise in the agent's context — or text written by strangers (issue bodies, comments) that can try to steer it. Cap the size and keep only the fields the task needs:
@@ -304,6 +387,10 @@ response_fields = ["[].number", "[].title", "[].state", "[].user.login"]
 | `jira-read` | myself, `search/jql`, issues and comments, projects | Basic auth with your account e-mail; set `MCP_WARDEN_JIRA_BASE_URL` / `MCP_WARDEN_JIRA_EMAIL` before scaffolding, or edit afterwards |
 | `slack-read` | `auth.test`, `conversations.*` reads, `users.list` / `users.info` | Bot token (`xoxb-…`) |
 | `vercel-read` | user, projects, deployments | Not `/v9/projects/:id/env`, which returns a project's secrets |
+| `google-maps` | geocoding, place search and details, distance matrix | `query` auth; restrict the key to these APIs in Google Cloud Console |
+| `google-drive-read` | file list and metadata | `oauth2` with a refresh token; replace `client_id` |
+| `aws-s3-read` | list and get objects in one bucket | `aws_sigv4`; replace the bucket and region, use a read-only IAM identity |
+| `ssh-deploy` | status, logs, restart, pull as named commands | needs `--host` and `--user`; `ssh_exec` refuses everything |
 
 ## Patterns to AVOID
 
