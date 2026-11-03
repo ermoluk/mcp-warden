@@ -271,6 +271,14 @@ impl AuditSink for LocalSqlite {
         chain::hash_at(&self.conn.lock().unwrap(), seq)
     }
 
+    fn chain_links_from(&self, seq: i64, hash: &str) -> Result<bool> {
+        chain::links_from(&self.conn.lock().unwrap(), seq, hash)
+    }
+
+    fn chain_id(&self) -> Result<Option<String>> {
+        chain::chain_id(&self.conn.lock().unwrap())
+    }
+
     fn verify_chain(&self) -> Result<ChainReport> {
         chain::verify(&self.conn.lock().unwrap())
     }

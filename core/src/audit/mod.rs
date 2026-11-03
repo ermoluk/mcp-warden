@@ -2,6 +2,7 @@ use crate::error::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub mod anchor;
 pub mod chain;
 pub mod sqlite_sink;
 
@@ -163,6 +164,19 @@ pub trait AuditSink: Send + Sync {
     }
     /// The stored hash of chain record `seq`.
     fn chain_hash_at(&self, _seq: i64) -> Result<Option<String>> {
+        Err(crate::error::WardenError::Audit(
+            "this audit sink keeps no hash chain".into(),
+        ))
+    }
+    /// Whether the records from `seq` (with hash `hash`) to the tip are
+    /// contiguous and linked.
+    fn chain_links_from(&self, _seq: i64, _hash: &str) -> Result<bool> {
+        Err(crate::error::WardenError::Audit(
+            "this audit sink keeps no hash chain".into(),
+        ))
+    }
+    /// The chain's random id, from its genesis record.
+    fn chain_id(&self) -> Result<Option<String>> {
         Err(crate::error::WardenError::Audit(
             "this audit sink keeps no hash chain".into(),
         ))

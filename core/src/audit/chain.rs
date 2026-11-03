@@ -140,6 +140,47 @@ pub(crate) fn hash_at(conn: &Connection, seq: i64) -> Result<Option<String>> {
         .map_err(audit)
 }
 
+/// The genesis record's chain id.
+pub(crate) fn chain_id(conn: &Connection) -> Result<Option<String>> {
+    let text: Option<String> = conn
+        .query_row("SELECT record FROM chain WHERE seq = 1", [], |r| r.get(0))
+        .optional()
+        .map_err(audit)?;
+    Ok(
+        match text.and_then(|t| serde_json::from_str::<Record>(&t).ok()) {
+            Some(Record::Genesis { chain_id, .. }) => Some(chain_id),
+            _ => None,
+        },
+    )
+}
+
+/// Whether the records from `seq` (whose hash must be `hash`) to the tip
+/// are contiguous and correctly linked: what moving the anchor needs, much
+/// cheaper than a full `verify`.
+pub(crate) fn links_from(conn: &Connection, seq: i64, hash: &str) -> Result<bool> {
+    if hash_at(conn, seq)?.as_deref() != Some(hash) {
+        return Ok(false);
+    }
+    let mut stmt = conn
+        .prepare("SELECT seq, record, hash FROM chain WHERE seq > ?1 ORDER BY seq")
+        .map_err(audit)?;
+    let mut rows = stmt.query([seq]).map_err(audit)?;
+    let (mut prev, mut expected) = (hash.to_string(), seq + 1);
+    while let Some(row) = rows.next().map_err(audit)? {
+        let (n, text, h): (i64, String, String) = (
+            row.get(0).map_err(audit)?,
+            row.get(1).map_err(audit)?,
+            row.get(2).map_err(audit)?,
+        );
+        if n != expected || link(&prev, n, &text) != h {
+            return Ok(false);
+        }
+        prev = h;
+        expected += 1;
+    }
+    Ok(true)
+}
+
 /// Start the chain of a database that has none: a new one, or one written
 /// before 0.6.0, whose rows the genesis record digests. Idempotent, and
 /// safe when several processes open the database at once.
