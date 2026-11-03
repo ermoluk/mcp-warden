@@ -1,0 +1,85 @@
+# Hostile `ssh_run` calls. Every entry must be refused by
+# `policy::check_request` for a preset whose parameters accept anything
+# their type allows (string and path patterns `.*`, int 0 to i64::MAX) —
+# the checks below hold whatever the patterns say. CI runs them:
+# `cargo test hostile_corpus`.
+#
+# One entry per line:  <command> <params as JSON>  # <what it tests> (since vX.Y.Z)
+# The commands of that preset:
+#   word  echo {v}            v: string
+#   path  cat {v}             v: path
+#   num   head -n {v} f       v: int
+#   opt   ls --color={v}      v: enum auto | never
+# The input ends at the first "  # "; lines starting with '#' are comments.
+# Corpus escapes (\\, \n, \u{XXXX}, \{c*N}) apply before the JSON is read,
+# so a JSON escape is written with a doubled backslash: \\u0000.
+
+# --- the parameter set ---
+word {}  # missing parameter (since v0.6.0)
+word {"v":"a","w":"b"}  # undeclared parameter (since v0.6.0)
+word {"V":"a"}  # parameter names are case-sensitive (since v0.6.0)
+nope {"v":"a"}  # unknown command (since v0.6.0)
+WORD {"v":"a"}  # command names are case-sensitive (since v0.6.0)
+word {"v":"a","p0":1,"p1":1,"p2":1,"p3":1,"p4":1,"p5":1,"p6":1,"p7":1,"p8":1,"p9":1,"p10":1,"p11":1,"p12":1,"p13":1,"p14":1,"p15":1}  # 17 parameters (since v0.6.0)
+
+# --- string: one plain word ---
+word {"v":"a b"}  # a space makes two words (since v0.6.0)
+word {"v":"a;id"}  # command separator (since v0.6.0)
+word {"v":"$(id)"}  # command substitution (since v0.6.0)
+word {"v":"`id`"}  # backticks (since v0.6.0)
+word {"v":"a|sh"}  # pipe (since v0.6.0)
+word {"v":"a&&id"}  # and-list (since v0.6.0)
+word {"v":"a>/tmp/x"}  # redirection (since v0.6.0)
+word {"v":"*"}  # glob (since v0.6.0)
+word {"v":"~root"}  # tilde expansion (since v0.6.0)
+word {"v":"{a,b}"}  # brace expansion (since v0.6.0)
+word {"v":"'a'"}  # quotes (since v0.6.0)
+word {"v":"a\\nid"}  # newline (since v0.6.0)
+word {"v":"a\\u0000"}  # NUL (since v0.6.0)
+word {"v":"a\\u001b[2J"}  # escape sequence (since v0.6.0)
+word {"v":"а"}  # Cyrillic a, not ASCII (since v0.6.0)
+word {"v":"ａ"}  # fullwidth a, not ASCII (since v0.6.0)
+word {"v":"-rf"}  # leading dash, read as an option (since v0.6.0)
+word {"v":"--upload-pack=/tmp/x"}  # long option with a value (since v0.6.0)
+word {"v":"=id"}  # zsh =cmd expansion (since v0.6.0)
+word {"v":"%self"}  # fish %self expansion (since v0.6.0)
+word {"v":""}  # empty word (since v0.6.0)
+word {"v":"\{x*257}"}  # over 256 bytes (since v0.6.0)
+word {"v":5}  # not a string (since v0.6.0)
+word {"v":["a"]}  # an array (since v0.6.0)
+word {"v":null}  # null (since v0.6.0)
+
+# --- path: absolute, no traversal ---
+path {"v":"etc/passwd"}  # relative path (since v0.6.0)
+path {"v":"/srv/../etc/passwd"}  # .. segment (since v0.6.0)
+path {"v":"/srv/./x"}  # . segment (since v0.6.0)
+path {"v":"/srv/.."}  # trailing .. (since v0.6.0)
+path {"v":"//etc/passwd"}  # double slash (since v0.6.0)
+path {"v":"/srv//x"}  # double slash inside (since v0.6.0)
+path {"v":"-/x"}  # leading dash (since v0.6.0)
+path {"v":"/srv/x y"}  # space (since v0.6.0)
+path {"v":"/srv/$(id)"}  # command substitution (since v0.6.0)
+path {"v":"~/x"}  # tilde (since v0.6.0)
+
+# --- int: decimal, in range ---
+num {"v":-1}  # negative (since v0.6.0)
+num {"v":1.5}  # fraction (since v0.6.0)
+num {"v":1e3}  # exponent form (since v0.6.0)
+num {"v":"-1"}  # negative as a string (since v0.6.0)
+num {"v":"+1"}  # sign (since v0.6.0)
+num {"v":"01"}  # leading zero (since v0.6.0)
+num {"v":"0x10"}  # hex (since v0.6.0)
+num {"v":"1 "}  # trailing space (since v0.6.0)
+num {"v":"1;id"}  # trailing command (since v0.6.0)
+num {"v":"１"}  # fullwidth digit (since v0.6.0)
+num {"v":"9223372036854775808"}  # above max (since v0.6.0)
+num {"v":"99999999999999999999999"}  # beyond u64 (since v0.6.0)
+num {"v":""}  # empty (since v0.6.0)
+num {"v":true}  # a boolean (since v0.6.0)
+
+# --- enum: exactly a listed value ---
+opt {"v":"AUTO"}  # case variant (since v0.6.0)
+opt {"v":"auto "}  # trailing space (since v0.6.0)
+opt {"v":"always"}  # not listed (since v0.6.0)
+opt {"v":"auto;id"}  # listed value plus a command (since v0.6.0)
+opt {"v":["auto"]}  # an array (since v0.6.0)

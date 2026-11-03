@@ -522,6 +522,93 @@ mod tests {
         assert!(n >= 50, "only {n} entries in tests/corpus/paths.txt");
     }
 
+    /// A preset whose parameters accept anything their type allows, for the
+    /// named-command corpus.
+    fn wide_named() -> Preset {
+        toml::from_str(
+            r#"
+            name = "wide"
+            type = "ssh"
+            description = "x"
+            host = "example.com"
+            user = "deploy"
+            secret = "deploy_key"
+            approval = "prompt"
+            [[commands]]
+            name = "word"
+            description = "x"
+            template = "echo {v}"
+            params.v = { type = "string", pattern = ".*" }
+            [[commands]]
+            name = "path"
+            description = "x"
+            template = "cat {v}"
+            params.v = { type = "path", pattern = ".*" }
+            [[commands]]
+            name = "num"
+            description = "x"
+            template = "head -n {v} f"
+            params.v = { type = "int", min = 0, max = 9223372036854775807 }
+            [[commands]]
+            name = "opt"
+            description = "x"
+            template = "ls --color={v}"
+            params.v = { type = "enum", values = ["auto", "never"] }
+            "#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn hostile_corpus_named_commands_are_refused_whatever_the_patterns() {
+        let wide = wide_named();
+        mcp_warden_core::commands::validate_preset(&wide).unwrap();
+        for (command, ok) in [
+            ("word", r#"{"v":"a.b-c"}"#),
+            ("path", r#"{"v":"/srv/app/x"}"#),
+            ("num", r#"{"v":"9223372036854775807"}"#),
+            ("opt", r#"{"v":"never"}"#),
+        ] {
+            let params: BTreeMap<String, Value> = serde_json::from_str(ok).unwrap();
+            check_request(
+                &wide,
+                &Request::SshRun {
+                    command,
+                    params: &params,
+                },
+            )
+            .unwrap();
+        }
+        let file = "tests/corpus/named-commands.txt";
+        let entries =
+            crate::testutil::corpus(include_str!("../../tests/corpus/named-commands.txt"));
+        let allowed: Vec<String> = entries
+            .iter()
+            .filter(|(line, input, _)| {
+                let (command, json) = input
+                    .split_once(' ')
+                    .unwrap_or_else(|| panic!("{file}:{line}: no params"));
+                let params: BTreeMap<String, Value> =
+                    serde_json::from_str(json).unwrap_or_else(|e| panic!("{file}:{line}: {e}"));
+                check_request(
+                    &wide,
+                    &Request::SshRun {
+                        command,
+                        params: &params,
+                    },
+                )
+                .is_ok()
+            })
+            .map(|(line, input, note)| format!("  {file}:{line}: {input:?} — {note}"))
+            .collect();
+        assert!(allowed.is_empty(), "allowed:\n{}", allowed.join("\n"));
+        assert!(
+            entries.len() >= 60,
+            "only {} entries in {file}",
+            entries.len()
+        );
+    }
+
     #[test]
     fn hostile_corpus_commands_are_refused_whatever_the_allow_list() {
         let mut wide = ssh();
