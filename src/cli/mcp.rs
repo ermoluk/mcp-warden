@@ -73,7 +73,8 @@ pub async fn cmd(config_dir: &Path) -> Result<()> {
     let revealable = cfg
         .preset
         .iter()
-        .filter_map(crate::mcp::server::preset_secret)
+        .flat_map(|p| p.revealable_secrets())
+        .map(str::to_string)
         .chain(
             cfg.server
                 .iter()

@@ -165,6 +165,19 @@ pub struct Preset {
 }
 
 impl Preset {
+    /// Every keychain entry this preset reads: its auth's, or its `secret`.
+    pub fn secret_names(&self) -> Vec<&str> {
+        match &self.auth {
+            Some(auth) => auth.secrets(),
+            None => self.secret.as_deref().into_iter().collect(),
+        }
+    }
+
+    /// The entries `get_secret_for_env` may reveal for this preset.
+    pub fn revealable_secrets(&self) -> Vec<&str> {
+        self.secret_names()
+    }
+
     /// Whether a call through this preset could run without a prompt: the
     /// preset's policy, or any named command's, is `auto`. Each counts only
     /// once a human confirmed the preset (`stamp::demote_unconfirmed_auto`).
@@ -303,6 +316,17 @@ pub enum Auth {
     },
 }
 
+impl Auth {
+    /// The keychain entries this auth reads, in a fixed order.
+    pub fn secrets(&self) -> Vec<&str> {
+        match self {
+            Auth::Bearer { secret } | Auth::Header { secret, .. } | Auth::Basic { secret, .. } => {
+                vec![secret]
+            }
+        }
+    }
+}
+
 /// `localhost`, 127.0.0.0/8 or `::1`: a host whose traffic cannot leave
 /// this machine.
 fn is_loopback(host: &url::Host<&str>) -> bool {
@@ -337,15 +361,11 @@ impl Config {
             }
             // A preset naming a confirmation stamp (or the key that signs
             // them) could send it upstream or reveal it to the agent.
-            let secret = match &p.auth {
-                Some(
-                    Auth::Bearer { secret }
-                    | Auth::Header { secret, .. }
-                    | Auth::Basic { secret, .. },
-                ) => Some(secret),
-                None => p.secret.as_ref(),
-            };
-            if let Some(secret) = secret.filter(|s| crate::stamp::is_stamp_name(s)) {
+            if let Some(secret) = p
+                .secret_names()
+                .into_iter()
+                .find(|s| crate::stamp::is_stamp_name(s))
+            {
                 return Err(WardenError::Validation(format!(
                     "preset '{}': keychain entry '{secret}' is reserved for mcp-warden's \
                      confirmations and cannot be a preset's secret",
@@ -452,22 +472,19 @@ impl Config {
                 }
             }
         }
-        let secret_name = match &p.auth {
-            Some(Auth::Bearer { secret })
-            | Some(Auth::Header { secret, .. })
-            | Some(Auth::Basic { secret, .. }) => secret.clone(),
-            None => {
-                return Err(WardenError::Validation(format!(
-                    "preset '{}': auth required",
-                    p.name
-                )));
-            }
+        let Some(auth) = &p.auth else {
+            return Err(WardenError::Validation(format!(
+                "preset '{}': auth required",
+                p.name
+            )));
         };
-        if kc.get(&secret_name)?.is_none() {
-            return Err(WardenError::MissingSecret {
-                preset: p.name.clone(),
-                secret: secret_name,
-            });
+        for secret in auth.secrets() {
+            if kc.get(secret)?.is_none() {
+                return Err(WardenError::MissingSecret {
+                    preset: p.name.clone(),
+                    secret: secret.to_string(),
+                });
+            }
         }
         Ok(())
     }

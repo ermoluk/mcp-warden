@@ -112,7 +112,11 @@ pub struct GetSecretForEnvResponse {
 impl WardenServer {
     pub fn new(presets: Arc<dyn PresetSource>, executor: Arc<ActionExecutor>) -> Self {
         let listed = presets.list().unwrap_or_default();
-        let revealable = listed.iter().filter_map(preset_secret).collect();
+        let revealable = listed
+            .iter()
+            .flat_map(|p| p.revealable_secrets())
+            .map(str::to_string)
+            .collect();
         Self {
             presets,
             executor,
@@ -580,17 +584,6 @@ fn command_summaries(p: &Preset) -> Vec<CommandSummary> {
                 .then(|| mcp_warden_core::commands::tool_name(&p.name, &c.name)),
         })
         .collect()
-}
-
-/// The keychain entry a preset reads its credential from.
-pub(crate) fn preset_secret(p: &Preset) -> Option<String> {
-    use mcp_warden_core::config::Auth;
-    match &p.auth {
-        Some(
-            Auth::Bearer { secret } | Auth::Header { secret, .. } | Auth::Basic { secret, .. },
-        ) => Some(secret.clone()),
-        None => p.secret.clone(),
-    }
 }
 
 fn map_warden_err(e: mcp_warden_core::error::WardenError) -> McpError {

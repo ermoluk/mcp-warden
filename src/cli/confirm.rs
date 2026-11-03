@@ -10,7 +10,7 @@
 use crate::executor::ActionExecutor;
 use mcp_warden_core::audit::AuditOutcome;
 use mcp_warden_core::audit::sqlite_sink::LocalSqlite;
-use mcp_warden_core::config::{ApprovalPolicy, Auth, Config, Preset, WrappedServer};
+use mcp_warden_core::config::{ApprovalPolicy, Config, Preset, WrappedServer};
 use mcp_warden_core::error::{Result, WardenError};
 use mcp_warden_core::keychain::KeychainStore;
 use mcp_warden_core::stamp::{self, Confirmation};
@@ -167,13 +167,12 @@ fn describe(p: &Preset) -> String {
         ApprovalPolicy::Prompt => "prompt",
         ApprovalPolicy::Deny => "deny",
     };
-    let secret = match &p.auth {
-        Some(
-            Auth::Bearer { secret } | Auth::Header { secret, .. } | Auth::Basic { secret, .. },
-        ) => Some(secret.as_str()),
-        None => p.secret.as_deref(),
-    }
-    .unwrap_or("none");
+    let names = p.secret_names();
+    let secret = if names.is_empty() {
+        "none".to_string()
+    } else {
+        names.join(", ")
+    };
     let destination = p
         .base_url
         .clone()

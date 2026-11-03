@@ -380,17 +380,13 @@ fn render_preset_detail(p: &Preset) -> String {
         ));
     }
     if let Some(ref auth) = p.auth {
-        use mcp_warden_core::config::Auth;
-        let secret_ref = match auth {
-            Auth::Bearer { secret } => secret.as_str(),
-            Auth::Header { secret, .. } => secret.as_str(),
-            Auth::Basic { secret, .. } => secret.as_str(),
-        };
-        rows.push_str(&format!(
-            "<dt>{}</dt><dd><code>{}</code> <em>(keychain ref, not value)</em></dd>",
-            esc("Auth secret ref"),
-            esc(secret_ref),
-        ));
+        for secret_ref in auth.secrets() {
+            rows.push_str(&format!(
+                "<dt>{}</dt><dd><code>{}</code> <em>(keychain ref, not value)</em></dd>",
+                esc("Auth secret ref"),
+                esc(secret_ref),
+            ));
+        }
     }
 
     format!("<dl>{rows}</dl>")

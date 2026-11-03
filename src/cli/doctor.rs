@@ -312,11 +312,7 @@ async fn probe_http(
 
     // Fetch the secret (if any) from keychain.
     let secret = if let Some(auth) = &p.auth {
-        let secret_name = match auth {
-            Auth::Bearer { secret } => Some(secret),
-            Auth::Header { secret, .. } => Some(secret),
-            Auth::Basic { secret, .. } => Some(secret),
-        };
+        let secret_name = auth.secrets().first().copied();
         match secret_name {
             Some(name) => match kc.get(name) {
                 Ok(Some(s)) => Some(s),

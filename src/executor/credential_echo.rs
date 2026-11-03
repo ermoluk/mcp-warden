@@ -55,7 +55,8 @@ impl CredentialForms {
                     forms.push(encoded);
                 }
             }
-            _ => {}
+            // Every other kind is listed, so a new one cannot be missed here.
+            Some(Auth::Bearer { .. } | Auth::Header { prefix: None, .. }) | None => {}
         }
         for engine in [&STANDARD, &URL_SAFE] {
             let encoded = Zeroizing::new(engine.encode(raw.as_bytes()));
