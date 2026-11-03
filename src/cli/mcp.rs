@@ -8,7 +8,7 @@ use crate::approval::{
 use crate::executor::ActionExecutor;
 use crate::mcp::server::WardenServer;
 use is_terminal::IsTerminal;
-use mcp_warden_core::approval::{ApprovalDecision, ApprovalTransport};
+use mcp_warden_core::approval::ApprovalTransport;
 use mcp_warden_core::audit::{AuditSink, sqlite_sink::LocalSqlite};
 use mcp_warden_core::config::{Config, TelegramConfig};
 use mcp_warden_core::error::{Result, WardenError};
@@ -236,8 +236,8 @@ pub(crate) fn build_approval(
     #[cfg(debug_assertions)]
     if std::env::var("MCP_WARDEN_BACKEND").as_deref() == Ok("memory") {
         let fixed = match env_choice.as_deref() {
-            Some("test-approve") => Some(ApprovalDecision::Approved),
-            Some("test-deny") => Some(ApprovalDecision::Denied),
+            Some("test-approve") => Some(mcp_warden_core::approval::ApprovalDecision::Approved),
+            Some("test-deny") => Some(mcp_warden_core::approval::ApprovalDecision::Denied),
             _ => None,
         };
         if let Some(decision) = fixed {
