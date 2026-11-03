@@ -17,12 +17,6 @@ ignore = [
     # pre-release (via crypto-primes). Fixed when russh moves past it
     # (russh 0.65 is a semver-breaking upgrade, left for its own change).
     { id = "RUSTSEC-2026-0387", reason = "crypto-bigint pinned by russh's rsa pre-release" },
-    # quick-xml 0.37 in tauri-winrt-notification (Windows notifications via
-    # notify-rust): it parses only the toast XML mcp-warden builds itself,
-    # never upstream or agent input. Fixed by a notify-rust release that
-    # moves to quick-xml >= 0.41.
-    { id = "RUSTSEC-2026-0194", reason = "quick-xml parses only our own toast XML" },
-    { id = "RUSTSEC-2026-0195", reason = "quick-xml parses only our own toast XML" },
     # zstd 0.13 / zstd-safe 7 / zstd-sys 2.0 in mysql_common, for MySQL
     # binlog and compressed-protocol support mcp-warden does not enable.
     # Fixed by upgrading mysql_async (semver-breaking, its own change).
