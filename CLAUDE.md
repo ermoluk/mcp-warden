@@ -30,6 +30,7 @@ client. README and marketing position this as agent-agnostic.
 | Async runtime              | `tokio` 1                      |
 | HTTP client                | `reqwest` 0.12 (rustls)        |
 | SSH client                 | `russh` 0.65                   |
+| AWS request signing        | `aws-sigv4` 1.6                |
 | SQLite                     | `rusqlite` (bundled)           |
 | Desktop notifications      | `notify-rust` 4.18             |
 | TOML                       | `serde` + `toml`               |
@@ -136,22 +137,37 @@ abstraction is the product.
 
 ## How to navigate this repo
 
-- `src/secret.rs` — `Secret` newtype, the zeroize boundary.
-- `src/keychain/` — `KeychainStore` trait + impls.
-- `src/config.rs` — TOML schema, validation, `load_and_validate`.
-- `src/audit/` — append-only event log.
-- `src/approval/` — approval transports + sanitisation helpers.
-- `src/presets/` — preset source abstraction.
+The trait seams and everything config validation needs live in the
+`mcp-warden-core` crate (`core/src/`); the binary crate (`src/`) has the
+implementations that talk to the outside world.
+
+- `core/src/secret.rs` — `Secret` newtype, the zeroize boundary.
+- `core/src/keychain/` — `KeychainStore` trait + impls.
+- `core/src/config.rs` — TOML schema, validation, `load_and_validate`.
+- `core/src/commands.rs` — named SSH commands: template checks at startup,
+  `render` for `ssh_run`.
+- `core/src/stamp.rs` — confirmations of `auto` presets and wrapped servers
+  (HMAC stamps); `is_reserved_name` (`stamp/`, `audit/`).
+- `core/src/audit/` — append-only event log; `chain.rs` is the hash chain,
+  `anchor.rs` its keychain anchor.
+- `core/src/presets/` — preset source abstraction.
+- `core/src/fslock.rs` — lock files shared between mcp-warden processes.
+- `core/src/approval/` and `src/approval/` — the transport trait and
+  sanitisation helpers; the dialog, notification, TUI and Telegram
+  transports.
 - `src/executor/` — composition root for action execution;
   `policy.rs` decides "would this call be allowed" for the tools and the
-  `preset test` simulator alike, `lock.rs` is the kill switch.
+  `preset test` simulator alike, `auth.rs` / `oauth2.rs` carry HTTP
+  credentials, `lock.rs` is the kill switch.
 - `src/scan/` — `mcp-warden scan` (read-only plaintext-key finder; output
   never carries secret material).
-- `src/mcp/` — `rmcp` server wiring + tool definitions.
+- `src/mcp/` — `rmcp` server wiring + tool definitions; `generated.rs`
+  builds the per-command tools.
 - `src/cli/` — `clap` subcommands (`import`, `run` / `server` for wrapped
-  MCP servers, `lock` / `unlock`, …).
+  MCP servers, `lock` / `unlock`, `audit verify`, …).
 - `tests/` — CLI integration (`assert_cmd`) + MCP integration (raw stdio
-  framing).
+  framing); `tests/corpus/` holds the hostile-input corpora.
+- `fuzz/` — cargo-fuzz targets (own workspace, nightly).
 
 ## Conventions
 
