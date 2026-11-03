@@ -3,6 +3,10 @@ on:
   push:
     branches: [main]
   pull_request:
+  # Weekly, so an upstream release that breaks a fresh build shows up
+  # between our own changes too (see the fresh-dependencies job).
+  schedule:
+    - cron: "17 5 * * 1"
 
 permissions:
   contents: read
@@ -43,3 +47,19 @@ jobs:
           tool: cargo-deny,cargo-audit
       - run: cargo deny check
       - run: cargo audit
+
+  # What `cargo install mcp-warden` without --locked builds: the newest
+  # compatible version of every dependency, not the committed lockfile.
+  fresh-dependencies:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5.1.0
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@b725eda525362e7cf34af9a7243cac1e3f01a7ec # stable
+        with:
+          toolchain: stable
+      - name: Linux deps (DBus / secret-service)
+        run: sudo apt-get update && sudo apt-get install -y libdbus-1-dev pkg-config
+      - run: cargo generate-lockfile
+      - run: cargo test --workspace --all-features --no-fail-fast
