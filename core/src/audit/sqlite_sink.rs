@@ -1,13 +1,18 @@
-use crate::audit::{AuditDecision, AuditEvent, AuditFilter, AuditOutcome, AuditSink};
+use crate::audit::chain::{self, Record};
+use crate::audit::{AuditDecision, AuditEvent, AuditFilter, AuditOutcome, AuditSink, ChainReport};
 use crate::error::{Result, WardenError};
 use chrono::{DateTime, Utc};
 use rusqlite::types::Value;
-use rusqlite::{Connection, params};
+use rusqlite::{Connection, TransactionBehavior, params};
 use std::path::Path;
 use std::sync::Mutex;
+use std::time::Duration;
+
+/// How long a write waits for another process holding the database.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// The columns `row_to_event` reads, in its order.
-const COLUMNS: &str = "id, created_at, preset, action, summary, decision, outcome_kind, \
+pub(crate) const COLUMNS: &str = "id, created_at, preset, action, summary, decision, outcome_kind, \
                        outcome_data, client, session, via_event";
 
 pub struct LocalSqlite {
@@ -57,7 +62,11 @@ impl LocalSqlite {
         };
         #[cfg(not(unix))]
         let conn = Connection::open(path);
-        let conn = conn.map_err(|e| WardenError::Audit(e.to_string()))?;
+        let mut conn = conn.map_err(|e| WardenError::Audit(e.to_string()))?;
+        // Every mcp-warden process and the CLI write this file: a writer
+        // waits for another rather than failing.
+        conn.busy_timeout(BUSY_TIMEOUT)
+            .map_err(|e| WardenError::Audit(e.to_string()))?;
         conn.execute_batch(
             "CREATE TABLE IF NOT EXISTS events (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -76,6 +85,9 @@ impl LocalSqlite {
         )
         .map_err(|e| WardenError::Audit(e.to_string()))?;
         add_missing_columns(&conn)?;
+        conn.execute_batch(chain::SCHEMA)
+            .map_err(|e| WardenError::Audit(e.to_string()))?;
+        chain::ensure_genesis(&mut conn)?;
         #[cfg(unix)]
         {
             use std::os::unix::fs::PermissionsExt;
@@ -115,34 +127,43 @@ fn add_missing_columns(conn: &Connection) -> Result<()> {
 impl AuditSink for LocalSqlite {
     fn record_pending(&self, preset: &str, action: &str, summary: &str) -> Result<i64> {
         let (session, client) = self.session.lock().unwrap().clone();
-        let conn = self.conn.lock().unwrap();
-        conn.execute(
-            "INSERT INTO events (created_at, preset, action, summary, client, session) \
-             VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
-            params![
-                Utc::now().to_rfc3339(),
-                preset,
-                action,
-                summary,
-                client,
-                session
-            ],
-        )
-        .map_err(|e| WardenError::Audit(e.to_string()))?;
-        Ok(conn.last_insert_rowid())
+        let at = Utc::now().to_rfc3339();
+        self.write(|tx| {
+            tx.execute(
+                "INSERT INTO events (created_at, preset, action, summary, client, session) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                params![at, preset, action, summary, client, session],
+            )?;
+            let event = tx.last_insert_rowid();
+            let record = Record::Pending {
+                event,
+                at: at.clone(),
+                preset: preset.into(),
+                action: action.into(),
+                summary: summary.into(),
+                client: client.clone(),
+                session: session.clone(),
+            };
+            Ok((event, record))
+        })
     }
 
     fn record_decision(&self, id: i64, d: AuditDecision) -> Result<()> {
         let label = d.as_str();
-        self.conn
-            .lock()
-            .unwrap()
-            .execute(
+        self.write(|tx| {
+            changed(tx.execute(
                 "UPDATE events SET decision = ?1 WHERE id = ?2",
                 params![label, id],
-            )
-            .map_err(|e| WardenError::Audit(e.to_string()))?;
-        Ok(())
+            )?)?;
+            Ok((
+                id,
+                Record::Decision {
+                    event: id,
+                    decision: label.into(),
+                },
+            ))
+        })
+        .map(drop)
     }
 
     fn record_outcome(&self, id: i64, o: AuditOutcome) -> Result<()> {
@@ -150,15 +171,21 @@ impl AuditSink for LocalSqlite {
             AuditOutcome::Ok { status } => ("ok", status.to_string()),
             AuditOutcome::Err { message } => ("err", message.clone()),
         };
-        self.conn
-            .lock()
-            .unwrap()
-            .execute(
+        self.write(|tx| {
+            changed(tx.execute(
                 "UPDATE events SET outcome_kind = ?1, outcome_data = ?2 WHERE id = ?3",
                 params![kind, data, id],
-            )
-            .map_err(|e| WardenError::Audit(e.to_string()))?;
-        Ok(())
+            )?)?;
+            Ok((
+                id,
+                Record::Outcome {
+                    event: id,
+                    outcome_kind: kind.into(),
+                    outcome_data: data.clone(),
+                },
+            ))
+        })
+        .map(drop)
     }
 
     fn recent(&self, limit: usize) -> Result<Vec<AuditEvent>> {
@@ -220,15 +247,32 @@ impl AuditSink for LocalSqlite {
     }
 
     fn record_windowed(&self, id: i64, via_event_id: i64) -> Result<()> {
-        self.conn
-            .lock()
-            .unwrap()
-            .execute(
+        self.write(|tx| {
+            changed(tx.execute(
                 "UPDATE events SET decision = ?1, via_event = ?2 WHERE id = ?3",
                 params![AuditDecision::Windowed.as_str(), via_event_id, id],
-            )
-            .map_err(|e| WardenError::Audit(e.to_string()))?;
-        Ok(())
+            )?)?;
+            Ok((
+                id,
+                Record::Windowed {
+                    event: id,
+                    via_event: via_event_id,
+                },
+            ))
+        })
+        .map(drop)
+    }
+
+    fn chain_tip(&self) -> Result<Option<(i64, String)>> {
+        chain::tip(&self.conn.lock().unwrap())
+    }
+
+    fn chain_hash_at(&self, seq: i64) -> Result<Option<String>> {
+        chain::hash_at(&self.conn.lock().unwrap(), seq)
+    }
+
+    fn verify_chain(&self) -> Result<ChainReport> {
+        chain::verify(&self.conn.lock().unwrap())
     }
 
     fn set_session(&self, id: &str) {
@@ -238,6 +282,48 @@ impl AuditSink for LocalSqlite {
     fn set_client(&self, client: &str) {
         self.session.lock().unwrap().1 = Some(client.to_string());
     }
+}
+
+impl LocalSqlite {
+    /// One write: the change to `events` and its chain record, in one
+    /// transaction that takes the write lock up front (`BEGIN IMMEDIATE`),
+    /// so processes writing at once queue and the chain stays linear.
+    /// Returns the event id.
+    fn write(
+        &self,
+        change: impl FnOnce(&rusqlite::Transaction) -> std::result::Result<(i64, Record), WriteError>,
+    ) -> Result<i64> {
+        let mut conn = self.conn.lock().unwrap();
+        let tx = conn
+            .transaction_with_behavior(TransactionBehavior::Immediate)
+            .map_err(|e| WardenError::Audit(e.to_string()))?;
+        let (event, record) = change(&tx).map_err(|e| match e {
+            WriteError::Sql(e) => WardenError::Audit(e.to_string()),
+            WriteError::NoSuchEvent => WardenError::Audit("no such audit event".into()),
+        })?;
+        chain::append(&tx, event, &record)?;
+        tx.commit().map_err(|e| WardenError::Audit(e.to_string()))?;
+        Ok(event)
+    }
+}
+
+enum WriteError {
+    Sql(rusqlite::Error),
+    NoSuchEvent,
+}
+
+impl From<rusqlite::Error> for WriteError {
+    fn from(e: rusqlite::Error) -> Self {
+        WriteError::Sql(e)
+    }
+}
+
+/// An update must fill in an existing row.
+fn changed(rows: usize) -> std::result::Result<(), WriteError> {
+    if rows == 0 {
+        return Err(WriteError::NoSuchEvent);
+    }
+    Ok(())
 }
 
 fn row_to_event(row: &rusqlite::Row) -> rusqlite::Result<AuditEvent> {
