@@ -93,6 +93,9 @@ pub async fn run(args: DoctorArgs, config_dir: &Path, store: Arc<dyn KeychainSto
                 for w in cfg.preset.iter().flat_map(pattern_warnings) {
                     println!("warning:    {w}");
                 }
+                for w in cfg.preset.iter().flat_map(command_warnings) {
+                    println!("warning:    {w}");
+                }
                 for w in cfg.preset.iter().flat_map(query_warnings) {
                     println!("warning:    {w}");
                 }
@@ -560,15 +563,75 @@ pub(crate) fn query_warnings(p: &Preset) -> Vec<String> {
 pub(crate) fn pattern_warnings(p: &Preset) -> Vec<String> {
     p.allowed_commands
         .iter()
-        .filter(|pattern| argument_may_start_with_dash(pattern))
-        .map(|pattern| {
-            format!(
-                "preset '{}': allowed_commands pattern '{pattern}' lets an argument start \
-                 with '-', so the agent can pass options of its own (e.g. `-Hhost`, \
-                 `--upload-pack=…`); start it with a character that cannot be one, \
-                 e.g. `[a-z0-9][a-z0-9._-]*`",
-                p.name
-            )
+        .filter_map(|pattern| {
+            if argument_may_start_with_dash(pattern) {
+                Some(format!(
+                    "preset '{}': allowed_commands pattern '{pattern}' lets an argument start \
+                     with '-', so the agent can pass options of its own (e.g. `-Hhost`, \
+                     `--upload-pack=…`); start it with a character that cannot be one, \
+                     e.g. `[a-z0-9][a-z0-9._-]*`",
+                    p.name
+                ))
+            } else if has_catch_all(pattern) {
+                Some(format!(
+                    "preset '{}': allowed_commands pattern '{pattern}' ends in a catch-all \
+                     (`.*`, `.+`, `\\S+`, `[^ ]+`), which also admits arguments you did not \
+                     list, e.g. `git pull --upload-pack=…`; list the exact commands, or use \
+                     named commands ([[preset.commands]]) with typed parameters",
+                    p.name
+                ))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Whether `pattern` repeats `.`, `\S` or `[^ ]` (`*` or `+`) anywhere:
+/// any of them lets the agent append words of its own.
+fn has_catch_all(pattern: &str) -> bool {
+    let bytes = pattern.as_bytes();
+    let repeated = |at: usize| matches!(bytes.get(at), Some(b'*' | b'+'));
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if bytes.get(i + 1) == Some(&b'S') && repeated(i + 2) => return true,
+            b'\\' => i += 2,
+            b'.' if repeated(i + 1) => return true,
+            b'[' if pattern[i..].starts_with("[^ ]") && repeated(i + 4) => return true,
+            _ => i += 1,
+        }
+    }
+    false
+}
+
+/// Named commands whose template destroys data or rewrites permissions:
+/// each deserves narrow parameters and a prompt.
+pub(crate) fn command_warnings(p: &Preset) -> Vec<String> {
+    p.commands
+        .iter()
+        .filter_map(|c| {
+            let mut words = c.template.split(' ').peekable();
+            if words.peek() == Some(&"sudo") {
+                words.next();
+                while words.peek().is_some_and(|w| w.starts_with('-')) {
+                    words.next();
+                }
+            }
+            let program = words.next()?;
+            let recursive = words.any(|w| w == "-R" || w == "-r" || w == "--recursive");
+            let what = match program {
+                "rm" | "shred" => "deletes files",
+                "dd" => "writes raw devices or files",
+                p if p.starts_with("mkfs") => "formats a filesystem",
+                "chmod" | "chown" if recursive => "rewrites permissions recursively",
+                _ => return None,
+            };
+            Some(format!(
+                "preset '{}': command '{}' runs `{program}`, which {what}; keep its parameters \
+                 as narrow as possible and its approval at \"prompt\"",
+                p.name, c.name
+            ))
         })
         .collect()
 }
@@ -802,6 +865,57 @@ mod tests {
             "uptime",
         ] {
             assert!(pattern_warnings(&ssh_with(&[tight])).is_empty(), "{tight}");
+        }
+    }
+
+    #[test]
+    fn catch_all_patterns_are_flagged() {
+        for loose in ["git pull.*", "ls -la.+", "cat /var/log/\\S+", "echo x[^ ]*"] {
+            let w = pattern_warnings(&ssh_with(&[loose]));
+            assert_eq!(w.len(), 1, "{loose}: {w:?}");
+            assert!(w[0].contains("catch-all"), "{w:?}");
+        }
+        for fine in [
+            "cat /var/log/app\\.log",
+            "git pull",
+            "tail -n [0-9]+ app\\.log",
+        ] {
+            assert!(pattern_warnings(&ssh_with(&[fine])).is_empty(), "{fine}");
+        }
+    }
+
+    #[test]
+    fn destructive_command_templates_are_flagged() {
+        let cfg: mcp_warden_core::config::Config =
+            toml::from_str(include_str!("../../tests/fixtures/named_commands.toml")).unwrap();
+        let mut p = cfg.preset[0].clone();
+        assert!(
+            command_warnings(&p).is_empty(),
+            "{:?}",
+            command_warnings(&p)
+        );
+        let set = |p: &mut Preset, template: &str| {
+            p.commands[2].template = template.into();
+            command_warnings(p)
+        };
+        for template in [
+            "rm {path}",
+            "sudo -n rm -f {path}",
+            "dd if=/dev/zero of={path}",
+            "mkfs.ext4 {path}",
+            "chmod -R 777 {path}",
+            "sudo chown -R app {path}",
+        ] {
+            let w = set(&mut p, template);
+            assert_eq!(w.len(), 1, "{template}: {w:?}");
+            assert!(w[0].contains("command 'trash_file'"), "{w:?}");
+        }
+        for template in [
+            "chmod 644 {path}",
+            "cat {path}",
+            "mv {path} /srv/app/.trash/",
+        ] {
+            assert!(set(&mut p, template).is_empty(), "{template}");
         }
     }
 
