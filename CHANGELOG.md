@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file. The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.0]
 
 Building from source now needs Rust 1.94.1 (AWS's `aws-sigv4` crate); prebuilt binaries and packages are unaffected.
 

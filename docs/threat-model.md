@@ -1,6 +1,6 @@
 # Threat model — `mcp-warden`
 
-Current as of v0.5.4. This document describes what `mcp-warden` defends against, what it does not, and where the residual risks lie. It complements (and does not replace) the security invariants in `CLAUDE.md` §"Security invariants — non-negotiable".
+Current as of v0.6.0. This document describes what `mcp-warden` defends against, what it does not, and where the residual risks lie. It complements (and does not replace) the security invariants in `CLAUDE.md` §"Security invariants — non-negotiable".
 
 ## Assumptions
 
