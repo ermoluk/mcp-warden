@@ -9,10 +9,12 @@
 
 pub const LIST_PRESETS_DESCRIPTION: &str = "\
 List available mcp-warden presets — named, scoped actions you may invoke. \
-Returns name, description, type (http|ssh), and approval policy \
-(auto|prompt|deny). Read-only; never returns secret values. \
-Use `proxy_http` for HTTP actions and `get_secret_for_env` only as a last \
-resort when a child process must read a secret from its environment.";
+Returns name, description, type (http|ssh|postgres|mysql|redis), and \
+approval policy (auto|prompt|deny); for SSH presets, also their named \
+commands with what each parameter accepts. Read-only; never returns secret \
+values. Use `proxy_http` for HTTP actions, `ssh_run` for named commands, \
+and `get_secret_for_env` only as a last resort when a child process must \
+read a secret from its environment.";
 
 pub const PROXY_HTTP_DESCRIPTION: &str = "\
 Make an HTTP request through a preset. The preset selects the base URL and \

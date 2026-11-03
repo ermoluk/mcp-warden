@@ -35,13 +35,31 @@ pub struct WardenServer {
 pub struct PresetSummary {
     pub name: String,
     pub description: String,
-    /// "http" or "ssh".
+    /// "http", "ssh", "postgres", "mysql" or "redis".
     pub kind: String,
     /// "auto", "prompt", or "deny".
     pub approval: String,
     /// When access through this preset ends (RFC 3339). Absent: no limit.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<String>,
+    /// SSH: the named commands `ssh_run` runs. Absent: none.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<CommandSummary>,
+}
+
+#[derive(Debug, Clone, Serialize, rmcp::schemars::JsonSchema)]
+pub struct CommandSummary {
+    pub name: String,
+    pub description: String,
+    /// The command line, with `{param}` where each value goes.
+    pub template: String,
+    /// What each parameter accepts, e.g. `int from 1 to 500`.
+    pub params: std::collections::BTreeMap<String, String>,
+    /// This command's policy: "auto", "prompt", or "deny".
+    pub approval: String,
+    /// Also offered as its own tool under this name (`expose_as_tools`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tool: Option<String>,
 }
 
 #[derive(Debug, Clone, Serialize, rmcp::schemars::JsonSchema)]
@@ -114,11 +132,13 @@ impl WardenServer {
     }
 
     /// List available mcp-warden presets — named, scoped actions you may
-    /// invoke. Returns name, description, type (http|ssh), and approval
-    /// policy (auto|prompt|deny). Read-only; never returns secret values.
-    /// Use `proxy_http` for HTTP actions and `get_secret_for_env` only as a
-    /// last resort when a child process must read a secret from its
-    /// environment.
+    /// invoke. Returns name, description, type
+    /// (http|ssh|postgres|mysql|redis), and approval policy
+    /// (auto|prompt|deny); for SSH presets, also their named commands with
+    /// what each parameter accepts. Read-only; never returns secret values.
+    /// Use `proxy_http` for HTTP actions, `ssh_run` for named commands, and
+    /// `get_secret_for_env` only as a last resort when a child process must
+    /// read a secret from its environment.
     #[tool]
     pub async fn list_presets(&self) -> Result<Json<ListPresetsResponse>, McpError> {
         self.executor
@@ -135,6 +155,7 @@ impl WardenServer {
             .into_iter()
             .filter(|p| p.expires_at.is_none_or(|at| at > now))
             .map(|p| PresetSummary {
+                commands: command_summaries(&p),
                 name: p.name,
                 description: p.description,
                 kind: match p.preset_type {
@@ -144,11 +165,7 @@ impl WardenServer {
                     PresetType::Mysql => "mysql".into(),
                     PresetType::Redis => "redis".into(),
                 },
-                approval: match p.approval {
-                    ApprovalPolicy::Auto => "auto".into(),
-                    ApprovalPolicy::Prompt => "prompt".into(),
-                    ApprovalPolicy::Deny => "deny".into(),
-                },
+                approval: policy_name(p.approval).into(),
                 expires_at: p
                     .expires_at
                     .map(|at| at.to_rfc3339_opts(chrono::SecondsFormat::Secs, true)),
@@ -519,6 +536,51 @@ pub struct DbQueryArgs {
     pub params: Vec<serde_json::Value>,
 }
 
+fn policy_name(policy: ApprovalPolicy) -> &'static str {
+    match policy {
+        ApprovalPolicy::Auto => "auto",
+        ApprovalPolicy::Prompt => "prompt",
+        ApprovalPolicy::Deny => "deny",
+    }
+}
+
+/// A preset's named commands as `list_presets` shows them: what each one
+/// runs and what each parameter accepts, so the agent can fill them in.
+fn command_summaries(p: &Preset) -> Vec<CommandSummary> {
+    use mcp_warden_core::config::ParamSpec;
+    p.commands
+        .iter()
+        .map(|c| CommandSummary {
+            name: c.name.clone(),
+            description: c.description.clone(),
+            template: c.template.clone(),
+            params: c
+                .params
+                .iter()
+                .map(|(name, spec)| {
+                    let accepts = match spec {
+                        ParamSpec::String { pattern } => {
+                            format!("one word matching the regex {pattern}")
+                        }
+                        ParamSpec::Path { pattern } => {
+                            format!("an absolute path matching the regex {pattern}")
+                        }
+                        ParamSpec::Int { min, max } => format!("int from {min} to {max}"),
+                        ParamSpec::Enum { values } => {
+                            format!("one of: {}", values.join(", "))
+                        }
+                    };
+                    (name.clone(), accepts)
+                })
+                .collect(),
+            approval: policy_name(mcp_warden_core::commands::effective_approval(p, c)).into(),
+            tool: p
+                .expose_as_tools
+                .then(|| mcp_warden_core::commands::tool_name(&p.name, &c.name)),
+        })
+        .collect()
+}
+
 /// The keychain entry a preset reads its credential from.
 pub(crate) fn preset_secret(p: &Preset) -> Option<String> {
     use mcp_warden_core::config::Auth;
@@ -568,7 +630,8 @@ impl ServerHandler for WardenServer {
         info.server_info = Implementation::new("mcp-warden", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
             "Local-first credential broker. Use list_presets to discover available actions, \
-             then proxy_http to execute them. Secrets never leave the broker."
+             then proxy_http, ssh_run, ssh_exec, sftp_transfer or db_query to execute them. \
+             Secrets never leave the broker."
                 .into(),
         );
         info
@@ -783,6 +846,42 @@ mod tests {
         let e = &audit.recent(1).unwrap()[0];
         assert_eq!(e.preset, "old");
         assert_eq!(e.decision, Some(AuditDecision::Refused));
+    }
+
+    #[tokio::test]
+    async fn list_presets_shows_named_commands() {
+        let dir = tempfile::tempdir().unwrap();
+        let executor = Arc::new(ActionExecutor::new(
+            Arc::new(mcp_warden_core::keychain::memory::InMemoryKeychain::new()),
+            Arc::new(crate::approval::always_deny::AlwaysDeny),
+            None,
+            Arc::new(LocalSqlite::open(&dir.path().join("audit.db")).unwrap()),
+        ));
+        let cfg: mcp_warden_core::config::Config =
+            toml::from_str(include_str!("../../tests/fixtures/named_commands.toml")).unwrap();
+        let mut preset = cfg.preset[0].clone();
+        preset.commands[1].approval = Some(ApprovalPolicy::Deny);
+        let presets = mcp_warden_core::presets::frozen::FrozenSource::new(vec![preset]);
+        let server = WardenServer::new(Arc::new(presets), executor);
+        let listed = server.list_presets().await.unwrap().0.presets;
+        let commands = &listed[0].commands;
+        assert_eq!(commands.len(), 5);
+        assert_eq!(commands[0].name, "tail_log");
+        assert_eq!(
+            commands[0].template,
+            "journalctl -u app -n {lines} --no-pager"
+        );
+        assert_eq!(commands[0].params["lines"], "int from 1 to 500");
+        assert_eq!(commands[0].approval, "prompt");
+        assert_eq!(commands[0].tool.as_deref(), Some("ssh_deploy_tail_log"));
+        assert_eq!(
+            commands[1].params["unit"],
+            "one of: app.service, worker.service"
+        );
+        assert_eq!(commands[1].approval, "deny");
+        assert!(commands[2].params["path"].contains("/srv/app/uploads/[a-z0-9._-]+"));
+        let json = serde_json::to_value(&listed[0]).unwrap();
+        assert!(json.get("commands").is_some());
     }
 
     #[test]
