@@ -290,7 +290,21 @@ pub async fn execute(
         .authorise(preset, "proxy_http", &summary, false)
         .await?;
 
-    let credential = super::auth::load(exec.keychain.as_ref(), preset)?;
+    let mut credential = super::auth::load(exec.keychain.as_ref(), preset)?;
+    // OAuth2: this call's access token, minted now and dropped with the call.
+    if let Err(e) = credential
+        .prepare(exec.keychain.as_ref(), exec.state_dir.as_deref(), preset)
+        .await
+    {
+        let e = credential.forms().scrub_error(e);
+        let _ = exec.audit.record_outcome(
+            event_id,
+            AuditOutcome::Err {
+                message: e.to_string(),
+            },
+        );
+        return Err(e);
+    }
 
     if let Some(q) = &req.query {
         let mut pairs = url.query_pairs_mut();

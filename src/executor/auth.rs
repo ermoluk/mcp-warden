@@ -19,6 +19,8 @@ pub struct Credential {
     auth: Auth,
     /// One per entry of `auth.secrets()`, in that order.
     secrets: Vec<Secret>,
+    /// OAuth2: the token minted for this call by [`Credential::prepare`].
+    minted: Option<super::oauth2::Minted>,
 }
 
 /// Read the preset's credential from the keychain.
@@ -37,24 +39,48 @@ pub fn load(kc: &dyn KeychainStore, preset: &Preset) -> Result<Credential> {
             })
         })
         .collect::<Result<_>>()?;
-    Ok(Credential { auth, secrets })
+    Ok(Credential {
+        auth,
+        secrets,
+        minted: None,
+    })
 }
 
 impl Credential {
+    /// Whatever must happen before the request can carry the credential:
+    /// for OAuth2, mint this call's access token (`state_dir` holds the
+    /// lock files shared with other mcp-warden processes).
+    pub async fn prepare(
+        &mut self,
+        kc: &dyn KeychainStore,
+        state_dir: Option<&std::path::Path>,
+        preset: &Preset,
+    ) -> Result<()> {
+        if let Auth::Oauth2 { client_secret, .. } = &self.auth {
+            let secret = client_secret.as_ref().map(|_| &self.secrets[0]);
+            self.minted = Some(super::oauth2::mint(kc, state_dir, preset, secret).await?);
+        }
+        Ok(())
+    }
+
     /// The request with the credential on it.
     pub fn apply(&self, b: reqwest::RequestBuilder) -> reqwest::RequestBuilder {
-        let secret = self.secrets[0].expose();
         match &self.auth {
-            Auth::Bearer { .. } => b.bearer_auth(secret),
+            Auth::Bearer { .. } => b.bearer_auth(self.secrets[0].expose()),
             Auth::Header { name, prefix, .. } => {
+                let secret = self.secrets[0].expose();
                 let value = match prefix {
                     Some(p) => format!("{p}{secret}"),
                     None => secret.to_string(),
                 };
                 b.header(name, value)
             }
-            Auth::Basic { username, .. } => b.basic_auth(username, Some(secret)),
+            Auth::Basic { username, .. } => b.basic_auth(username, Some(self.secrets[0].expose())),
             Auth::Query { .. } => b,
+            Auth::Oauth2 { .. } => match &self.minted {
+                Some(m) => b.bearer_auth(m.access_token.expose()),
+                None => b,
+            },
         }
     }
 
@@ -67,9 +93,29 @@ impl Credential {
         }
     }
 
-    /// Every form the credential was sent in, for scrubbing what comes back.
+    /// Every form the credential was sent in, for scrubbing what comes back:
+    /// for OAuth2 also the client secret and every refresh token the call
+    /// saw, which a hostile upstream may have been handed.
     pub fn forms(&self) -> CredentialForms {
-        CredentialForms::http(&Some(self.auth.clone()), &self.secrets[0])
+        match &self.auth {
+            Auth::Oauth2 { .. } => {
+                let bearer = Some(Auth::Bearer {
+                    secret: String::new(),
+                });
+                let minted = self.minted.iter().flat_map(|m| {
+                    std::iter::once(CredentialForms::http(&bearer, &m.access_token))
+                        .chain(m.refresh_tokens.iter().map(CredentialForms::raw))
+                });
+                CredentialForms::merge(
+                    self.secrets
+                        .iter()
+                        .map(CredentialForms::raw)
+                        .chain(minted)
+                        .collect::<Vec<_>>(),
+                )
+            }
+            auth => CredentialForms::http(&Some(auth.clone()), &self.secrets[0]),
+        }
     }
 }
 

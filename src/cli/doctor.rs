@@ -131,7 +131,8 @@ pub async fn run(args: DoctorArgs, config_dir: &Path, store: Arc<dyn KeychainSto
                 transports.fallback,
                 audit,
             )
-            .with_lock(config_dir.join(crate::executor::lock::LOCK_FILE));
+            .with_lock(config_dir.join(crate::executor::lock::LOCK_FILE))
+            .with_state_dir(config_dir.to_path_buf());
             let results = run_probes(&cfg, kc, &args, &exec).await;
             match args.format.as_str() {
                 "json" => {
@@ -250,7 +251,8 @@ async fn run_probes(
                         continue;
                     }
                 };
-                let (status, detail) = probe_http(p, kc, client.as_ref()).await;
+                let (status, detail) =
+                    probe_http(p, kc, exec.state_dir.as_deref(), client.as_ref()).await;
                 let _ = exec.audit.record_outcome(
                     event,
                     match status {
@@ -285,6 +287,7 @@ async fn run_probes(
 async fn probe_http(
     p: &Preset,
     kc: &dyn KeychainStore,
+    state_dir: Option<&Path>,
     client: Option<&reqwest::Client>,
 ) -> (ProbeStatus, String) {
     let Some(client) = client else {
@@ -315,7 +318,15 @@ async fn probe_http(
     let mut req = client.get(&url);
     let forms = match &p.auth {
         Some(_) => match crate::executor::auth::load(kc, p) {
-            Ok(credential) => {
+            Ok(mut credential) => {
+                // OAuth2 mints a token, as a real call would.
+                if let Err(e) = credential.prepare(kc, state_dir, p).await {
+                    let e = credential.forms().scrub_error(e);
+                    return (
+                        ProbeStatus::AuthFailed,
+                        redact(&truncate(&e.to_string(), 200)),
+                    );
+                }
                 req = credential.apply(req);
                 credential.forms()
             }

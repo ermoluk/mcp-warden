@@ -175,7 +175,10 @@ impl Preset {
 
     /// The entries `get_secret_for_env` may reveal for this preset.
     pub fn revealable_secrets(&self) -> Vec<&str> {
-        self.secret_names()
+        match &self.auth {
+            Some(auth) => auth.revealable(),
+            None => self.secret_names(),
+        }
     }
 
     /// Whether a call through this preset could run without a prompt: the
@@ -321,6 +324,49 @@ pub enum Auth {
         name: String,
         secret: String,
     },
+    /// OAuth 2.0: a fresh access token from `token_url` for every call, sent
+    /// as a bearer token. `client_secret` and `refresh_token` name keychain
+    /// entries; the access token is never stored (invariant 8).
+    Oauth2 {
+        grant: OAuth2Grant,
+        token_url: String,
+        client_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_secret: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refresh_token: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        scopes: Vec<String>,
+        #[serde(default, skip_serializing_if = "ClientAuth::is_basic")]
+        client_auth: ClientAuth,
+    },
+}
+
+/// How an OAuth2 preset gets its access token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuth2Grant {
+    /// Exchange a stored refresh token; a rotated one replaces it.
+    RefreshToken,
+    /// The client's own credentials (machine-to-machine).
+    ClientCredentials,
+}
+
+/// How the client authenticates to the token endpoint (RFC 6749 §2.3.1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClientAuth {
+    /// HTTP Basic with the client id and secret.
+    #[default]
+    Basic,
+    /// `client_id` and `client_secret` in the form body.
+    Body,
+}
+
+impl ClientAuth {
+    fn is_basic(&self) -> bool {
+        *self == ClientAuth::Basic
+    }
 }
 
 impl Auth {
@@ -331,8 +377,102 @@ impl Auth {
             | Auth::Header { secret, .. }
             | Auth::Basic { secret, .. }
             | Auth::Query { secret, .. } => vec![secret],
+            Auth::Oauth2 {
+                client_secret,
+                refresh_token,
+                ..
+            } => client_secret
+                .iter()
+                .chain(refresh_token)
+                .map(String::as_str)
+                .collect(),
         }
     }
+
+    /// The entries `get_secret_for_env` may reveal. Not an OAuth2 preset's:
+    /// a refresh token in the agent's hands outlives the call, and once the
+    /// provider rotates it, the stored copy no longer matches.
+    pub fn revealable(&self) -> Vec<&str> {
+        match self {
+            Auth::Oauth2 { .. } => vec![],
+            other => other.secrets(),
+        }
+    }
+}
+
+/// An OAuth2 preset's token endpoint and client. The endpoint receives the
+/// client secret and the refresh token, so it gets the same transport rule
+/// as `base_url`: https, or plain http only to loopback.
+fn validate_oauth2(p: &Preset, auth: &Auth) -> Result<()> {
+    let Auth::Oauth2 {
+        grant,
+        token_url,
+        client_id,
+        client_secret,
+        refresh_token,
+        scopes,
+        ..
+    } = auth
+    else {
+        return Ok(());
+    };
+    let refuse =
+        |why: String| WardenError::Validation(format!("preset '{}': oauth2 {why}", p.name));
+    let url = Url::parse(token_url).map_err(|e| refuse(format!("token_url parse: {e}")))?;
+    let secure = match url.scheme() {
+        "https" => true,
+        "http" => url.host().is_some_and(|h| is_loopback(&h)),
+        _ => false,
+    };
+    if !secure || url.host().is_none() {
+        return Err(refuse(
+            "token_url must be https (plain http only to localhost): it receives the client \
+             secret and the refresh token"
+                .into(),
+        ));
+    }
+    if client_id.is_empty() || client_id.len() > 256 || client_id.chars().any(char::is_control) {
+        return Err(refuse(
+            "client_id must be 1-256 characters, no control characters".into(),
+        ));
+    }
+    match grant {
+        OAuth2Grant::RefreshToken if refresh_token.is_none() => {
+            return Err(refuse(
+                "grant = \"refresh_token\" needs refresh_token".into(),
+            ));
+        }
+        OAuth2Grant::ClientCredentials if client_secret.is_none() => {
+            return Err(refuse(
+                "grant = \"client_credentials\" needs client_secret".into(),
+            ));
+        }
+        OAuth2Grant::ClientCredentials if refresh_token.is_some() => {
+            return Err(refuse(
+                "grant = \"client_credentials\" takes no refresh_token".into(),
+            ));
+        }
+        _ => {}
+    }
+    if client_secret.is_some() && client_secret == refresh_token {
+        return Err(refuse(
+            "client_secret and refresh_token must be different keychain entries".into(),
+        ));
+    }
+    // RFC 6749 §3.3: scope tokens are printable ASCII without space, '"'
+    // or '\'.
+    if let Some(bad) = scopes.iter().find(|s| {
+        s.is_empty()
+            || !s
+                .bytes()
+                .all(|b| matches!(b, 0x21 | 0x23..=0x5B | 0x5D..=0x7E))
+    }) {
+        return Err(refuse(format!(
+            "scope '{}' is not a valid scope token",
+            bad.escape_debug()
+        )));
+    }
+    Ok(())
 }
 
 /// `localhost`, 127.0.0.0/8 or `::1`: a host whose traffic cannot leave
@@ -398,6 +538,7 @@ impl Config {
             }
         }
         crate::commands::validate_tool_names(&self.preset)?;
+        self.validate_refresh_token_entries()?;
         if let Some(approval) = &self.approval
             && let Some(tg) = &approval.telegram
         {
@@ -509,6 +650,9 @@ impl Config {
                 )));
             }
         }
+        if let Auth::Oauth2 { .. } = auth {
+            validate_oauth2(p, auth)?;
+        }
         for secret in auth.secrets() {
             if kc.get(secret)?.is_none() {
                 return Err(WardenError::MissingSecret {
@@ -616,6 +760,45 @@ impl Config {
             if q.name.is_empty() || q.template.is_empty() {
                 return Err(WardenError::Validation(format!(
                     "preset '{}': named query has empty name or template",
+                    p.name
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// A refresh token's keychain entry is written when the provider
+    /// rotates the token, so it may belong to that one preset only: a
+    /// hostile token endpoint must not be able to overwrite another
+    /// preset's credential, a wrapped server's key or the Telegram token.
+    fn validate_refresh_token_entries(&self) -> Result<()> {
+        for p in &self.preset {
+            let Some(Auth::Oauth2 {
+                refresh_token: Some(entry),
+                ..
+            }) = &p.auth
+            else {
+                continue;
+            };
+            let shared = self
+                .preset
+                .iter()
+                .filter(|q| q.secret_names().contains(&entry.as_str()))
+                .count()
+                > 1
+                || self
+                    .server
+                    .iter()
+                    .any(|s| s.env.iter().any(|var| &s.secret_name(var) == entry))
+                || self
+                    .approval
+                    .as_ref()
+                    .and_then(|a| a.telegram.as_ref())
+                    .is_some_and(|t| &t.bot_token_secret == entry);
+            if shared {
+                return Err(WardenError::Validation(format!(
+                    "preset '{}': refresh_token entry '{entry}' is also used elsewhere; a \
+                     rotated token is written back to it, so give it an entry of its own",
                     p.name
                 )));
             }
@@ -1315,5 +1498,71 @@ mod tests {
         ] {
             assert!(config(base, name).validate(&kc).is_err(), "{base} {name:?}");
         }
+    }
+
+    #[test]
+    fn oauth2_presets_are_checked() {
+        let kc = InMemoryKeychain::new();
+        for name in ["cs", "rt", "other"] {
+            kc.set(name, Secret::new("x".into())).unwrap();
+        }
+        let config = |auth: &str, extra: &str| -> Config {
+            toml::from_str(&format!(
+                r#"
+                [[preset]]
+                name = "drive"
+                type = "http"
+                description = "x"
+                base_url = "https://www.googleapis.com"
+                allowed_methods = ["GET"]
+                approval = "prompt"
+                [preset.auth]
+                type = "oauth2"
+                client_id = "id"
+                {auth}
+                {extra}
+                "#
+            ))
+            .unwrap()
+        };
+        let ok = r#"grant = "refresh_token"
+            token_url = "https://oauth2.googleapis.com/token"
+            client_secret = "cs"
+            refresh_token = "rt""#;
+        config(ok, "").validate(&kc).unwrap();
+        config(
+            r#"grant = "client_credentials"
+            token_url = "http://localhost:8080/token"
+            client_secret = "cs"
+            scopes = ["a.read", "b:write"]"#,
+            "",
+        )
+        .validate(&kc)
+        .unwrap();
+        for bad in [
+            ok.replace(
+                "https://oauth2.googleapis.com",
+                "http://oauth2.googleapis.com",
+            ),
+            ok.replace("https://oauth2.googleapis.com/token", "file:///etc/token"),
+            ok.replace("refresh_token = \"rt\"", ""),
+            ok.replace("refresh_token = \"rt\"", "refresh_token = \"cs\""),
+            ok.replace("\"refresh_token\"\n", "\"client_credentials\"\n"),
+            ok.replace("refresh_token = \"rt\"", "refresh_token = \"missing\""),
+            ok.replace("refresh_token = \"rt\"", "refresh_token = \"stamp/key\""),
+            format!("{ok}\nscopes = [\"a b\"]"),
+            format!("{ok}\nscopes = [\"\"]"),
+        ] {
+            assert!(config(&bad, "").validate(&kc).is_err(), "{bad}");
+        }
+        // The refresh token's entry is written on rotation: nothing else
+        // may use it.
+        let shared = format!(
+            "{ok}\n[[preset]]\nname = \"other\"\ntype = \"http\"\ndescription = \"x\"\n\
+             base_url = \"https://api.example.com\"\nallowed_methods = [\"GET\"]\n\
+             approval = \"prompt\"\nauth = {{ type = \"bearer\", secret = \"rt\" }}"
+        );
+        let err = config(&shared, "").validate(&kc).unwrap_err().to_string();
+        assert!(err.contains("also used elsewhere"), "{err}");
     }
 }

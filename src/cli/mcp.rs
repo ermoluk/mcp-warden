@@ -61,7 +61,8 @@ pub async fn cmd(config_dir: &Path) -> Result<()> {
 
     let executor = Arc::new(
         ActionExecutor::new(keychain, transports.primary, transports.fallback, audit)
-            .with_lock(config_dir.join(crate::executor::lock::LOCK_FILE)),
+            .with_lock(config_dir.join(crate::executor::lock::LOCK_FILE))
+            .with_state_dir(config_dir.to_path_buf()),
     );
     // `get_secret_for_env` may reveal the secrets of these presets and
     // wrapped servers, but never the Telegram bot token.

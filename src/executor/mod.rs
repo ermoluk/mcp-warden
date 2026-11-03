@@ -14,6 +14,7 @@ pub mod http;
 pub mod known_hosts;
 pub mod limits;
 pub mod lock;
+pub mod oauth2;
 pub mod policy;
 pub mod response;
 pub mod sftp;
@@ -76,6 +77,9 @@ pub struct ActionExecutor {
     prompting: tokio::sync::Mutex<()>,
     /// The kill switch (`mcp-warden lock`), checked before every call.
     lock: lock::LockState,
+    /// The config dir, for lock files shared with other mcp-warden
+    /// processes (`<dir>/locks/`). `None` in tests: locks are per process.
+    pub state_dir: Option<std::path::PathBuf>,
 }
 
 impl ActionExecutor {
@@ -110,6 +114,7 @@ impl ActionExecutor {
             approval_windows: tokio::sync::Mutex::new(HashMap::new()),
             prompting: tokio::sync::Mutex::new(()),
             lock: lock::LockState::none(),
+            state_dir: None,
         }
     }
 }
@@ -265,6 +270,12 @@ impl ActionExecutor {
     /// Watch this lock file (`<config dir>/lock`) for the kill switch.
     pub fn with_lock(mut self, path: std::path::PathBuf) -> Self {
         self.lock = lock::LockState::at(path);
+        self
+    }
+
+    /// Keep cross-process lock files under `dir` (the config dir).
+    pub fn with_state_dir(mut self, dir: std::path::PathBuf) -> Self {
+        self.state_dir = Some(dir);
         self
     }
 

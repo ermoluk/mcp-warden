@@ -9,6 +9,7 @@
 //! however it exits.
 
 use crate::error::{Result, WardenError};
+use sha2::{Digest, Sha256};
 use std::fs::{File, OpenOptions, TryLockError};
 use std::path::Path;
 use std::time::{Duration, Instant};
@@ -49,6 +50,14 @@ impl FileLock {
             std::thread::sleep(Duration::from_millis(20));
         }
     }
+}
+
+/// A lock file name for `key` (a keychain entry, a path): `<prefix>-<16 hex
+/// digits of its SHA-256>.lock`, so any key gives a plain, short file name.
+pub fn name_for(prefix: &str, key: &str) -> String {
+    let digest = Sha256::digest(key.as_bytes());
+    let hex: String = digest[..8].iter().map(|b| format!("{b:02x}")).collect();
+    format!("{prefix}-{hex}.lock")
 }
 
 fn open(dir: &Path, name: &str) -> Result<File> {
@@ -132,6 +141,17 @@ mod tests {
         std::fs::write(&target, "").unwrap();
         std::os::unix::fs::symlink(&target, locks.join("x.lock")).unwrap();
         assert!(FileLock::try_acquire(&locks, "x.lock").is_err());
+    }
+
+    #[test]
+    fn names_for_keys_are_plain_and_distinct() {
+        let a = name_for("oauth2", "../../etc/passwd");
+        assert!(
+            a.starts_with("oauth2-") && a.ends_with(".lock") && !a.contains('/'),
+            "{a}"
+        );
+        assert_ne!(a, name_for("oauth2", "gdrive_refresh_token"));
+        assert_eq!(a, name_for("oauth2", "../../etc/passwd"));
     }
 
     #[test]

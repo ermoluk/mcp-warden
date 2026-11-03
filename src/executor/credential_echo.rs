@@ -59,7 +59,9 @@ impl CredentialForms {
             // catches it percent- or form-encoded.
             Some(Auth::Query { name, .. }) => forms.push(Zeroizing::new(format!("{name}={raw}"))),
             // Every other kind is listed, so a new one cannot be missed here.
-            Some(Auth::Bearer { .. } | Auth::Header { prefix: None, .. }) | None => {}
+            // OAuth2's secrets are scrubbed one by one (`executor::auth`).
+            Some(Auth::Bearer { .. } | Auth::Header { prefix: None, .. } | Auth::Oauth2 { .. })
+            | None => {}
         }
         for engine in [&STANDARD, &URL_SAFE] {
             let encoded = Zeroizing::new(engine.encode(raw.as_bytes()));
@@ -77,6 +79,14 @@ impl CredentialForms {
             .iter()
             .map(|f| Zeroizing::new(f.to_ascii_lowercase()))
             .collect();
+        forms.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
+        forms.dedup_by(|a, b| a.as_str() == b.as_str());
+        Self(forms)
+    }
+
+    /// The forms of several credentials together.
+    pub fn merge(parts: impl IntoIterator<Item = Self>) -> Self {
+        let mut forms: Vec<Zeroizing<String>> = parts.into_iter().flat_map(|p| p.0).collect();
         forms.sort_unstable_by(|a, b| a.as_str().cmp(b.as_str()));
         forms.dedup_by(|a, b| a.as_str() == b.as_str());
         Self(forms)
