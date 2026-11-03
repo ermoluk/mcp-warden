@@ -104,6 +104,27 @@ fn is_assignment(word: &str) -> bool {
         && chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
 }
 
+/// The key to authenticate with. An RSA key signs with the best SHA-2
+/// hash the server announces, or rsa-sha2-256 when it announces nothing:
+/// a bare `ssh-rsa` (SHA-1) signature is refused by OpenSSH 8.8 and later.
+/// `ssh-rsa` is used only for a server that lists its algorithms without
+/// any rsa-sha2 one.
+pub(crate) async fn signing_key<H: Handler>(
+    session: &client::Handle<H>,
+    key: ssh_key::PrivateKey,
+) -> Result<russh::keys::PrivateKeyWithHashAlg> {
+    let hash = if key.algorithm().is_rsa() {
+        session
+            .best_supported_rsa_hash()
+            .await
+            .map_err(|e| WardenError::Executor(format!("auth: {e}")))?
+            .unwrap_or(Some(ssh_key::HashAlg::Sha256))
+    } else {
+        None
+    };
+    Ok(russh::keys::PrivateKeyWithHashAlg::new(Arc::new(key), hash))
+}
+
 struct WardenSshHandler {
     host: String,
     port: u16,
@@ -115,9 +136,9 @@ impl Handler for WardenSshHandler {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &ssh_key::PublicKey,
+        server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> std::result::Result<bool, Self::Error> {
-        crate::executor::known_hosts::verify(
+        crate::executor::known_hosts::verify_presented(
             &self.host,
             self.port,
             server_public_key,
@@ -175,11 +196,9 @@ pub async fn run(
             .await
             .map_err(|e| WardenError::Executor(format!("connect: {e}")))?;
 
+        let key = signing_key(&session, private_key).await?;
         let auth = session
-            .authenticate_publickey(
-                &user,
-                russh::keys::PrivateKeyWithHashAlg::new(Arc::new(private_key), None),
-            )
+            .authenticate_publickey(&user, key)
             .await
             .map_err(|e| WardenError::Executor(format!("auth: {e}")))?;
         if !auth.success() {
@@ -338,6 +357,21 @@ mod tests {
         assert_eq!(out.stdout, "ran: git pull\n");
         assert_eq!(out.exit_code, Some(0));
         assert_eq!(*server.commands.lock().unwrap(), ["git pull"]);
+    }
+
+    /// OpenSSH 8.8 and later refuse `ssh-rsa` (SHA-1) signatures, so an RSA
+    /// key must sign with rsa-sha2-256 or -512.
+    #[tokio::test]
+    async fn an_rsa_key_signs_with_sha2() {
+        let key = crate::executor::test_ssh::fresh_rsa_key();
+        let server = TestSshServer::start_with_client_key(Behaviour::Echo, key).await;
+        let (exec, preset, _dir) = against(&server, 10);
+        run(&exec, &preset, "git pull".into()).await.unwrap();
+        let algorithms = server.client_algorithms.lock().unwrap().clone();
+        assert!(
+            !algorithms.is_empty() && algorithms.iter().all(|a| a.starts_with("rsa-sha2-")),
+            "{algorithms:?}"
+        );
     }
 
     /// A hostile or broken host that never stops writing must not fill

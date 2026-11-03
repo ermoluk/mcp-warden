@@ -4,6 +4,14 @@ All notable changes to this project will be documented in this file. The format 
 
 ## [Unreleased]
 
+### Security
+
+- **Seven of the eight accepted dependency advisories are gone.** russh 0.65 (RUSTSEC-2026-0387, `crypto-bigint`), notify-rust 4.18 (RUSTSEC-2026-0194 and -0195, `quick-xml`, Windows only) and mysql_async 0.37 (RUSTSEC-2026-0391, -0398, -0403 and -0410, `zstd`). The one left is `rsa` (RUSTSEC-2023-0071, the Marvin attack): no `rsa` release fixes it, and mcp-warden only signs with RSA keys, never decrypts. A host certificate offered by an SSH server is checked by the key it certifies, which `known_hosts` must pin like any other host key; `@cert-authority` lines are still not supported.
+
+### Fixed
+
+- **SSH logins with an RSA key failed against current OpenSSH.** `ssh_exec` and `sftp_transfer` signed with `ssh-rsa` (SHA-1), which OpenSSH 8.8 and later refuse by default. An RSA key now signs with `rsa-sha2-512` or `rsa-sha2-256`, whichever the server announces (`rsa-sha2-256` if it announces none). Ed25519 and ECDSA keys were not affected.
+
 ## [0.5.4]
 
 ### Security

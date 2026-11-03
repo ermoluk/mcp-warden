@@ -29,9 +29,9 @@ client. README and marketing position this as agent-agnostic.
 | MCP server (stdio)         | `rmcp` 1.6 (official SDK)      |
 | Async runtime              | `tokio` 1                      |
 | HTTP client                | `reqwest` 0.12 (rustls)        |
-| SSH client (Phase 2)       | `russh` 0.60                   |
+| SSH client                 | `russh` 0.65                   |
 | SQLite                     | `rusqlite` (bundled)           |
-| Desktop notifications      | `notify-rust` 4                |
+| Desktop notifications      | `notify-rust` 4.18             |
 | TOML                       | `serde` + `toml`               |
 | Logging                    | `tracing` (always to stderr)   |
 | Secret zeroing             | `zeroize`                      |
