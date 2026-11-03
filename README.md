@@ -18,7 +18,7 @@ The agent calls high-level tools (`proxy_http`); `mcp-warden` injects the secret
 4. When the agent wants to act, it calls `proxy_http` with a preset name and a path/method.
 5. `mcp-warden` validates the request against the preset's allow-list, injects the credential, executes, and returns only the response.
 6. Sensitive presets trigger an approval prompt: a native dialog on macOS and Windows, a desktop notification with Approve / Deny on Linux, or a Telegram message on any OS — where `/lock` also works as a kill switch from your phone. Opt in to **time-boxed approvals** per preset so one OK can cover a short burst of follow-up calls without re-prompt spam.
-7. Every action lands in a local SQLite audit log — including a `windowed` decision for calls authorised by an active approval window, a `refused` decision (with the raw requested path or command) for calls the allow-list turned away, and a `failed` decision when the approval prompt could not be shown.
+7. Every action lands in a local SQLite audit log, hash-chained and anchored in the keychain so an edit shows (`mcp-warden audit verify`) — including a `windowed` decision for calls authorised by an active approval window, a `refused` decision (with the raw requested path or command) for calls the allow-list turned away, and a `failed` decision when the approval prompt could not be shown.
 
 The agent's context window contains zero secrets.
 
@@ -149,6 +149,7 @@ mcp-warden run github               # what the rewired entry runs: the server, w
 | `mcp-warden preset from-openapi <src>` *(v0.3.0)* | Bootstrap a preset from an OpenAPI 3.x spec (URL or file) |
 | `mcp-warden approval <preset> <policy> [--window N]` | Set approval policy; `--window N` (sec) enables time-boxed approvals for `prompt` |
 | `mcp-warden audit [--last N \| --since T] [--decision D]…` | Read-only view of the audit log (append-only by design), with what the agent asked for — including refused calls — and which MCP client and session made each call. `--decision refused --decision failed` shows only those decisions; `--window N` shows approval #N and every call that ran inside the window it opened |
+| `mcp-warden audit verify [--format json]` | Check the audit log's hash chain and every event against it, and the log against its anchor in the keychain; names what was changed, deleted, cut short or rewritten. Exit code 1 if anything does not hold |
 | `mcp-warden doctor [--deep]` *(v0.3.0 for `--deep`)* | Diagnostic summary; `--deep` runs safe read-only HTTP probes per preset |
 | `mcp-warden web [--port N]` *(v0.3.0)*     | Local read-only web UI (binds 127.0.0.1 only)            |
 | `mcp-warden mcp`                           | Run the MCP server over stdio (consumed by the AI agent) |
