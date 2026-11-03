@@ -963,6 +963,36 @@ mod tests {
         }
     }
 
+    /// The named commands the docs show pass startup validation.
+    #[test]
+    fn documented_named_commands_validate() {
+        let mut checked = 0;
+        for (file, doc) in [
+            (
+                "docs/presets-cookbook.md",
+                include_str!("../../docs/presets-cookbook.md"),
+            ),
+            (
+                "docs/design/named-commands.md",
+                include_str!("../../docs/design/named-commands.md"),
+            ),
+        ] {
+            for block in doc.split("```toml").skip(1) {
+                let block = block.split("```").next().unwrap();
+                let Ok(cfg) = toml::from_str::<Config>(block) else {
+                    continue;
+                };
+                for p in cfg.preset.iter().filter(|p| !p.commands.is_empty()) {
+                    mcp_warden_core::commands::validate_preset(p)
+                        .unwrap_or_else(|e| panic!("{file}: {e}"));
+                    assert!(command_warnings(p).is_empty(), "{file}");
+                    checked += p.commands.len();
+                }
+            }
+        }
+        assert!(checked >= 6, "only {checked} documented commands");
+    }
+
     #[test]
     fn pick_probe_path_prefers_literal() {
         assert_eq!(pick_probe_path(&[]), "/");

@@ -1,7 +1,7 @@
 # Design: named commands for SSH presets
 
-Status: proposal (written for 0.5.3, not implemented). Nothing in this document
-changes behaviour until it is built and released.
+Status: implemented in 0.6.0. The decisions on the open questions are at the
+end; where they differ from the proposal below, the decisions apply.
 
 ## Problem
 
@@ -187,20 +187,36 @@ after the preset's approval policy.
   named commands, and `doctor` could flag `allowed_commands` patterns with
   `.*` or `\S+`.
 
-## Open questions
+## Decisions (0.6.0)
 
-1. Placeholders inside a word (`--lines={n}`, `user@{host}:{path}`): useful,
-   but they complicate the "one value = one word" argument. Allow them only for
-   `int` and `enum`?
-2. `ssh_run` only, per-command tools only, or both behind `expose_as_tools` as
-   proposed?
-3. Approval-window key: `(preset, ssh_run)`, `(preset, command)` or per tool?
-   Per command is the most precise, and the window button text (0.5.3) would
-   say so.
-4. A per-command `approval` that overrides the preset's, so `tail_log` can be
-   `auto` while `restart` prompts? It would need its own `--confirm-auto` path.
-5. More types: a git ref (`refname` rules), a hostname, a duration?
-6. Should `sftp_transfer` get the same treatment: named transfers with a typed
-   file-name parameter instead of free remote paths?
-7. Output: `ssh_exec` output is not scrubbed (threat model N3). Named commands
-   could declare `max_output_bytes`. Separate design?
+1. **Placeholders inside a word** are allowed for `int` and `enum` only
+   (`--lines={n}`, `1,{n}p`). A `string` or `path` value always fills a whole
+   word. Only an `enum` may be the first word: any other value would pick the
+   program.
+2. **Both.** `ssh_run` is always served; per-command tools appear only with
+   `expose_as_tools = true`, at most 32 across the config.
+3. **The approval window is per command**: the action is `ssh_run:<command>`,
+   and the window button names it.
+4. **A command may set its own `approval`.** `auto` is set with
+   `mcp-warden approval PRESET auto --command NAME --confirm-auto` and, like a
+   preset's `auto`, counts only once a human confirmed the preset in exactly
+   that form (`preset confirm`, the A10 stamps); otherwise it runs as `prompt`.
+   A preset set to `deny` refuses every command.
+5. **Types:** `string`, `path`, `int`, `enum`. A git ref and others come later.
+6. **Named transfers for `sftp_transfer`** need their own design.
+7. **`max_output_bytes`** is a preset setting (it applies to `ssh_exec` too)
+   and a command setting, at most 1 MiB per stream.
+
+Also decided while building it:
+
+- A value may not start with `-`, for every type; enum values are fixed by
+  the preset author and checked at startup instead.
+- Refusals name the parameter and never repeat the agent's value.
+- A generated tool's schema gives a `string`/`path` pattern as text in the
+  parameter's description, not as a JSON-Schema `pattern`: the pattern is Rust
+  regex syntax, which a client validating with ECMA regexes could read
+  differently.
+- `doctor` warns about catch-alls (`.*`, `.+`, `\S+`, `[^ ]+`) in
+  `allowed_commands` and about templates that run `rm`, `shred`, `dd`,
+  `mkfs*` or a recursive `chmod`/`chown`. `preset scaffold ssh-deploy` writes a
+  preset with named commands only.

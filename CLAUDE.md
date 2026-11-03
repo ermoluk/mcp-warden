@@ -177,6 +177,8 @@ The first release of `mcp-warden mcp` ships the following MCP tools:
   approval (escape hatch for legacy CLI tools that read from env).
 - `ssh_exec` — run a regex-allow-listed command on a host whose key is
   pinned in `~/.ssh/known_hosts`.
+- `ssh_run` — run one of an SSH preset's named commands (fixed template,
+  typed parameters); with `expose_as_tools` also one tool per command.
 - `sftp_transfer` — get/put a file along an allow-listed path.
 - `db_query` — execute a named query (Postgres, MySQL, Redis) defined in
   the preset.
