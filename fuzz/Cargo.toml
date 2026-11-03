@@ -81,3 +81,24 @@ path = "fuzz_targets/sanitise_for_prompt.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "named_command"
+path = "fuzz_targets/named_command.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "oauth_token_response"
+path = "fuzz_targets/oauth_token_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "audit_verify"
+path = "fuzz_targets/audit_verify.rs"
+test = false
+doc = false
+bench = false

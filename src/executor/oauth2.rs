@@ -129,36 +129,8 @@ pub async fn mint(
                 "oauth2 token endpoint answered more than {MAX_TOKEN_RESPONSE_BYTES} bytes"
             ))
         })?;
-    let body = zeroize::Zeroizing::new(body);
-    let json: Value = serde_json::from_slice(&body).unwrap_or(Value::Null);
-    if status != 200 {
-        let code = json
-            .get("error")
-            .and_then(Value::as_str)
-            .filter(|c| {
-                !c.is_empty()
-                    && c.len() <= 64
-                    && c.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
-            })
-            .map(|c| format!(" ({c})"))
-            .unwrap_or_default();
-        return Err(WardenError::Executor(format!(
-            "oauth2 token endpoint answered {status}{code}"
-        )));
-    }
-    let access_token = token_field(&json, "access_token")?.ok_or_else(|| {
-        WardenError::Executor("oauth2 token endpoint sent no access_token".into())
-    })?;
-    if let Some(kind) = json.get("token_type")
-        && !kind
-            .as_str()
-            .is_some_and(|k| k.eq_ignore_ascii_case("bearer"))
-    {
-        return Err(WardenError::Executor(
-            "oauth2 token endpoint sent a token_type other than bearer".into(),
-        ));
-    }
-    if let Some(rotated) = token_field(&json, "refresh_token")? {
+    let (access_token, rotated) = parse_answer(status, &zeroize::Zeroizing::new(body))?;
+    if let Some(rotated) = rotated {
         // A provider that rotates refresh tokens has just made the stored
         // one unusable, so the new one is written back while the lock is
         // still held. If that fails, so does the call: going on would leave
@@ -197,6 +169,42 @@ fn store_rotated(kc: &dyn KeychainStore, preset: &str, entry: &str, token: &Secr
                  `mcp-warden secret add {entry}`"
             ))
         })
+}
+
+/// The token endpoint's answer, read: the access token and any rotated
+/// refresh token, or the error to report — the status and the RFC 6749
+/// `error` code, never anything else from the body. Pure, so it can be
+/// fuzzed.
+pub fn parse_answer(status: u16, body: &[u8]) -> Result<(Secret, Option<Secret>)> {
+    let json: Value = serde_json::from_slice(body).unwrap_or(Value::Null);
+    if status != 200 {
+        let code = json
+            .get("error")
+            .and_then(Value::as_str)
+            .filter(|c| {
+                !c.is_empty()
+                    && c.len() <= 64
+                    && c.bytes().all(|b| b.is_ascii_lowercase() || b == b'_')
+            })
+            .map(|c| format!(" ({c})"))
+            .unwrap_or_default();
+        return Err(WardenError::Executor(format!(
+            "oauth2 token endpoint answered {status}{code}"
+        )));
+    }
+    let access_token = token_field(&json, "access_token")?.ok_or_else(|| {
+        WardenError::Executor("oauth2 token endpoint sent no access_token".into())
+    })?;
+    if let Some(kind) = json.get("token_type")
+        && !kind
+            .as_str()
+            .is_some_and(|k| k.eq_ignore_ascii_case("bearer"))
+    {
+        return Err(WardenError::Executor(
+            "oauth2 token endpoint sent a token_type other than bearer".into(),
+        ));
+    }
+    Ok((access_token, token_field(&json, "refresh_token")?))
 }
 
 /// A token string from the endpoint's answer: printable ASCII without

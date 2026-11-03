@@ -35,6 +35,23 @@ static PRESETS: LazyLock<Config> = LazyLock::new(|| {
         sftp_allowed_paths = ["/srv/"]
         approval = "auto"
 
+        [[preset.commands]]
+        name = "run"
+        description = "x"
+        template = "echo {v} {n}"
+        params.v = { type = "string", pattern = ".*" }
+        params.n = { type = "int", min = 0, max = 100 }
+
+        [[preset]]
+        name = "webq"
+        type = "http"
+        description = "x"
+        base_url = "https://api.example.com/v1"
+        auth = { type = "query", name = "key", secret = "k" }
+        allowed_methods = ["GET"]
+        allowed_paths = [".*"]
+        approval = "auto"
+
         [[preset]]
         name = "pg"
         type = "postgres"
@@ -65,7 +82,7 @@ fuzz_target!(|data: &[u8]| {
     let b = parts.next().unwrap_or("");
     let c = parts.next().unwrap_or("");
     let cfg = &*PRESETS;
-    match selector % 4 {
+    match selector % 6 {
         0 => {
             let query: BTreeMap<String, String> = [(b.to_string(), c.to_string())].into();
             let body = serde_json::json!({ c: b });
@@ -93,10 +110,34 @@ fuzz_target!(|data: &[u8]| {
                 },
             );
         }
+        3 => {
+            let params: BTreeMap<String, serde_json::Value> =
+                [("v".to_string(), b.into()), ("n".to_string(), c.into())].into();
+            let _ = check_request(
+                &cfg.preset[1],
+                &Request::SshRun {
+                    command: a,
+                    params: &params,
+                },
+            );
+        }
+        4 => {
+            // The credential's own parameter name never gets through.
+            let query: BTreeMap<String, String> = [(a.to_string(), b.to_string())].into();
+            let req = Request::Http {
+                method: "GET",
+                path: "/x",
+                query: Some(&query),
+                body: None,
+            };
+            if check_request(&cfg.preset[2], &req).is_ok() {
+                assert!(!a.trim().eq_ignore_ascii_case("key"), "{a:?}");
+            }
+        }
         _ => {
             let params = [serde_json::Value::from(b)];
             let _ = check_request(
-                &cfg.preset[2],
+                &cfg.preset[3],
                 &Request::Db {
                     query: a,
                     params: &params,

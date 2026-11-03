@@ -437,6 +437,30 @@ fn shown(v: Option<&str>) -> String {
     }
 }
 
+/// For the fuzz target: `verify` over a chain table holding `rows`
+/// (`seq, event_id, record, hash`) and an empty events table. Rows the
+/// table refuses (a repeated `seq`) are skipped. Not a stable API.
+#[doc(hidden)]
+pub fn verify_rows_for_fuzzing(rows: &[(i64, i64, String, String)]) -> Result<ChainReport> {
+    let conn = Connection::open_in_memory().map_err(audit)?;
+    conn.execute_batch(
+        "CREATE TABLE events (
+            id INTEGER PRIMARY KEY AUTOINCREMENT, created_at TEXT NOT NULL,
+            preset TEXT NOT NULL, action TEXT NOT NULL, summary TEXT NOT NULL,
+            decision TEXT, outcome_kind TEXT, outcome_data TEXT,
+            client TEXT, session TEXT, via_event INTEGER);",
+    )
+    .map_err(audit)?;
+    conn.execute_batch(SCHEMA).map_err(audit)?;
+    for (seq, event, record, hash) in rows {
+        let _ = conn.execute(
+            "INSERT INTO chain (seq, event_id, record, hash) VALUES (?1, ?2, ?3, ?4)",
+            rusqlite::params![seq, event, record, hash],
+        );
+    }
+    verify(&conn)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
