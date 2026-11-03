@@ -143,7 +143,14 @@ impl Credential {
             SignableBody::Bytes(body),
         )
         .map_err(|e| bad(&e))?;
-        let (instructions, _) = sign(signable, &params).map_err(|e| bad(&e))?.into_parts();
+        // aws-sigv4 traces the signing parameters and the canonical request,
+        // with the access key id and any session token in clear (invariant
+        // 1): no subscriber hears it, whatever RUST_LOG says.
+        let signed =
+            tracing::subscriber::with_default(tracing::subscriber::NoSubscriber::default(), || {
+                sign(signable, &params)
+            });
+        let (instructions, _) = signed.map_err(|e| bad(&e))?.into_parts();
         let added: Vec<(String, String)> = instructions
             .headers()
             .map(|(k, v)| (k.to_string(), v.to_string()))
