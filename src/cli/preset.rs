@@ -57,6 +57,12 @@ pub struct ScaffoldArgs {
     /// Keychain secret name to bind (defaults to the template's default — see `--list`).
     #[arg(long)]
     pub secret_name: Option<String>,
+    /// SSH templates: the host to connect to.
+    #[arg(long)]
+    pub host: Option<String>,
+    /// SSH templates: the user to log in as.
+    #[arg(long)]
+    pub user: Option<String>,
     /// Print the generated TOML to stdout instead of writing to the config file.
     #[arg(long)]
     pub dry_run: bool,
@@ -248,7 +254,22 @@ fn scaffold(args: ScaffoldArgs, config_path: &Path) -> Result<()> {
         .unwrap_or(template.default_secret_name)
         .to_string();
 
-    let preset = (template.build)(&preset_name, &secret_name);
+    let (host, user) = match (template.needs_host, &args.host, &args.user) {
+        (true, Some(h), Some(u)) => (h.as_str(), u.as_str()),
+        (true, _, _) => {
+            return Err(WardenError::Validation(format!(
+                "template '{}' needs --host and --user",
+                template.name
+            )));
+        }
+        (false, _, _) => ("", ""),
+    };
+    let preset = (template.build)(&crate::cli::preset_templates::Choices {
+        name: &preset_name,
+        secret_name: &secret_name,
+        host,
+        user,
+    });
     let open_paths_warning = unrestricted_paths_warning(&preset);
 
     if args.dry_run {
@@ -260,7 +281,13 @@ fn scaffold(args: ScaffoldArgs, config_path: &Path) -> Result<()> {
             toml::to_string_pretty(&wrapper).map_err(|e| WardenError::Config(e.to_string()))?;
         println!("# Generated from template '{}'", template.name);
         println!("# Secret '{secret_name}' must exist in the keychain:");
-        println!("#   mcp-warden secret add {secret_name}");
+        if template.needs_host {
+            println!("#   mcp-warden secret add {secret_name} < ./private-key");
+            println!("# Edit the unit names and paths in the commands to match the host;");
+            println!("# docs/ssh-hardening.md shows how to pin the key to a gate script.");
+        } else {
+            println!("#   mcp-warden secret add {secret_name}");
+        }
         if let Some(comment) = open_paths_comment {
             print!("{comment}");
         }
@@ -462,7 +489,7 @@ pub(crate) fn unrestricted_paths_warning(p: &Preset) -> Option<String> {
 /// `allowed_paths`: what that allows, how patterns match, and the
 /// template's own example and token advice.
 fn open_paths_comment(preset: &Preset, note: &[&str]) -> Option<String> {
-    if !preset.allowed_paths.is_empty() {
+    if preset.preset_type != PresetType::Http || !preset.allowed_paths.is_empty() {
         return None;
     }
     let mut out = format!(

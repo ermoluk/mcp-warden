@@ -593,6 +593,38 @@ fn preset_test_simulates_a_named_command() {
 }
 
 #[test]
+fn scaffold_ssh_deploy_needs_a_host_and_writes_named_commands() {
+    let tmp = tempfile::tempdir().unwrap();
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["preset", "scaffold", "ssh-deploy", "--dry-run"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("needs --host and --user"));
+    let out = cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args([
+            "preset",
+            "scaffold",
+            "ssh-deploy",
+            "--host",
+            "deploy.example.com",
+            "--user",
+            "deploy",
+            "--dry-run",
+        ])
+        .assert()
+        .success();
+    let text = String::from_utf8(out.get_output().stdout.clone()).unwrap();
+    assert!(text.contains("[[preset.commands]]"), "{text}");
+    assert!(
+        text.contains("journalctl -u {unit} -n {lines} --no-pager"),
+        "{text}"
+    );
+    assert!(!text.contains("allowed_paths"), "{text}");
+}
+
+#[test]
 fn preset_test_refuses_a_path_outside_the_allow_list() {
     let tmp = tempfile::tempdir().unwrap();
     seed_simulator_presets(tmp.path());
