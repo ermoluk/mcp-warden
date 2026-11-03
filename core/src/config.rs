@@ -340,6 +340,18 @@ pub enum Auth {
         #[serde(default, skip_serializing_if = "ClientAuth::is_basic")]
         client_auth: ClientAuth,
     },
+    /// AWS Signature Version 4, signed after every allow-list check.
+    /// `access_key_id`, `secret_access_key` and `session_token` name
+    /// keychain entries.
+    #[serde(rename = "aws_sigv4")]
+    AwsSigv4 {
+        region: String,
+        service: String,
+        access_key_id: String,
+        secret_access_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_token: Option<String>,
+    },
 }
 
 /// How an OAuth2 preset gets its access token.
@@ -384,6 +396,16 @@ impl Auth {
             } => client_secret
                 .iter()
                 .chain(refresh_token)
+                .map(String::as_str)
+                .collect(),
+            Auth::AwsSigv4 {
+                access_key_id,
+                secret_access_key,
+                session_token,
+                ..
+            } => [access_key_id, secret_access_key]
+                .into_iter()
+                .chain(session_token)
                 .map(String::as_str)
                 .collect(),
         }
@@ -453,11 +475,6 @@ fn validate_oauth2(p: &Preset, auth: &Auth) -> Result<()> {
             ));
         }
         _ => {}
-    }
-    if client_secret.is_some() && client_secret == refresh_token {
-        return Err(refuse(
-            "client_secret and refresh_token must be different keychain entries".into(),
-        ));
     }
     // RFC 6749 §3.3: scope tokens are printable ASCII without space, '"'
     // or '\'.
@@ -652,6 +669,35 @@ impl Config {
         }
         if let Auth::Oauth2 { .. } = auth {
             validate_oauth2(p, auth)?;
+        }
+        if let Auth::AwsSigv4 {
+            region, service, ..
+        } = auth
+        {
+            for (field, value) in [("region", region), ("service", service)] {
+                if value.is_empty()
+                    || value.len() > 32
+                    || !value
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                {
+                    return Err(WardenError::Validation(format!(
+                        "preset '{}': aws_sigv4 {field} must be 1-32 of a-z 0-9 -",
+                        p.name
+                    )));
+                }
+            }
+        }
+        let names = auth.secrets();
+        if names
+            .iter()
+            .enumerate()
+            .any(|(i, n)| names[..i].contains(n))
+        {
+            return Err(WardenError::Validation(format!(
+                "preset '{}': each credential of its auth needs a keychain entry of its own",
+                p.name
+            )));
         }
         for secret in auth.secrets() {
             if kc.get(secret)?.is_none() {

@@ -322,13 +322,33 @@ pub async fn execute(
     if let Some(body) = req.body {
         builder = builder.json(&body);
     }
+    let request = builder
+        .build()
+        .map_err(|e| WardenError::Executor(error_text(e)))
+        .and_then(|mut request| {
+            credential.sign(&mut request, exec.clock.now_utc().into())?;
+            Ok(request)
+        });
+    let request = match request {
+        Ok(r) => r,
+        Err(e) => {
+            let e = credential.forms().scrub_error(e);
+            let _ = exec.audit.record_outcome(
+                event_id,
+                AuditOutcome::Err {
+                    message: e.to_string(),
+                },
+            );
+            return Err(e);
+        }
+    };
 
     // An upstream that reflects the request would otherwise hand the agent
     // the credential (invariants 1–2): the body, and any error text, are
     // scrubbed of every form it was sent in.
     let forms = credential.forms();
     drop(credential);
-    let resp = match builder.send().await {
+    let resp = match client.execute(request).await {
         Ok(r) => r,
         Err(e) => {
             let mut message = error_text(e);
@@ -1229,6 +1249,67 @@ mod tests {
     fn the_summary_has_no_query_string() {
         let s = crate::executor::summary::http("GET", Some("https://maps.example.com"), "/geo");
         assert_eq!(s, "GET https://maps.example.com/geo");
+    }
+
+    /// `aws_sigv4`: the request reaches the upstream signed, and an echo of
+    /// the keys is scrubbed.
+    #[tokio::test]
+    async fn sigv4_requests_are_signed_and_echoes_scrubbed() {
+        use crate::approval::always_deny::AlwaysDeny;
+        use mcp_warden_core::audit::sqlite_sink::LocalSqlite;
+        use mcp_warden_core::keychain::KeychainStore;
+        use mcp_warden_core::keychain::memory::InMemoryKeychain;
+        use std::sync::Arc;
+
+        let secret_key = "wJalrXUtnFEMI-K7MDENG-bPxRfiCYEXAMPLEKEY";
+        let server = echo_server(|req: &wiremock::Request| {
+            serde_json::json!({
+                "authorization": req.headers["authorization"].to_str().unwrap(),
+                "echo": "wJalrXUtnFEMI-K7MDENG-bPxRfiCYEXAMPLEKEY",
+            })
+        })
+        .await;
+        let keychain = InMemoryKeychain::new();
+        keychain
+            .set("akid", Secret::new("AKIDEXAMPLE".into()))
+            .unwrap();
+        keychain.set("sk", Secret::new(secret_key.into())).unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let exec = ActionExecutor::new(
+            Arc::new(keychain),
+            Arc::new(AlwaysDeny),
+            None,
+            Arc::new(LocalSqlite::open(&dir.path().join("audit.db")).unwrap()),
+        );
+        let mut preset = p();
+        preset.base_url = Some(server.uri());
+        preset.auth = Some(Auth::AwsSigv4 {
+            region: "eu-central-1".into(),
+            service: "execute-api".into(),
+            access_key_id: "akid".into(),
+            secret_access_key: "sk".into(),
+            session_token: None,
+        });
+        let req = HttpRequest {
+            preset_name: preset.name.clone(),
+            path: "/users".into(),
+            method: "POST".into(),
+            body: Some(serde_json::json!({"q": 1})),
+            query: Some([("page".to_string(), "2".to_string())].into()),
+        };
+        let resp = execute(&exec, &preset, req).await.unwrap();
+        let sent = &server.received_requests().await.unwrap()[0];
+        let auth = sent.headers["authorization"].to_str().unwrap();
+        assert!(
+            auth.starts_with("AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/"),
+            "{auth}"
+        );
+        assert!(
+            auth.contains("SignedHeaders=content-type;host;x-amz-date"),
+            "{auth}"
+        );
+        assert!(sent.headers.contains_key("x-amz-date"));
+        assert_absent(&resp.body, secret_key);
     }
 
     #[tokio::test]

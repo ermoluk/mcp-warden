@@ -81,7 +81,80 @@ impl Credential {
                 Some(m) => b.bearer_auth(m.access_token.expose()),
                 None => b,
             },
+            // Signed once the request is complete: `sign`.
+            Auth::AwsSigv4 { .. } => b,
         }
+    }
+
+    /// For `aws_sigv4`, sign the finished request — method, URL with every
+    /// query parameter, headers and body — as at `now`, adding the
+    /// `Authorization`, `x-amz-date` and (with a session token)
+    /// `x-amz-security-token` headers; S3 also gets
+    /// `x-amz-content-sha256`. Runs after every allow-list check and after
+    /// the approval, like every credential use (invariant 3).
+    pub fn sign(&self, request: &mut reqwest::Request, now: std::time::SystemTime) -> Result<()> {
+        use aws_sigv4::http_request::{
+            PayloadChecksumKind, SignableBody, SignableRequest, SigningSettings, sign,
+        };
+        let Auth::AwsSigv4 {
+            region,
+            service,
+            session_token,
+            ..
+        } = &self.auth
+        else {
+            return Ok(());
+        };
+        let bad = |e: &dyn std::fmt::Display| WardenError::Executor(format!("aws_sigv4: {e}"));
+        let identity = aws_credential_types::Credentials::new(
+            self.secrets[0].expose(),
+            self.secrets[1].expose(),
+            session_token
+                .as_ref()
+                .map(|_| self.secrets[2].expose().to_string()),
+            None,
+            "mcp-warden",
+        )
+        .into();
+        let mut settings = SigningSettings::default();
+        if service == "s3" {
+            settings.payload_checksum_kind = PayloadChecksumKind::XAmzSha256;
+        }
+        let params = aws_sigv4::sign::v4::SigningParams::builder()
+            .identity(&identity)
+            .region(region)
+            .name(service)
+            .time(now)
+            .settings(settings)
+            .build()
+            .map_err(|e| bad(&e))?
+            .into();
+        let body = request.body().and_then(|b| b.as_bytes()).unwrap_or(&[]);
+        let headers = request
+            .headers()
+            .iter()
+            .map(|(k, v)| v.to_str().map(|v| (k.as_str(), v)))
+            .collect::<std::result::Result<Vec<_>, _>>()
+            .map_err(|e| bad(&e))?;
+        let signable = SignableRequest::new(
+            request.method().as_str(),
+            request.url().as_str(),
+            headers.into_iter(),
+            SignableBody::Bytes(body),
+        )
+        .map_err(|e| bad(&e))?;
+        let (instructions, _) = sign(signable, &params).map_err(|e| bad(&e))?.into_parts();
+        let added: Vec<(String, String)> = instructions
+            .headers()
+            .map(|(k, v)| (k.to_string(), v.to_string()))
+            .collect();
+        for (name, value) in added {
+            let name =
+                reqwest::header::HeaderName::from_bytes(name.as_bytes()).map_err(|e| bad(&e))?;
+            let value = reqwest::header::HeaderValue::from_str(&value).map_err(|e| bad(&e))?;
+            request.headers_mut().insert(name, value);
+        }
+        Ok(())
     }
 
     /// For `query` auth, the credential's parameter, appended after every
@@ -114,6 +187,13 @@ impl Credential {
                         .collect::<Vec<_>>(),
                 )
             }
+            // Every key; the signature is derived from them, not one.
+            Auth::AwsSigv4 { .. } => CredentialForms::merge(
+                self.secrets
+                    .iter()
+                    .map(CredentialForms::raw)
+                    .collect::<Vec<_>>(),
+            ),
             auth => CredentialForms::http(&Some(auth.clone()), &self.secrets[0]),
         }
     }
@@ -152,5 +232,68 @@ mod tests {
             .build()
             .unwrap();
         assert_eq!(req.headers()["authorization"], "Bearer s3cret");
+    }
+
+    /// AWS's own test vector (aws-sig-v4-test-suite, `get-vanilla`): the
+    /// signature must be exactly theirs.
+    #[test]
+    fn sigv4_matches_the_aws_test_suite() {
+        let kc = InMemoryKeychain::new();
+        kc.set("akid", Secret::new("AKIDEXAMPLE".into())).unwrap();
+        kc.set(
+            "sk",
+            Secret::new("wJalrXUtnFEMI/K7MDENG+bPxRfiCYEXAMPLEKEY".into()),
+        )
+        .unwrap();
+        let mut p = preset(
+            r#"{ type = "aws_sigv4", region = "us-east-1", service = "service", access_key_id = "akid", secret_access_key = "sk" }"#,
+        );
+        p.base_url = Some("https://example.amazonaws.com".into());
+        let c = load(&kc, &p).unwrap();
+        let mut req = reqwest::Client::new()
+            .get("https://example.amazonaws.com/")
+            .build()
+            .unwrap();
+        let at = chrono::DateTime::parse_from_rfc3339("2015-08-30T12:36:00Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        c.sign(&mut req, at.into()).unwrap();
+        assert_eq!(req.headers()["x-amz-date"], "20150830T123600Z");
+        assert_eq!(
+            req.headers()["authorization"],
+            "AWS4-HMAC-SHA256 Credential=AKIDEXAMPLE/20150830/us-east-1/service/aws4_request, \
+             SignedHeaders=host;x-amz-date, \
+             Signature=5fa00fa31553b73ebf1942676e86291e8372ff2a2260956d9b8aae1d763fbf31"
+        );
+        assert!(req.headers().get("x-amz-security-token").is_none());
+    }
+
+    #[test]
+    fn sigv4_sends_the_session_token_and_s3_payload_hash() {
+        let kc = InMemoryKeychain::new();
+        for (k, v) in [
+            ("akid", "AKIDEXAMPLE"),
+            ("sk", "secret"),
+            ("st", "session-token"),
+        ] {
+            kc.set(k, Secret::new(v.into())).unwrap();
+        }
+        let p = preset(
+            r#"{ type = "aws_sigv4", region = "eu-central-1", service = "s3", access_key_id = "akid", secret_access_key = "sk", session_token = "st" }"#,
+        );
+        let c = load(&kc, &p).unwrap();
+        let mut req = reqwest::Client::new()
+            .get("https://bucket.s3.eu-central-1.amazonaws.com/key")
+            .build()
+            .unwrap();
+        c.sign(&mut req, std::time::SystemTime::now()).unwrap();
+        assert_eq!(req.headers()["x-amz-security-token"], "session-token");
+        assert_eq!(
+            req.headers()["x-amz-content-sha256"],
+            "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+        );
+        let auth = req.headers()["authorization"].to_str().unwrap();
+        assert!(auth.contains("/eu-central-1/s3/aws4_request"), "{auth}");
+        assert!(!auth.contains("secret"), "{auth}");
     }
 }

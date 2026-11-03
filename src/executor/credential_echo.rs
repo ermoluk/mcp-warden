@@ -60,7 +60,12 @@ impl CredentialForms {
             Some(Auth::Query { name, .. }) => forms.push(Zeroizing::new(format!("{name}={raw}"))),
             // Every other kind is listed, so a new one cannot be missed here.
             // OAuth2's secrets are scrubbed one by one (`executor::auth`).
-            Some(Auth::Bearer { .. } | Auth::Header { prefix: None, .. } | Auth::Oauth2 { .. })
+            Some(
+                Auth::Bearer { .. }
+                | Auth::Header { prefix: None, .. }
+                | Auth::Oauth2 { .. }
+                | Auth::AwsSigv4 { .. },
+            )
             | None => {}
         }
         for engine in [&STANDARD, &URL_SAFE] {
