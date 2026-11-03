@@ -26,6 +26,11 @@ pub struct ApprovalArgs {
     /// Has no effect when policy is `auto` or `deny`.
     #[arg(long)]
     pub window: Option<u64>,
+    /// Set the policy of this named command (SSH presets) instead of the
+    /// preset's. A command's `auto` still counts only once a human confirms
+    /// the preset; a preset set to `deny` refuses every command.
+    #[arg(long, value_name = "NAME", conflicts_with = "window")]
+    pub command: Option<String>,
 }
 
 impl ApprovalArgs {
@@ -54,11 +59,29 @@ pub fn run(args: ApprovalArgs, config_path: &Path) -> Result<()> {
         .iter_mut()
         .find(|p| p.name == args.preset)
         .ok_or_else(|| WardenError::PresetNotFound(args.preset.clone()))?;
-    p.approval = match policy.as_str() {
+    let new = match policy.as_str() {
         "auto" => ApprovalPolicy::Auto,
         "deny" => ApprovalPolicy::Deny,
         _ => ApprovalPolicy::Prompt,
     };
+    if let Some(name) = &args.command {
+        mcp_warden_core::commands::find(p, name)?;
+        let c = p
+            .commands
+            .iter_mut()
+            .find(|c| &c.name == name)
+            .expect("found above");
+        c.approval = Some(new);
+        let toml_str =
+            toml::to_string_pretty(&cfg).map_err(|e| WardenError::Config(e.to_string()))?;
+        fs::write(config_path, toml_str).map_err(WardenError::Io)?;
+        eprintln!(
+            "Set approval policy for command '{name}' of '{}' to {policy}.",
+            args.preset
+        );
+        return Ok(());
+    }
+    p.approval = new;
     // Window only makes sense for prompt; clear it otherwise so an
     // operator switching auto→prompt→auto doesn't carry a stale value.
     if p.approval != ApprovalPolicy::Prompt {

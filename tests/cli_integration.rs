@@ -85,6 +85,71 @@ fn approval_command_sets_window_seconds() {
     );
 }
 
+fn seed_named_commands(dir: &Path) {
+    fs::create_dir_all(dir).unwrap();
+    fs::write(
+        dir.join("config.toml"),
+        include_str!("fixtures/named_commands.toml"),
+    )
+    .unwrap();
+}
+
+#[test]
+fn approval_command_sets_one_named_commands_policy() {
+    let tmp = tempfile::tempdir().unwrap();
+    seed_named_commands(tmp.path());
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["approval", "deploy", "deny", "--command", "restart"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains(
+            "command 'restart' of 'deploy' to deny",
+        ));
+    let cfg: toml::Value =
+        toml::from_str(&fs::read_to_string(tmp.path().join("config.toml")).unwrap()).unwrap();
+    let preset = &cfg["preset"][0];
+    assert_eq!(preset["approval"].as_str(), Some("prompt"));
+    let commands = preset["commands"].as_array().unwrap();
+    let restart = commands
+        .iter()
+        .find(|c| c["name"].as_str() == Some("restart"))
+        .unwrap();
+    assert_eq!(restart["approval"].as_str(), Some("deny"));
+    let tail = commands
+        .iter()
+        .find(|c| c["name"].as_str() == Some("tail_log"))
+        .unwrap();
+    assert!(tail.get("approval").is_none());
+
+    // auto needs --confirm-auto, like a preset's; an unknown command is named.
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["approval", "deploy", "auto", "--command", "restart"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("--confirm-auto"));
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["approval", "deploy", "prompt", "--command", "nope"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("no command 'nope'"));
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args([
+            "approval",
+            "deploy",
+            "prompt",
+            "--command",
+            "restart",
+            "--window",
+            "60",
+        ])
+        .assert()
+        .failure();
+}
+
 #[test]
 fn approval_command_window_zero_clears_field() {
     let tmp = tempfile::tempdir().unwrap();
