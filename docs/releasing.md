@@ -54,10 +54,16 @@ Before tagging:
    `.claude-plugin/marketplace.json` and `plugins/mcp-warden/.claude-plugin/plugin.json`.
 2. `CHANGELOG.md` has a `## [VERSION]` section.
 3. `cargo publish --workspace --dry-run` passes.
-4. `cargo deny check` and `cargo audit` pass (CI runs both). Every accepted
+4. The tests pass with freshly resolved dependencies, the way `cargo install`
+   without `--locked` builds: in a scratch worktree,
+   `git worktree add --detach ../fresh HEAD && cd ../fresh && cargo generate-lockfile && cargo test --workspace --all-features`.
+   CI's `fresh-dependencies` job does the same on every push. The committed
+   lockfile cannot catch an upstream minor release that breaks the build:
+   that is how `cargo install mcp-warden` broke for 0.5.0.
+5. `cargo deny check` and `cargo audit` pass (CI runs both). Every accepted
    advisory in `deny.toml` / `.cargo/audit.toml` still has a valid reason;
    drop the ones a dependency update has fixed.
-5. A dry run of the release workflow passes:
+6. A dry run of the release workflow passes:
    `gh workflow run release.yml --ref <branch>`.
 
 Then, in this order:
