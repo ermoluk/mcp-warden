@@ -653,4 +653,34 @@ mod tests {
         assert!(!err.contains("rt-ROTATED"), "{err}");
         assert!(api.received_requests().await.unwrap().is_empty());
     }
+
+    /// A provider that answers with an empty or malformed refresh token:
+    /// the call fails and the stored token is left as it was.
+    #[tokio::test]
+    async fn a_malformed_rotated_token_is_not_stored() {
+        for rotated in [
+            serde_json::json!(""),
+            serde_json::json!("a b"),
+            serde_json::json!(5),
+        ] {
+            let (api, token) = (MockServer::start().await, MockServer::start().await);
+            token_answers(
+                &token,
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": ACCESS_TOKEN,
+                    "refresh_token": rotated,
+                })),
+            )
+            .await;
+            api_echoes(&api).await;
+            let s = setup(&api, &token, REFRESH);
+            let err = get(&s).await.unwrap_err().to_string();
+            assert!(err.contains("malformed refresh_token"), "{err}");
+            assert_eq!(
+                s.exec.keychain.get("rt").unwrap().unwrap().expose(),
+                REFRESH_TOKEN
+            );
+            assert!(api.received_requests().await.unwrap().is_empty());
+        }
+    }
 }
