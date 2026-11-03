@@ -1,10 +1,8 @@
 use crate::executor::ActionExecutor;
-use crate::executor::credential_echo::CredentialForms;
 use crate::executor::policy::{Request, check_request};
 use mcp_warden_core::audit::AuditOutcome;
-use mcp_warden_core::config::{Auth, Preset};
+use mcp_warden_core::config::Preset;
 use mcp_warden_core::error::{Result, WardenError};
-use mcp_warden_core::secret::Secret;
 use percent_encoding::percent_decode_str;
 use serde::{Deserialize, Serialize};
 use std::time::Duration;
@@ -268,19 +266,7 @@ pub async fn execute(
         .authorise(preset, "proxy_http", &summary, false)
         .await?;
 
-    let secret = match &preset.auth {
-        Some(Auth::Bearer { secret })
-        | Some(Auth::Header { secret, .. })
-        | Some(Auth::Basic { secret, .. }) => {
-            exec.keychain
-                .get(secret)?
-                .ok_or_else(|| WardenError::MissingSecret {
-                    preset: preset.name.clone(),
-                    secret: secret.clone(),
-                })?
-        }
-        None => return Err(WardenError::Validation("preset missing auth".into())),
-    };
+    let credential = super::auth::load(exec.keychain.as_ref(), preset)?;
 
     if let Some(q) = &req.query {
         let mut pairs = url.query_pairs_mut();
@@ -293,8 +279,7 @@ pub async fn execute(
     let method = method_upper
         .parse::<reqwest::Method>()
         .map_err(|_| WardenError::Validation(format!("bad method {method_upper}")))?;
-    let mut builder = client.request(method, url);
-    builder = inject_auth(builder, &preset.auth, &secret);
+    let mut builder = credential.apply(client.request(method, url));
     if let Some(body) = req.body {
         builder = builder.json(&body);
     }
@@ -302,8 +287,8 @@ pub async fn execute(
     // An upstream that reflects the request would otherwise hand the agent
     // the credential (invariants 1–2): the body, and any error text, are
     // scrubbed of every form it was sent in.
-    let forms = CredentialForms::http(&preset.auth, &secret);
-    drop(secret);
+    let forms = credential.forms();
+    drop(credential);
     let resp = match builder.send().await {
         Ok(r) => r,
         Err(e) => {
@@ -356,29 +341,11 @@ fn http_client() -> Result<reqwest::Client> {
         .map_err(|e| WardenError::Executor(e.to_string()))
 }
 
-fn inject_auth(
-    b: reqwest::RequestBuilder,
-    auth: &Option<Auth>,
-    secret: &Secret,
-) -> reqwest::RequestBuilder {
-    match auth {
-        Some(Auth::Bearer { .. }) => b.bearer_auth(secret.expose()),
-        Some(Auth::Header { name, prefix, .. }) => {
-            let value = match prefix {
-                Some(p) => format!("{p}{}", secret.expose()),
-                None => secret.expose().to_string(),
-            };
-            b.header(name, value)
-        }
-        Some(Auth::Basic { username, .. }) => b.basic_auth(username, Some(secret.expose())),
-        None => b,
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
     use mcp_warden_core::config::{ApprovalPolicy, Auth, Preset, PresetType};
+    use mcp_warden_core::secret::Secret;
 
     fn p() -> Preset {
         Preset {

@@ -4,7 +4,7 @@ use crate::executor::credential_echo::CredentialForms;
 use clap::Args;
 use mcp_warden_core::audit::AuditOutcome;
 use mcp_warden_core::audit::sqlite_sink::LocalSqlite;
-use mcp_warden_core::config::{ApprovalPolicy, Auth, Config, Preset, PresetType};
+use mcp_warden_core::config::{ApprovalPolicy, Config, Preset, PresetType};
 use mcp_warden_core::error::Result;
 use mcp_warden_core::keychain::KeychainStore;
 use serde::Serialize;
@@ -310,42 +310,27 @@ async fn probe_http(
     let probe_path = pick_probe_path(&p.allowed_paths);
     let url = format!("{}{}", base_url.trim_end_matches('/'), probe_path);
 
-    // Fetch the secret (if any) from keychain.
-    let secret = if let Some(auth) = &p.auth {
-        let secret_name = auth.secrets().first().copied();
-        match secret_name {
-            Some(name) => match kc.get(name) {
-                Ok(Some(s)) => Some(s),
-                Ok(None) => {
-                    return (
-                        ProbeStatus::Skipped,
-                        format!("secret '{name}' not found in keychain"),
-                    );
-                }
-                Err(e) => {
-                    return (ProbeStatus::Skipped, format!("keychain read failed: {e}"));
-                }
-            },
-            None => None,
-        }
-    } else {
-        None
-    };
-
+    // The credential, if the preset has one; put on the request and turned
+    // into scrub forms the way proxy_http does.
     let mut req = client.get(&url);
-    if let (Some(auth), Some(secret)) = (&p.auth, secret.as_ref()) {
-        req = inject_auth(req, auth, secret);
-    }
-
-    // An upstream that reflects the credential must not get it printed:
-    // scrub every form it was sent in before anything is cut or shown.
-    let forms = secret
-        .as_ref()
-        .map(|s| CredentialForms::http(&p.auth, s))
-        .unwrap_or_else(|| {
-            CredentialForms::raw(&mcp_warden_core::secret::Secret::new(String::new()))
-        });
-    drop(secret);
+    let forms = match &p.auth {
+        Some(_) => match crate::executor::auth::load(kc, p) {
+            Ok(credential) => {
+                req = credential.apply(req);
+                credential.forms()
+            }
+            Err(mcp_warden_core::error::WardenError::MissingSecret { secret, .. }) => {
+                return (
+                    ProbeStatus::Skipped,
+                    format!("secret '{secret}' not found in keychain"),
+                );
+            }
+            Err(e) => {
+                return (ProbeStatus::Skipped, format!("keychain read failed: {e}"));
+            }
+        },
+        None => CredentialForms::raw(&mcp_warden_core::secret::Secret::new(String::new())),
+    };
     let scrubbed = |mut text: String| {
         forms.scrub_text(&mut text);
         text
@@ -422,24 +407,6 @@ fn pick_probe_path(allowed_paths: &[String]) -> String {
         }
     }
     "/".into()
-}
-
-fn inject_auth(
-    b: reqwest::RequestBuilder,
-    auth: &Auth,
-    secret: &mcp_warden_core::secret::Secret,
-) -> reqwest::RequestBuilder {
-    match auth {
-        Auth::Bearer { .. } => b.bearer_auth(secret.expose()),
-        Auth::Header { name, prefix, .. } => {
-            let value = match prefix {
-                Some(p) => format!("{p}{}", secret.expose()),
-                None => secret.expose().to_string(),
-            };
-            b.header(name, value)
-        }
-        Auth::Basic { username, .. } => b.basic_auth(username, Some(secret.expose())),
-    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
