@@ -171,6 +171,66 @@ mod tests {
         .unwrap()
     }
 
+    /// Presets in the form 0.5.4 confirmed them. A new `Preset` field must
+    /// stay out of the JSON while it is unset (`skip_serializing_if`), or
+    /// every confirmed `auto` preset turns back into `prompt` on upgrade.
+    /// If this test fails, an upgrade would void the users' stamps.
+    #[test]
+    fn fingerprints_of_existing_presets_do_not_change() {
+        let golden = [
+            (
+                r#"
+                name = "gh"
+                type = "http"
+                description = "GitHub"
+                base_url = "https://api.github.com"
+                auth = { type = "bearer", secret = "gh_pat" }
+                allowed_methods = ["GET"]
+                allowed_paths = ["/user/repos"]
+                approval = "auto"
+                approval_window_seconds = 600
+                "#,
+                "67b19399302294aa88ad6458e06630e3cb511cab958f193605d9d1688d7eb5a3",
+            ),
+            (
+                r#"
+                name = "deploy"
+                type = "ssh"
+                description = "Deploy host"
+                host = "deploy.example.com"
+                user = "warden"
+                secret = "deploy_key"
+                allowed_commands = ["git pull", "systemctl status [a-z0-9][a-z0-9_-]*"]
+                allow_sftp = true
+                sftp_allowed_paths = ["/srv/app/"]
+                approval = "auto"
+                "#,
+                "42eda74aabe84fc86a2951890465399df0ca1234a2619e7c4f2ce29cdfce22d1",
+            ),
+            (
+                r#"
+                name = "db"
+                type = "postgres"
+                description = "Reporting"
+                host = "db.internal"
+                user = "ro"
+                database = "app"
+                secret = "db_pw"
+                approval = "auto"
+                [[queries]]
+                name = "user_by_id"
+                template = "SELECT id, email FROM users WHERE id = $1"
+                param_types = ["int"]
+                "#,
+                "e7e66ecb73a4b4b206391cfa074ac8a624171be565a44a176217d796944cde4c",
+            ),
+        ];
+        for (toml_text, want) in golden {
+            let p: Preset = toml::from_str(toml_text).unwrap();
+            assert_eq!(preset_fingerprint(&p), want, "{}", p.name);
+        }
+    }
+
     #[test]
     fn the_fingerprint_is_stable_and_covers_every_field() {
         let base = preset_fingerprint(&preset(""));
