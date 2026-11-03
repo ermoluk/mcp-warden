@@ -102,7 +102,8 @@ pub fn check_request(preset: &Preset, req: &Request) -> Result<()> {
             body,
         } => {
             super::http::validated_url(preset, &method.to_uppercase(), path)?;
-            super::http::check_query_and_body_keys(query, body)
+            super::http::check_query_and_body_keys(query, body)?;
+            super::http::check_auth_query_name(preset, query)
         }
         Request::Ssh { command } => super::ssh::validate_command(preset, command),
         Request::SshRun { command, params } => {

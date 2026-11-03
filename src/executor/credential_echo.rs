@@ -55,6 +55,9 @@ impl CredentialForms {
                     forms.push(encoded);
                 }
             }
+            // `key=secret` as it appears in a URL; `find_encoded` also
+            // catches it percent- or form-encoded.
+            Some(Auth::Query { name, .. }) => forms.push(Zeroizing::new(format!("{name}={raw}"))),
             // Every other kind is listed, so a new one cannot be missed here.
             Some(Auth::Bearer { .. } | Auth::Header { prefix: None, .. }) | None => {}
         }

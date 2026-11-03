@@ -314,15 +314,23 @@ pub enum Auth {
         username: String,
         secret: String,
     },
+    /// The credential as a query parameter, `?<name>=<secret>`, as some
+    /// APIs want (Google Maps `key=`). The agent cannot send a parameter of
+    /// that name itself.
+    Query {
+        name: String,
+        secret: String,
+    },
 }
 
 impl Auth {
     /// The keychain entries this auth reads, in a fixed order.
     pub fn secrets(&self) -> Vec<&str> {
         match self {
-            Auth::Bearer { secret } | Auth::Header { secret, .. } | Auth::Basic { secret, .. } => {
-                vec![secret]
-            }
+            Auth::Bearer { secret }
+            | Auth::Header { secret, .. }
+            | Auth::Basic { secret, .. }
+            | Auth::Query { secret, .. } => vec![secret],
         }
     }
 }
@@ -478,6 +486,29 @@ impl Config {
                 p.name
             )));
         };
+        if let Auth::Query { name, .. } = auth {
+            if name.is_empty()
+                || name.len() > 64
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+            {
+                return Err(WardenError::Validation(format!(
+                    "preset '{}': query auth name must be 1-64 of A-Z a-z 0-9 _ . -",
+                    p.name
+                )));
+            }
+            if parsed
+                .query_pairs()
+                .any(|(k, _)| k.eq_ignore_ascii_case(name))
+            {
+                return Err(WardenError::Validation(format!(
+                    "preset '{}': base_url already has a '{name}' query parameter; the \
+                     credential would be sent twice",
+                    p.name
+                )));
+            }
+        }
         for secret in auth.secrets() {
             if kc.get(secret)?.is_none() {
                 return Err(WardenError::MissingSecret {
@@ -1252,5 +1283,37 @@ mod tests {
         }
         let err = cfg.validate(&kc).unwrap_err().to_string();
         assert!(err.contains("are for ssh presets"), "{err}");
+    }
+
+    #[test]
+    fn query_auth_names_are_checked() {
+        let kc = InMemoryKeychain::new();
+        kc.set("maps_key", Secret::new("x".into())).unwrap();
+        let config = |base: &str, name: &str| -> Config {
+            toml::from_str(&format!(
+                r#"
+                [[preset]]
+                name = "maps"
+                type = "http"
+                description = "x"
+                base_url = "{base}"
+                auth = {{ type = "query", name = "{name}", secret = "maps_key" }}
+                allowed_methods = ["GET"]
+                approval = "prompt"
+                "#
+            ))
+            .unwrap()
+        };
+        config("https://maps.example.com", "key")
+            .validate(&kc)
+            .unwrap();
+        for (base, name) in [
+            ("https://maps.example.com", ""),
+            ("https://maps.example.com", "a b"),
+            ("https://maps.example.com", "k&x"),
+            ("https://maps.example.com?KEY=1", "key"),
+        ] {
+            assert!(config(base, name).validate(&kc).is_err(), "{base} {name:?}");
+        }
     }
 }

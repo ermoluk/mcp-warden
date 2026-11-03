@@ -54,6 +54,16 @@ impl Credential {
                 b.header(name, value)
             }
             Auth::Basic { username, .. } => b.basic_auth(username, Some(secret)),
+            Auth::Query { .. } => b,
+        }
+    }
+
+    /// For `query` auth, the credential's parameter, appended after every
+    /// other: the agent's pairs are already on `url`.
+    pub fn apply_to_url(&self, url: &mut url::Url) {
+        if let Auth::Query { name, .. } = &self.auth {
+            url.query_pairs_mut()
+                .append_pair(name, self.secrets[0].expose());
         }
     }
 

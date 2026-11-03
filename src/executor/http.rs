@@ -146,6 +146,30 @@ pub(crate) fn check_query_and_body_keys(
     Ok(())
 }
 
+/// Refuse a query parameter named like the preset's query credential,
+/// compared ignoring ASCII case: the agent could otherwise send its own
+/// value in the credential's place, or a second one for the upstream to
+/// pick from. Runs before any credential is read (invariant 3).
+pub(crate) fn check_auth_query_name(
+    preset: &Preset,
+    query: Option<&std::collections::BTreeMap<String, String>>,
+) -> Result<()> {
+    let Some(mcp_warden_core::config::Auth::Query { name, .. }) = &preset.auth else {
+        return Ok(());
+    };
+    match query
+        .into_iter()
+        .flat_map(|q| q.keys())
+        .find(|k| k.trim().eq_ignore_ascii_case(name))
+    {
+        Some(_) => Err(WardenError::Validation(format!(
+            "query parameter '{name}' carries this preset's credential and cannot be set by \
+             the caller"
+        ))),
+        None => Ok(()),
+    }
+}
+
 /// `key`, or the name in front of its PHP array suffix (`_method[]`),
 /// normalised as PHP and header-style names would be: case folded, leading
 /// and trailing spaces dropped, and `.`, ` `, `[` and `-` read as `_`.
@@ -279,6 +303,7 @@ pub async fn execute(
     let method = method_upper
         .parse::<reqwest::Method>()
         .map_err(|_| WardenError::Validation(format!("bad method {method_upper}")))?;
+    credential.apply_to_url(&mut url);
     let mut builder = credential.apply(client.request(method, url));
     if let Some(body) = req.body {
         builder = builder.json(&body);
@@ -1121,6 +1146,75 @@ mod tests {
                 "{form:?} reached the agent in {text:?}"
             );
         }
+    }
+
+    /// `query` auth: the credential goes as the named query parameter,
+    /// after the agent's own, and an upstream that echoes the URL in any
+    /// encoding gets it scrubbed.
+    #[tokio::test]
+    async fn query_auth_sends_the_key_as_a_parameter_and_scrubs_echoes() {
+        let key = "AIzaTEST key+/=0123456789";
+        let server = echo_server(|req: &wiremock::Request| {
+            serde_json::json!({
+                "url": req.url.to_string(),
+                "query": req.url.query().unwrap_or(""),
+                "decoded": req.url.query_pairs().map(|(k, v)| format!("{k}={v}")).collect::<Vec<_>>(),
+            })
+        })
+        .await;
+        let auth = Auth::Query {
+            name: "key".into(),
+            secret: "k".into(),
+        };
+        let resp = call_upstream(&server, auth, key, "/maps/api/geocode/json").await;
+        let requests = server.received_requests().await.unwrap();
+        let pairs: Vec<(String, String)> = requests[0]
+            .url
+            .query_pairs()
+            .map(|(k, v)| (k.into_owned(), v.into_owned()))
+            .collect();
+        assert_eq!(pairs, [("key".to_string(), key.to_string())]);
+        assert!(requests[0].headers.get("authorization").is_none());
+        for form in [key, "AIzaTEST", "AIzaTEST+key%2B%2F%3D0123456789"] {
+            assert_absent(&resp.body, form);
+        }
+    }
+
+    #[test]
+    fn the_caller_cannot_send_the_query_credentials_parameter() {
+        let mut preset = p();
+        preset.auth = Some(Auth::Query {
+            name: "key".into(),
+            secret: "k".into(),
+        });
+        for name in ["key", "KEY", "Key", " key"] {
+            let query: std::collections::BTreeMap<String, String> =
+                [(name.to_string(), "mine".to_string())].into();
+            let req = Request::Http {
+                method: "GET",
+                path: "/users",
+                query: Some(&query),
+                body: None,
+            };
+            assert!(check_request(&preset, &req).is_err(), "{name:?}");
+        }
+        let query: std::collections::BTreeMap<String, String> =
+            [("keys".to_string(), "x".to_string())].into();
+        let req = Request::Http {
+            method: "GET",
+            path: "/users",
+            query: Some(&query),
+            body: None,
+        };
+        check_request(&preset, &req).unwrap();
+    }
+
+    /// The prompt and the audit log never show the query string, so the
+    /// credential never reaches them.
+    #[test]
+    fn the_summary_has_no_query_string() {
+        let s = crate::executor::summary::http("GET", Some("https://maps.example.com"), "/geo");
+        assert_eq!(s, "GET https://maps.example.com/geo");
     }
 
     #[tokio::test]
