@@ -17,7 +17,7 @@ async fn main() -> anyhow::Result<()> {
         cli::Command::Init => cli::init::run(&config_dir)?,
         cli::Command::Secret { cmd } => cli::secret::run(cmd, store.as_ref())?,
         cli::Command::Preset { cmd } => cli::preset::run(cmd, &config_path, store).await?,
-        cli::Command::Audit(args) => cli::audit::run(args, &audit_db)?,
+        cli::Command::Audit(args) => cli::audit::run(args, &audit_db, store.as_ref(), &config_dir)?,
         cli::Command::Approval(args) if args.is_telegram_test() => {
             cli::approval::telegram_test(&config_dir, store).await?
         }
