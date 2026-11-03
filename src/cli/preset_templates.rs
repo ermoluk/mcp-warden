@@ -1,4 +1,6 @@
-use mcp_warden_core::config::{ApprovalPolicy, Auth, NamedCommand, ParamSpec, Preset, PresetType};
+use mcp_warden_core::config::{
+    ApprovalPolicy, Auth, ClientAuth, NamedCommand, OAuth2Grant, ParamSpec, Preset, PresetType,
+};
 
 /// What the user picked when scaffolding: the preset's name, the keychain
 /// entry it reads, and for SSH templates the host and user.
@@ -23,6 +25,9 @@ pub struct Template {
     /// without `allowed_paths`: an example allow-list and token advice.
     /// Empty for templates that list their paths.
     pub open_paths_note: &'static [&'static str],
+    /// Placeholders to replace after scaffolding (a client id, a bucket),
+    /// printed with the result. Empty when there are none.
+    pub setup_note: &'static [&'static str],
 }
 
 pub const TEMPLATES: &[Template] = &[
@@ -38,6 +43,7 @@ pub const TEMPLATES: &[Template] = &[
             "Prefer a fine-grained PAT limited to specific repositories, read-only.",
             "Approval stays `prompt` until you narrow allowed_paths; then set it to auto if you want.",
         ],
+        setup_note: &[],
     },
     Template {
         name: "github-write",
@@ -46,6 +52,7 @@ pub const TEMPLATES: &[Template] = &[
         build: |c| github_write(c.name, c.secret_name),
         needs_host: false,
         open_paths_note: &[],
+        setup_note: &[],
     },
     Template {
         name: "notion-read",
@@ -54,6 +61,7 @@ pub const TEMPLATES: &[Template] = &[
         build: |c| notion_read(c.name, c.secret_name),
         needs_host: false,
         open_paths_note: &[],
+        setup_note: &[],
     },
     Template {
         name: "stripe-read",
@@ -65,6 +73,7 @@ pub const TEMPLATES: &[Template] = &[
             "  allowed_paths = [\"/customers(/[^/]+)?\", \"/charges(/[^/]+)?\"]",
             "Prefer a restricted key (rk_...) with read-only permissions over a secret key.",
         ],
+        setup_note: &[],
     },
     Template {
         name: "openai-chat",
@@ -73,6 +82,7 @@ pub const TEMPLATES: &[Template] = &[
         build: |c| openai_chat(c.name, c.secret_name),
         needs_host: false,
         open_paths_note: &[],
+        setup_note: &[],
     },
     Template {
         name: "anthropic-messages",
@@ -81,6 +91,7 @@ pub const TEMPLATES: &[Template] = &[
         build: |c| anthropic_messages(c.name, c.secret_name),
         needs_host: false,
         open_paths_note: &[],
+        setup_note: &[],
     },
     Template {
         name: "gitea-read",
@@ -93,6 +104,7 @@ pub const TEMPLATES: &[Template] = &[
             "Prefer a token with read-only scopes (e.g. read:repository) over an all-access one.",
             "Approval stays `prompt` until you narrow allowed_paths; then set it to auto if you want.",
         ],
+        setup_note: &[],
     },
     Template {
         name: "cloudflare-dns",
@@ -101,6 +113,7 @@ pub const TEMPLATES: &[Template] = &[
         build: |c| cloudflare_dns(c.name, c.secret_name),
         needs_host: false,
         open_paths_note: &[],
+        setup_note: &[],
     },
     Template {
         name: "gitlab-read",
@@ -109,6 +122,7 @@ pub const TEMPLATES: &[Template] = &[
         build: |c| gitlab_read(c.name, c.secret_name),
         needs_host: false,
         open_paths_note: &[],
+        setup_note: &[],
     },
     Template {
         name: "linear",
@@ -117,6 +131,7 @@ pub const TEMPLATES: &[Template] = &[
         build: |c| linear(c.name, c.secret_name),
         needs_host: false,
         open_paths_note: &[],
+        setup_note: &[],
     },
     Template {
         name: "jira-read",
@@ -125,6 +140,7 @@ pub const TEMPLATES: &[Template] = &[
         build: |c| jira_read(c.name, c.secret_name),
         needs_host: false,
         open_paths_note: &[],
+        setup_note: &[],
     },
     Template {
         name: "slack-read",
@@ -133,6 +149,7 @@ pub const TEMPLATES: &[Template] = &[
         build: |c| slack_read(c.name, c.secret_name),
         needs_host: false,
         open_paths_note: &[],
+        setup_note: &[],
     },
     Template {
         name: "vercel-read",
@@ -141,6 +158,43 @@ pub const TEMPLATES: &[Template] = &[
         build: |c| vercel_read(c.name, c.secret_name),
         needs_host: false,
         open_paths_note: &[],
+        setup_note: &[],
+    },
+    Template {
+        name: "google-maps",
+        description: "Google Maps Platform web services (geocoding, places, distances), key in the query",
+        default_secret_name: "gmaps_key",
+        build: |c| google_maps(c.name, c.secret_name),
+        needs_host: false,
+        open_paths_note: &[],
+        setup_note: &[
+            "Restrict the key in Google Cloud Console to these APIs (and, if you can, to your IP).",
+        ],
+    },
+    Template {
+        name: "google-drive-read",
+        description: "Google Drive (read-only) with OAuth2: a fresh access token per call",
+        default_secret_name: "gdrive",
+        build: |c| google_drive_read(c.name, c.secret_name),
+        needs_host: false,
+        open_paths_note: &[],
+        setup_note: &[
+            "Replace client_id with your OAuth client's id (Google Cloud Console → Credentials).",
+            "Get a refresh token for the drive.readonly scope (e.g. with the OAuth Playground),",
+            "then store the client secret and the refresh token with the commands above.",
+        ],
+    },
+    Template {
+        name: "aws-s3-read",
+        description: "Amazon S3 (read-only: list and get objects), signed with AWS SigV4",
+        default_secret_name: "aws_s3",
+        build: |c| aws_s3_read(c.name, c.secret_name),
+        needs_host: false,
+        open_paths_note: &[],
+        setup_note: &[
+            "Replace your-bucket and eu-central-1 in base_url and region with your bucket's.",
+            "Use an IAM user or role limited to s3:GetObject and s3:ListBucket on that bucket.",
+        ],
     },
     Template {
         name: "ssh-deploy",
@@ -149,6 +203,7 @@ pub const TEMPLATES: &[Template] = &[
         build: ssh_deploy,
         needs_host: true,
         open_paths_note: &[],
+        setup_note: &[],
     },
 ];
 
@@ -276,6 +331,68 @@ fn ssh_deploy(c: &Choices) -> Preset {
         expose_as_tools: false,
         commands,
     }
+}
+
+fn google_maps(name: &str, secret_name: &str) -> Preset {
+    http_preset(
+        name,
+        "Google Maps Platform web services",
+        "https://maps.googleapis.com",
+        Auth::Query {
+            name: "key".into(),
+            secret: secret_name.to_string(),
+        },
+        &["GET"],
+        &[
+            "/maps/api/geocode/json",
+            "/maps/api/place/textsearch/json",
+            "/maps/api/place/details/json",
+            "/maps/api/distancematrix/json",
+        ],
+        ApprovalPolicy::Prompt,
+    )
+}
+
+/// `secret_name` is a prefix: the client secret and the refresh token get
+/// entries of their own.
+fn google_drive_read(name: &str, secret_name: &str) -> Preset {
+    http_preset(
+        name,
+        "Google Drive (read-only)",
+        "https://www.googleapis.com",
+        Auth::Oauth2 {
+            grant: OAuth2Grant::RefreshToken,
+            token_url: "https://oauth2.googleapis.com/token".into(),
+            client_id: "YOUR_CLIENT_ID.apps.googleusercontent.com".into(),
+            client_secret: Some(format!("{secret_name}_client_secret")),
+            refresh_token: Some(format!("{secret_name}_refresh_token")),
+            scopes: vec!["https://www.googleapis.com/auth/drive.readonly".into()],
+            client_auth: ClientAuth::Basic,
+        },
+        &["GET"],
+        &["/drive/v3/files", "/drive/v3/files/[A-Za-z0-9_-]+"],
+        ApprovalPolicy::Prompt,
+    )
+}
+
+/// `secret_name` is a prefix: the key id and the secret key get entries of
+/// their own.
+fn aws_s3_read(name: &str, secret_name: &str) -> Preset {
+    http_preset(
+        name,
+        "Amazon S3 bucket (read-only)",
+        "https://your-bucket.s3.eu-central-1.amazonaws.com",
+        Auth::AwsSigv4 {
+            region: "eu-central-1".into(),
+            service: "s3".into(),
+            access_key_id: format!("{secret_name}_access_key_id"),
+            secret_access_key: format!("{secret_name}_secret_access_key"),
+            session_token: None,
+        },
+        &["GET"],
+        &["/", "/[A-Za-z0-9!_.*'()/-]+"],
+        ApprovalPolicy::Prompt,
+    )
 }
 
 fn bearer(secret_name: &str) -> Auth {
@@ -553,6 +670,56 @@ mod tests {
                 "{template} {method} {path}"
             );
         }
+    }
+
+    /// Each template is a valid config as scaffolded, once its secrets are
+    /// in the keychain.
+    #[test]
+    fn every_template_validates_with_its_secrets() {
+        use mcp_warden_core::keychain::KeychainStore;
+        for t in TEMPLATES {
+            let p = build(t);
+            let kc = mcp_warden_core::keychain::memory::InMemoryKeychain::new();
+            for name in p.secret_names() {
+                kc.set(name, mcp_warden_core::secret::Secret::new("x".into()))
+                    .unwrap();
+            }
+            let cfg = mcp_warden_core::config::Config {
+                preset: vec![p],
+                ..Default::default()
+            };
+            cfg.validate(&kc)
+                .unwrap_or_else(|e| panic!("{}: {e}", t.name));
+        }
+    }
+
+    #[test]
+    fn the_new_auth_templates_reach_only_their_reads() {
+        for (template, method, path, want) in [
+            ("google-maps", "GET", "/maps/api/geocode/json", true),
+            ("google-maps", "GET", "/maps/api/staticmap", false),
+            ("google-drive-read", "GET", "/drive/v3/files/1AbC_d-9", true),
+            ("google-drive-read", "DELETE", "/drive/v3/files/1AbC", false),
+            ("google-drive-read", "GET", "/drive/v3/about", false),
+            ("aws-s3-read", "GET", "/reports/2026/11.csv", true),
+            ("aws-s3-read", "PUT", "/reports/x", false),
+        ] {
+            assert_eq!(
+                allows(template, method, path),
+                want,
+                "{template} {method} {path}"
+            );
+        }
+        let drive = build(find("google-drive-read").unwrap());
+        assert_eq!(
+            drive.secret_names(),
+            ["gdrive_client_secret", "gdrive_refresh_token"]
+        );
+        let s3 = build(find("aws-s3-read").unwrap());
+        assert_eq!(
+            s3.secret_names(),
+            ["aws_s3_access_key_id", "aws_s3_secret_access_key"]
+        );
     }
 
     /// The SSH template is a valid config as scaffolded: its commands pass
