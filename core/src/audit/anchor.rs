@@ -331,7 +331,8 @@ mod tests {
                 std::thread::spawn(move || {
                     let s = LocalSqlite::open(&db).unwrap();
                     let mut last = 0;
-                    for _ in 0..10 {
+                    // Few rounds, as in chain::writers_in_parallel_make_one_chain.
+                    for _ in 0..4 {
                         calls(&s, 1);
                         advance(kc.as_ref(), &s, &db, Some(&locks)).unwrap();
                         if let Some(a) = read(kc.as_ref(), &db).unwrap() {

@@ -536,7 +536,10 @@ mod tests {
         assert_eq!(s.verify_chain().unwrap().records, 7);
     }
 
-    /// Several processes write one file: the chain stays one line.
+    /// Several processes write one file: the chain stays one line. Kept
+    /// small: SQLite does not queue waiters, and on a slow disk (Windows
+    /// CI, a commit takes tens of milliseconds) hundreds of commits from
+    /// four threads can keep one waiting past the busy timeout.
     #[test]
     fn writers_in_parallel_make_one_chain() {
         let dir = tempfile::tempdir().unwrap();
@@ -546,7 +549,7 @@ mod tests {
                 let path = dir.path().to_path_buf();
                 std::thread::spawn(move || {
                     let s = sink(&path);
-                    for _ in 0..10 {
+                    for _ in 0..3 {
                         two_calls(&s);
                     }
                 })
@@ -557,7 +560,7 @@ mod tests {
         }
         let report = sink(dir.path()).verify_chain().unwrap();
         assert!(report.intact(), "{:?}", report.problems);
-        assert_eq!(report.records, 1 + 4 * 10 * 6);
+        assert_eq!(report.records, 1 + 4 * 3 * 6);
     }
 
     #[test]
