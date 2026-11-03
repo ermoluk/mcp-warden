@@ -2,7 +2,7 @@
 name = "mcp-warden-core"
 version = "0.5.4"
 edition = "2024"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "Apache-2.0"
 repository = "https://github.com/ermoluk/mcp-warden"
 readme = "README.md"
@@ -33,7 +33,7 @@ regex = "1"
 # russh is included here only so `From<russh::Error>` can live on WardenError
 # (required by russh's Handler trait). Consumers who don't use SSH still link
 # it transitively; refactoring to a binary-local newtype is on the roadmap.
-russh = "0.60"
+russh = "0.65"
 
 # OS credential stores (see `keychain/system.rs`). Not the `keyring` crate: its
 # 4.2 release removed the API we used without a major version bump.

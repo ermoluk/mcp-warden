@@ -8,15 +8,12 @@ all-features = true
 # Every advisory fails the check unless it is listed here with the reason
 # it does not affect mcp-warden and what would remove it.
 ignore = [
-    # rsa 0.10.0-rc (Marvin attack, no fixed release exists), pulled in by
-    # russh's ssh-key fork. mcp-warden only signs with a user's RSA key
-    # for SSH authentication, never decrypts. Removed by moving to a russh
-    # whose ssh-key no longer depends on rsa (or using ed25519 keys).
+    # rsa 0.10.0-rc (Marvin attack): no rsa release fixes it, and russh
+    # 0.65 still pulls it in for RSA user keys. mcp-warden only signs with
+    # a user's RSA key for SSH authentication and never decrypts, which is
+    # what the attack targets. It goes away only if RSA keys are dropped
+    # (owner decision 2026-11-03: keep them) or rsa ships a fix.
     { id = "RUSTSEC-2023-0071", reason = "rsa via russh: no fix released; signing only" },
-    # crypto-bigint 0.7.0-rc.28 timing variability, pinned by the same rsa
-    # pre-release (via crypto-primes). Fixed when russh moves past it
-    # (russh 0.65 is a semver-breaking upgrade, left for its own change).
-    { id = "RUSTSEC-2026-0387", reason = "crypto-bigint pinned by russh's rsa pre-release" },
 ]
 # Unmaintained and unsound crates deep in the tree are reported, not fatal:
 # each is listed by `cargo deny check advisories` and reviewed per release.

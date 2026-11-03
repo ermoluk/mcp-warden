@@ -115,9 +115,9 @@ impl Handler for WardenSshHandler {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &ssh_key::PublicKey,
+        server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> std::result::Result<bool, Self::Error> {
-        crate::executor::known_hosts::verify(
+        crate::executor::known_hosts::verify_presented(
             &self.host,
             self.port,
             server_public_key,

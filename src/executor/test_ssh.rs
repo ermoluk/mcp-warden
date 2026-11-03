@@ -3,8 +3,8 @@
 //! including hostile ones (endless output, hanging after authentication).
 
 use russh::keys::ssh_key::private::Ed25519Keypair;
-use russh::keys::ssh_key::{self, LineEnding, PrivateKey};
-use russh::server::{Auth, Config, Handler, Msg, Session};
+use russh::keys::ssh_key::{LineEnding, PrivateKey};
+use russh::server::{Auth, ChannelOpenHandle, Config, Handler, Msg, Session, VerifiedPublicKey};
 use russh::{Channel, ChannelId};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -96,7 +96,7 @@ impl Handler for TestHandler {
     async fn auth_publickey(
         &mut self,
         _user: &str,
-        _key: &ssh_key::PublicKey,
+        _key: VerifiedPublicKey<'_>,
     ) -> Result<Auth, Self::Error> {
         Ok(Auth::Accept)
     }
@@ -104,12 +104,14 @@ impl Handler for TestHandler {
     async fn channel_open_session(
         &mut self,
         _channel: Channel<Msg>,
+        reply: ChannelOpenHandle,
         _session: &mut Session,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<(), Self::Error> {
         if let Behaviour::HangAfterAuth = self.behaviour {
             std::future::pending::<()>().await;
         }
-        Ok(true)
+        reply.accept().await;
+        Ok(())
     }
 
     async fn exec_request(
