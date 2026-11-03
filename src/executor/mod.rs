@@ -298,6 +298,72 @@ impl ActionExecutor {
         })
     }
 
+    /// Move the audit log's keychain anchor up to the chain's tip every
+    /// `every`, but only when the tip moved since this process last did:
+    /// no keychain access while nothing is recorded, and never on the path
+    /// of a call or a prompt. A log that no longer matches its anchor is
+    /// left anchored where it was, and an error goes to stderr
+    /// (`audit::anchor::advance`). The task ends when the executor does.
+    pub fn watch_anchor(
+        self: Arc<Self>,
+        every: std::time::Duration,
+        db: std::path::PathBuf,
+    ) -> tokio::task::JoinHandle<()> {
+        let exec = Arc::downgrade(&self);
+        drop(self);
+        tokio::spawn(async move {
+            let mut last = None;
+            loop {
+                tokio::time::sleep(every).await;
+                let Some(exec) = exec.upgrade() else {
+                    return;
+                };
+                last = exec.anchor_if_moved(&db, last).await;
+            }
+        })
+    }
+
+    /// Advance the anchor if the tip is not `last`; returns the tip now
+    /// anchored (or still `last`).
+    pub async fn anchor_if_moved(&self, db: &std::path::Path, last: Option<i64>) -> Option<i64> {
+        let tip = match self.audit.chain_tip() {
+            Ok(Some((seq, _))) => seq,
+            _ => return last,
+        };
+        if Some(tip) == last {
+            return last;
+        }
+        let (kc, audit, db) = (self.keychain.clone(), self.audit.clone(), db.to_path_buf());
+        let locks = self.state_dir.as_ref().map(|d| d.join("locks"));
+        let moved = tokio::task::spawn_blocking(move || {
+            mcp_warden_core::audit::anchor::advance(
+                kc.as_ref(),
+                audit.as_ref(),
+                &db,
+                locks.as_deref(),
+            )
+        })
+        .await;
+        use mcp_warden_core::audit::anchor::Advance;
+        match moved {
+            Ok(Ok(Advance::Moved { to })) => Some(to),
+            Ok(Ok(Advance::Unchanged)) => Some(tip),
+            // Another process is moving it: try again next round.
+            Ok(Ok(Advance::Busy)) => last,
+            // The log no longer matches (reported on stderr): say so again
+            // only once more is recorded.
+            Ok(Ok(Advance::Refused(_))) => Some(tip),
+            Ok(Err(e)) => {
+                tracing::warn!("could not move the audit anchor: {e}");
+                last
+            }
+            Err(e) => {
+                tracing::warn!("could not move the audit anchor: {e}");
+                last
+            }
+        }
+    }
+
     /// Refuse every call while mcp-warden is locked, and audit the refusal.
     /// The first locked call also drops every approval window, so nothing
     /// approved before the lock outlives it.
@@ -1365,5 +1431,44 @@ mod tests {
             .await
             .unwrap_err();
         assert_failed(&exec, &err);
+    }
+
+    /// The watcher writes the anchor when the log grew, and leaves the
+    /// keychain alone while it does not.
+    #[tokio::test]
+    async fn the_anchor_moves_only_when_the_log_grew() {
+        use mcp_warden_core::audit::sqlite_sink::LocalSqlite;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("audit.db");
+        let audit = Arc::new(LocalSqlite::open(&db).unwrap());
+        let kc = crate::testutil::CountingKeychain::with(&[]);
+        let exec = Arc::new(ActionExecutor::new(
+            kc.clone(),
+            crate::testutil::CountingApproval::new(ApprovalDecision::Approved),
+            None,
+            audit.clone(),
+        ));
+        let _watch = exec
+            .clone()
+            .watch_anchor(Duration::from_millis(20), db.clone());
+        audit.record_pending("p", "proxy_http", "GET /").unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let anchored = mcp_warden_core::audit::anchor::read(kc.as_ref(), &db)
+            .unwrap()
+            .unwrap();
+        assert_eq!(anchored.seq, 2);
+        let reads = kc.gets();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        assert_eq!(
+            kc.gets(),
+            reads,
+            "no keychain access while nothing is recorded"
+        );
+        audit.record_pending("p", "proxy_http", "GET /").unwrap();
+        tokio::time::sleep(Duration::from_millis(150)).await;
+        let anchored = mcp_warden_core::audit::anchor::read(kc.as_ref(), &db)
+            .unwrap()
+            .unwrap();
+        assert_eq!(anchored.seq, 3);
     }
 }

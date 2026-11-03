@@ -33,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
         cli::Command::Lock { reason } => {
             fsutil::ensure_private_dir(&config_dir)?;
             let audit = mcp_warden_core::audit::sqlite_sink::LocalSqlite::open(&audit_db)?;
-            cli::lock::lock(&config_dir, reason, &audit)?
+            cli::lock::lock(&config_dir, reason, &audit, store.as_ref())?
         }
         cli::Command::Unlock => cli::lock::unlock_cmd(&config_dir, store, &audit_db).await?,
         cli::Command::Run { name } => {
