@@ -339,6 +339,15 @@ impl Config {
                     p.name
                 )));
             }
+            if p.preset_type != PresetType::Ssh
+                && (!p.commands.is_empty() || p.expose_as_tools || p.max_output_bytes.is_some())
+            {
+                return Err(WardenError::Validation(format!(
+                    "preset '{}': commands, expose_as_tools and max_output_bytes are for ssh \
+                     presets",
+                    p.name
+                )));
+            }
             match p.preset_type {
                 PresetType::Http => self.validate_http(p, kc)?,
                 PresetType::Ssh => self.validate_ssh(p, kc)?,
@@ -347,6 +356,7 @@ impl Config {
                 }
             }
         }
+        crate::commands::validate_tool_names(&self.preset)?;
         if let Some(approval) = &self.approval
             && let Some(tg) = &approval.telegram
         {
@@ -482,6 +492,7 @@ impl Config {
                 ))
             })?;
         }
+        crate::commands::validate_preset(p)?;
         if p.allow_sftp {
             for dir in &p.allowed_local_paths {
                 if !Path::new(dir).is_absolute() {
@@ -1175,5 +1186,41 @@ mod tests {
         for field in ["max_output_bytes", "expose_as_tools", "commands"] {
             assert!(json.get(field).is_none(), "{field}");
         }
+    }
+
+    /// One bad command stops the server, naming the preset and the command
+    /// (invariant 10).
+    #[test]
+    fn a_bad_named_command_refuses_the_whole_config() {
+        let base = include_str!("../../tests/fixtures/named_commands.toml");
+        let kc = InMemoryKeychain::new();
+        kc.set("deploy_key", Secret::new("k".into())).unwrap();
+        let ok: Config = toml::from_str(base).unwrap();
+        ok.validate(&kc).unwrap();
+        let bad: Config = toml::from_str(&base.replacen(
+            "mv {path} /srv/app/.trash/",
+            "mv {path} /srv/app/.trash/ ; id",
+            1,
+        ))
+        .unwrap();
+        let err = bad.validate(&kc).unwrap_err().to_string();
+        assert!(
+            err.contains("preset 'deploy': command 'trash_file'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn named_commands_are_for_ssh_presets_only() {
+        let mut cfg: Config =
+            toml::from_str(include_str!("../../tests/fixtures/valid_config.toml")).unwrap();
+        let commands = named_commands().preset[0].commands.clone();
+        cfg.preset[0].commands = commands;
+        let kc = InMemoryKeychain::new();
+        for name in ["github_pat", "gh_pat", "k"] {
+            kc.set(name, Secret::new("x".into())).unwrap();
+        }
+        let err = cfg.validate(&kc).unwrap_err().to_string();
+        assert!(err.contains("are for ssh presets"), "{err}");
     }
 }
