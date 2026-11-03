@@ -8,8 +8,10 @@ use std::path::Path;
 use std::sync::Mutex;
 use std::time::Duration;
 
-/// How long a write waits for another process holding the database.
-const BUSY_TIMEOUT: Duration = Duration::from_secs(5);
+/// How long a write waits for other processes holding the database. SQLite
+/// does not queue waiters, so under many writers on a slow disk (Windows
+/// CI) one can wait several seconds.
+const BUSY_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// The columns `row_to_event` reads, in its order.
 pub(crate) const COLUMNS: &str = "id, created_at, preset, action, summary, decision, outcome_kind, \

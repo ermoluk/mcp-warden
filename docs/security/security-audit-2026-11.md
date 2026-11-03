@@ -1,4 +1,4 @@
-# mcp-warden security audit — November 2026 (block A)
+# mcp-warden security audit — November 2026
 
 Scope: `main` at v0.5.3 (83bc998). The fixes were made on branch `security/audit-2026-11` and shipped in **0.5.4** (ermoluk/mcp-warden#2, merge commit ca49491).
 This report was kept out of git until that release; `file:line` references point at the branch head before the merge.
@@ -115,3 +115,93 @@ Plus the property test `an_allowed_request_reaches_the_upstream_as_checked` (256
   - `auto` presets ask until `mcp-warden preset confirm` is run.
   - Each wrapped server asks once on first launch.
   - Plain-http non-loopback presets, group-writable config dirs and duplicate names stop the server.
+
+---
+
+# Re-audit for 0.6.0 (block E)
+
+Scope: the code added for 0.6.0 on `release/0.6.0` — the dependency upgrades, named SSH commands (`ssh_run`, generated tools), the `query`, `oauth2` and `aws_sigv4` auth kinds, the hash-chained audit log with its keychain anchor and `audit verify` — and what changed around them. Severity is for the code as it stood when found; "unreleased" marks code that never shipped.
+
+## Method
+
+The method of block A:
+
+1. **Inventory** of the new inputs (below).
+2. **The same attacker model:** a fully prompt-injected agent that can write the user's files and run the CLI, hostile or reflecting upstreams (now including OAuth2 token endpoints), and anyone who can write `audit.db`. Direct keychain writes (N2) and root stay out of scope.
+3. **Exploit tests** for every hypothesis, through the real code path: the MCP tool methods with the counting keychain, approval transport and listeners of `src/mcp/refusal_tests.rs`; the in-process SSH server; wiremock upstreams and token endpoints; raw `sqlite3`-style edits of `audit.db` with the triggers dropped. Confirmed findings had a failing test first.
+4. **Leak tests** at TRACE log level for every new auth kind (`src/mcp/leak_tests.rs`).
+5. **Fuzzing:** three new targets and two more request kinds in `check_request` (results below).
+
+Not done, and why:
+- **No AddressSanitizer.** The installed nightly (2026-10-31) cannot compile russh 0.65: rustc reports a query cycle while computing async-drop for ssh-key's `KeyData`. The targets were built with stable rustc (`RUSTC_BOOTSTRAP=1 cargo +stable fuzz run -s none`), so libFuzzer ran with debug assertions and overflow checks but without ASan. The code under test has no `unsafe`.
+- **No real provider.** OAuth2 ran against wiremock token endpoints, not Google; SigV4 is checked against AWS's own `get-vanilla` test vector and wiremock, not AWS. Both live checks are on the owner's list.
+- **Windows** ran only in CI (tests and clippy), as for block A.
+
+## Input inventory
+
+| Input | Checks | Reaches |
+|---|---|---|
+| `ssh_run.command` | limits (64 bytes); `commands::find` (declared name; an invalid name is never echoed) | audit (`ssh_run`, or `ssh_run:<command>` once found), prompt |
+| `ssh_run.params` | limits (16 × 256 bytes) `src/executor/limits.rs`; `commands::render` `core/src/commands.rs`: exact key set, per type (int decimal in range; enum exact; string/path one word, pattern, no leading `-`; path absolute, no `//`, `.`, `..`), substitution, shell-syntax check and length again | prompt / audit (full command), remote login shell |
+| generated tool arguments (`ssh_<preset>_<command>`) | the same `ssh_run` path | the same |
+| `[[preset.commands]]` in the config | `commands::validate_preset` / `validate_tool_names` at startup: names, description, template words and placeholders, every enum value and int bound filled in through `check_words`, longest expansion ≤ 1024, ≤ 32 generated tools, no clash with static tools | tool list, `list_presets`, prompts |
+| a command's `approval` | `stamp::demote_unconfirmed_auto`: `auto` only if the preset is confirmed in exactly this form; a `deny` preset refuses every command | policy |
+| `query` auth `name` | config: 1–64 of `A-Za-z0-9_.-`, not already in `base_url`; per call `check_auth_query_name` (case, spaces, `.`/` `, `key[…]`) | upstream URL (never prompt, audit summary or error text) |
+| OAuth2 `token_url`, `client_id`, `scopes`, entries | config: https or loopback http, client id 1–256 without control characters, RFC 6749 scope tokens, distinct entries, refresh-token entry used by nothing else | token endpoint |
+| OAuth2 token endpoint answer | `oauth2::parse_answer`: 64 KiB, 15 s, no redirects, status 200, tokens printable ASCII ≤ 16 KiB, `token_type` bearer; errors give the status and `error` code only | `Authorization` header; keychain (rotated refresh token, under `fslock`) |
+| `aws_sigv4` `region`, `service`, entries | config: 1–32 of `a-z0-9-`, distinct entries; signing after every check and the approval, with tracing silenced | upstream headers |
+| `audit.db` (`events`, `chain`) | triggers; `chain::verify`; anchor `advance` / `check` | `audit verify`, doctor, web UI, the anchor |
+| keychain `audit/anchor/…` | `Anchor::decode` (strict; malformed is an error); `audit/` reserved for CLI, presets, servers, Telegram | `audit verify`, `advance` |
+| `<config dir>/locks/*` | `fslock`: 0700 directory, 0600 files, no symlink file or directory | OAuth2 rotation, anchor moves |
+
+## Findings
+
+| # | Finding | Sev | Status | Evidence | Commit |
+|---|---|---|---|---|---|
+| E1 | RSA keys signed with `ssh-rsa` (SHA-1), which OpenSSH ≥ 8.8 refuses: an RSA key could not log in to a current sshd (found while upgrading russh) | Medium (functional; in 0.5.4) | Confirmed, fixed | `ssh::tests::an_rsa_key_signs_with_sha2` failed with `["ssh-rsa"]` | c0461d5 |
+| E2 | `proxy_http` errors quoted reqwest's error text, which names the full request URL with its query string, to the agent and the audit log | Low in 0.5.4 (only the agent's own values); High with `query` auth | Confirmed, fixed | `http::tests::upstream_errors_do_not_carry_the_url` failed with `error sending request for url (http://127.0.0.1:…/users/abc?page=url-marker)` | 6962202 |
+| E3 | aws-sigv4 traces its signing parameters and canonical request at TRACE: with `RUST_LOG=trace` the access key id and any session token reached stderr (invariant 1) | High (unreleased) | Confirmed, fixed | `leak_tests::failing_upstreams_never_leak_query_oauth2_or_sigv4_secrets` failed: "stderr holds a form of the secret (AKID…)" | 2b84cac |
+| E4 | The query credential's own name was refused only ignoring case and spaces; `key[]` and `key[x]`, which PHP and Rack read as `key`, got through, so the agent could send its own value for the upstream to pick | Low (unreleased) | Confirmed, fixed | `http::tests::the_caller_cannot_send_the_query_credentials_parameter` failed on `"key[]"` | ab02f50 |
+| E5 | `approval.telegram.bot_token_secret` accepted reserved names (`stamp/…`), so a stamp could have been sent to Telegram as the bot token | Low (in 0.5.4) | Confirmed, fixed | `config::tests::presets_cannot_use_a_reserved_keychain_name` (Telegram case) | 84f9641 |
+| E6 | Every open of the audit log took the write lock to look for the genesis record; with several writers on a slow disk an open could wait past the busy timeout and fail (closed: the server or CLI command stops) | Low (unreleased) | Confirmed in Windows CI, fixed | `chain::tests::writers_in_parallel_make_one_chain` and `anchor::tests::racing_movers_never_move_it_back` failed on windows-latest with "database is locked" | 8dbc0de |
+
+Refuted hypotheses, each pinned by a test:
+
+- **Named-command values** — shell syntax, a leading `-`, `=` or `%`, `..`, `//`, NUL and control characters, non-ASCII look-alikes, a sign, leading zeros, hex, overflow, enum case variants: all refused (`tests/corpus/named-commands.txt`, 60 entries, at the policy and the MCP level with zero key reads, prompts and connections).
+- **A repeated JSON key** in `params`: serde keeps the last, and that is the value checked and run.
+- **Templates that could produce shell syntax** (an enum value or int bound that breaks a word, a literal `$(…)`) or more than 1024 bytes: the server refuses to start.
+- **An unconfirmed command-level `auto`** (an agent edits one command of a `prompt` preset): served as `prompt` (written test-first, 5bfa680).
+- **A window for one command covering another:** no; the key is `(preset, ssh_run:<command>)`.
+- **Generated tools:** name collisions across presets (`a_b`+`c` vs `a`+`b_c`), a 33rd tool and names that are not valid MCP tool names all stop the server.
+- **Hostile token endpoint:** a 400 quoting the refresh token and client secret, a non-`error` code, 70 KiB, non-JSON, `token_type=mac`, CR/LF in the token, a 302 (not followed), a 5 s stall (15 s cap, preset timeout 2 s): each fails the call, and none of the secrets reaches the agent, stderr or the audit log.
+- **Rotation:** two concurrent calls through one refresh token both succeed and the newest token is stored; an empty, spaced or non-string rotated token fails the call and leaves the stored token; a failed write fails the call.
+- **SigV4:** a refused call reads no key and signs nothing (path corpus through the refusal harness).
+- **The audit chain:** an edited field, an edited or deleted chain record, a deleted event, an inserted unchained event, an unreadable record with a recomputed hash and an edited pre-0.6.0 row are each named; four writers in parallel keep one linear chain.
+- **Laundering:** a log rewritten with its whole chain recomputed verifies on its own, but the anchor will not move onto it, and `audit verify` reports "rewritten"; a rollback to an older copy and a deleted database are reported too; four processes racing never move the anchor backwards; a malformed anchor is an error.
+- **Lock files:** a symlink at a lock file or in place of the locks directory is refused.
+
+## Fuzzing results
+
+| Target | Time | Executions | Result |
+|---|---|---|---|
+| `named_command` (**new**; oracle: what renders passes the shell-syntax check, fits 1024 bytes and keeps the template's word count) | 10 min | 1 598 936 | no crash |
+| `oauth_token_response` (**new**; oracle: an accepted token is printable ASCII without spaces, ≤ 16 KiB, only from a 200) | 10 min | 2 127 297 | no crash |
+| `audit_verify` (**new**; arbitrary chain rows) | 10 min | 1 456 931 | no crash |
+| `check_request` (**extended** with `ssh_run` and a query-auth preset; oracle: the credential's parameter name never gets through) | 10 min | 1 655 583 | no crash |
+| `config`, `check_words`, `known_hosts` (russh 0.65), `sanitise_for_prompt`, `scrub`, `select_fields`, `telegram_updates` (regression runs) | 2 min each | 230 629 – 1 331 785 | no crash |
+
+All built with stable rustc, without AddressSanitizer (see Method).
+
+Plus the 60-entry named-command corpus and the hostile path corpus against a SigV4 preset, both through the refusal harness.
+
+## Residual risks
+
+- **The tail after the anchor.** Records written since the last anchor move (up to about a minute while a server runs, or since the last session ended) can be rewritten or cut without `audit verify` noticing. N2 (an agent that writes the keychain) and root remain out of scope. On Linux the anchor may not survive a reboot.
+- **Cost of the chain.** Each audit write is one transaction with its chain record (about 0.5 ms here); the database roughly doubles. `audit verify` took 2.3 s for 100 000 events (300 001 records, 79 MB), and the web UI's audit page runs the chain check on every request.
+- **Descriptions come from the config.** Command and generated-tool descriptions are shown to the agent as written (no control characters, at most 512 characters). An edited config can put instructions there, as it already can in preset descriptions (T7).
+- **A key in the URL** (`query` auth) is visible to whatever logs URLs on the upstream's side. Prefer header auth where the API has it.
+- **One token request per call** for OAuth2 (no cache, by decision): providers with tight token-endpoint rate limits may throttle.
+- **Copies we do not control.** reqwest keeps the URL (with a `query` key) and the token request's form body in its own buffers until they are dropped; aws-credential-types keeps the SigV4 keys for the call.
+- **Upgrade window.** A 0.5.x server still running after the upgrade writes rows without chain records; `audit verify` reports them as unchained. Restart MCP clients after upgrading.
+- **RUSTSEC-2023-0071** (rsa, Marvin) stays accepted: no fixed release, signing only (owner decision 2026-11-03).
+- **Fuzzing without ASan** (above), until a nightly compiles russh 0.65.

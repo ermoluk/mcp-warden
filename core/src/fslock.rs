@@ -143,6 +143,20 @@ mod tests {
         assert!(FileLock::try_acquire(&locks, "x.lock").is_err());
     }
 
+    /// A symlink in place of the locks directory would put lock files, and
+    /// whatever opens them, somewhere else.
+    #[cfg(unix)]
+    #[test]
+    fn a_symlinked_lock_directory_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let elsewhere = dir.path().join("elsewhere");
+        std::fs::create_dir(&elsewhere).unwrap();
+        let locks = dir.path().join("locks");
+        std::os::unix::fs::symlink(&elsewhere, &locks).unwrap();
+        assert!(FileLock::try_acquire(&locks, "x.lock").is_err());
+        assert!(std::fs::read_dir(&elsewhere).unwrap().next().is_none());
+    }
+
     #[test]
     fn names_for_keys_are_plain_and_distinct() {
         let a = name_for("oauth2", "../../etc/passwd");

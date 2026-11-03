@@ -63,6 +63,21 @@ impl Harness {
             approval = "prompt"
 
             [[preset]]
+            name = "websig"
+            type = "http"
+            description = "web signed with SigV4"
+            base_url = "{http}"
+            allowed_methods = ["GET", "POST"]
+            allowed_paths = [".*"]
+            approval = "prompt"
+            [preset.auth]
+            type = "aws_sigv4"
+            region = "eu-central-1"
+            service = "execute-api"
+            access_key_id = "web_tok"
+            secret_access_key = "box_key"
+
+            [[preset]]
             name = "box"
             type = "ssh"
             description = "box"
@@ -275,6 +290,18 @@ async fn corpus_query_keys_are_refused_before_anything_is_touched() {
     h.assert_all_refused_untouched(entries.len() + 1).await;
 }
 
+/// A SigV4 preset: refused calls read no key and sign nothing.
+#[tokio::test]
+async fn sigv4_presets_refuse_before_signing() {
+    let h = Harness::wide_open().await;
+    let paths = corpus(include_str!("../../tests/corpus/paths.txt"));
+    for (_, path, _) in &paths {
+        h.http_via("websig", "GET", path, None, None).await;
+    }
+    h.http_via("websig", "DELETE", "/x", None, None).await;
+    h.assert_all_refused_untouched(paths.len() + 1).await;
+}
+
 /// A preset that sends its key as a query parameter: the hostile query keys
 /// are refused there too, and so is any spelling of the key's own name.
 #[tokio::test]
@@ -285,7 +312,7 @@ async fn query_auth_presets_refuse_the_same_keys_and_their_own_name() {
         h.http_via("webq", "POST", "/x", Some(json!({ key: "DELETE" })), None)
             .await;
     }
-    let names = ["key", "KEY", "Key", " key "];
+    let names = ["key", "KEY", "Key", " key ", "key[]", "Key[0]"];
     for name in names {
         h.http_via("webq", "GET", "/x", Some(json!({ name: "mine" })), None)
             .await;
@@ -333,6 +360,20 @@ async fn corpus_named_commands_are_refused_before_anything_is_touched() {
         .await;
     assert!(res.is_err());
     h.assert_all_refused_untouched(entries.len() + 2).await;
+}
+
+/// JSON allows a key twice; serde keeps the last. The value checked is the
+/// value run, so a repeated key cannot smuggle anything past the check.
+#[tokio::test]
+async fn a_repeated_parameter_is_checked_as_the_value_used() {
+    let h = Harness::wide_open().await;
+    let args: SshRunArgs = serde_json::from_str(
+        r#"{"preset_name":"box","command":"word","params":{"v":"ok","v":"$(id)"}}"#,
+    )
+    .unwrap();
+    assert_eq!(args.params["v"], "$(id)");
+    assert!(h.server.ssh_run(Parameters(args)).await.is_err());
+    h.assert_all_refused_untouched(1).await;
 }
 
 #[tokio::test]
