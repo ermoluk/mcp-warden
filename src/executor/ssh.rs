@@ -96,14 +96,8 @@ pub async fn run(
     super::policy::check_request(preset, &request)
         .inspect_err(|e| actx.record_refused(&preset.name, "ssh_exec", &summary, e))?;
     let event_id = actx.authorise(preset, "ssh_exec", &summary, false).await?;
-    execute(
-        actx,
-        preset,
-        event_id,
-        command,
-        super::limits::MAX_SSH_OUTPUT_BYTES,
-    )
-    .await
+    let max_output = mcp_warden_core::commands::max_output(preset, None);
+    execute(actx, preset, event_id, command, max_output).await
 }
 
 /// Run `command` on the preset's host once the call was authorised as
@@ -357,6 +351,22 @@ mod tests {
             started.elapsed() < Duration::from_secs(2),
             "{:?}",
             started.elapsed()
+        );
+    }
+
+    /// A preset's max_output_bytes lowers the limit for ssh_exec.
+    #[tokio::test]
+    async fn the_preset_can_lower_the_output_limit() {
+        let server = TestSshServer::start(Behaviour::Flood).await;
+        let (exec, mut preset, _dir) = against(&server, 2);
+        preset.max_output_bytes = Some(4096);
+        let out = run(&exec, &preset, "yes".into()).await.unwrap();
+        assert_eq!(out.stdout.len(), 4096);
+        assert!(out.stderr.len() <= 4096);
+        assert!(
+            out.notice.as_deref().unwrap().contains("4096 bytes"),
+            "{:?}",
+            out.notice
         );
     }
 
