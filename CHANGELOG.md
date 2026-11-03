@@ -26,6 +26,7 @@ Building from source now needs Rust 1.94.1 (AWS's `aws-sigv4` crate); prebuilt b
 
 ### Fixed
 
+- **`approval.telegram.bot_token_secret` could name a reserved keychain entry** (`stamp/…`); it is now refused like a preset secret, and the new `audit/…` entries are reserved the same way.
 - **Upstream errors carried the request URL.** When a `proxy_http` request failed (connection refused, TLS, timeout), the error the agent and the audit log got quoted the full URL, query string included. It now gives the error and its causes without the URL.
 - **SSH logins with an RSA key failed against current OpenSSH.** `ssh_exec` and `sftp_transfer` signed with `ssh-rsa` (SHA-1), which OpenSSH 8.8 and later refuse by default. An RSA key now signs with `rsa-sha2-512` or `rsa-sha2-256`, whichever the server announces (`rsa-sha2-256` if it announces none). Ed25519 and ECDSA keys were not affected.
 
