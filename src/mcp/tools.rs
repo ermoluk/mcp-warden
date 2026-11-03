@@ -46,6 +46,20 @@ for this preset+action, the call proceeds without a new prompt and is \
 recorded as 'windowed' in the audit log. Every call is recorded to the \
 audit log.";
 
+pub const SSH_RUN_DESCRIPTION: &str = "\
+Run one of an SSH preset's named commands. You supply `command` (a name \
+the preset declares; `list_presets` shows each command, what it does and \
+its parameters) and `params` (values by name). The command line is FIXED \
+in the preset: each value fills one placeholder, checked by its type \
+(a string or path against a pattern, an int within a range, an enum from \
+a list) BEFORE any credential is read. Values are single words without \
+spaces or shell syntax and may not start with `-`. Returns stdout, \
+stderr and exit_code. Host key verified against known_hosts. The approval \
+prompt shows the full command. If the user previously approved a \
+time-boxed window for this command, the call proceeds without a new \
+prompt and is recorded as 'windowed' in the audit log. Every call is \
+recorded to the audit log.";
+
 pub const SFTP_TRANSFER_DESCRIPTION: &str = "\
 Transfer a file between the preset's SSH host and the local machine. \
 `direction` must be \"get\" (download) or \"put\" (upload). The remote path \
@@ -89,6 +103,11 @@ mod tests {
     #[test]
     fn ssh_exec_description_pinned() {
         insta::assert_snapshot!(SSH_EXEC_DESCRIPTION);
+    }
+
+    #[test]
+    fn ssh_run_description_pinned() {
+        insta::assert_snapshot!(SSH_RUN_DESCRIPTION);
     }
 
     #[test]

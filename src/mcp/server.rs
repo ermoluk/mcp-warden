@@ -341,6 +341,44 @@ impl WardenServer {
         Ok(Json(resp))
     }
 
+    /// Run one of an SSH preset's named commands. You supply `command`
+    /// (a name the preset declares; `list_presets` shows each command,
+    /// what it does and its parameters) and `params` (values by name).
+    /// The command line is FIXED in the preset: each value fills one
+    /// placeholder, checked by its type (a string or path against a
+    /// pattern, an int within a range, an enum from a list) BEFORE any
+    /// credential is read. Values are single words without spaces or shell
+    /// syntax and may not start with `-`. Returns stdout, stderr and
+    /// exit_code. Host key verified against known_hosts. The approval
+    /// prompt shows the full command. If the user previously approved a
+    /// time-boxed window for this command, the call proceeds without a new
+    /// prompt and is recorded as 'windowed' in the audit log. Every call is
+    /// recorded to the audit log.
+    #[tool]
+    pub async fn ssh_run(
+        &self,
+        Parameters(args): Parameters<SshRunArgs>,
+    ) -> Result<Json<crate::executor::ssh::SshExecResponse>, McpError> {
+        let preset = self
+            .find_preset(
+                &args.preset_name,
+                "ssh_run",
+                &summary::ssh_run(
+                    &args.preset_name,
+                    &args.command,
+                    "?",
+                    None,
+                    args.params.len(),
+                ),
+            )
+            .await?;
+        let resp =
+            crate::executor::ssh::run_named(&self.executor, &preset, &args.command, &args.params)
+                .await
+                .map_err(map_warden_err)?;
+        Ok(Json(resp))
+    }
+
     /// Transfer a file between the preset's SSH host and the local
     /// machine. `direction` must be "get" (download) or "put" (upload).
     /// The remote path must match the preset's `sftp_allowed_paths`
@@ -450,6 +488,16 @@ impl WardenServer {
 pub struct SshExecArgs {
     pub preset_name: String,
     pub command: String,
+}
+
+#[derive(Debug, Clone, Deserialize, rmcp::schemars::JsonSchema)]
+pub struct SshRunArgs {
+    pub preset_name: String,
+    /// One of the preset's named commands; `list_presets` shows them.
+    pub command: String,
+    /// The command's parameters by name, e.g. {"lines": 50}.
+    #[serde(default)]
+    pub params: std::collections::BTreeMap<String, serde_json::Value>,
 }
 
 #[derive(Debug, Clone, Deserialize, rmcp::schemars::JsonSchema)]
@@ -769,6 +817,7 @@ mod tests {
                 crate::mcp::tools::GET_SECRET_FOR_ENV_DESCRIPTION,
             ),
             ("ssh_exec", crate::mcp::tools::SSH_EXEC_DESCRIPTION),
+            ("ssh_run", crate::mcp::tools::SSH_RUN_DESCRIPTION),
             (
                 "sftp_transfer",
                 crate::mcp::tools::SFTP_TRANSFER_DESCRIPTION,
@@ -777,6 +826,19 @@ mod tests {
         ] {
             assert_eq!(normalise(&served[tool]), normalise(pinned), "{tool}");
         }
+    }
+
+    /// core refuses generated tool names that the static tools use; the
+    /// list it checks against must be the tools actually served.
+    #[test]
+    fn core_knows_every_static_tool_name() {
+        let mut served: Vec<String> = WardenServer::tool_router()
+            .list_all()
+            .into_iter()
+            .map(|t| t.name.to_string())
+            .collect();
+        served.sort();
+        assert_eq!(served, mcp_warden_core::commands::STATIC_TOOL_NAMES);
     }
 
     #[test]

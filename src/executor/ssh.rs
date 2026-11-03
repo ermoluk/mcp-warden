@@ -5,6 +5,8 @@ use mcp_warden_core::error::{Result, WardenError};
 use russh::ChannelMsg;
 use russh::client::{self, Handler};
 use russh::keys::ssh_key;
+use serde_json::Value;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::time::Duration;
 
@@ -98,6 +100,44 @@ pub async fn run(
     let event_id = actx.authorise(preset, "ssh_exec", &summary, false).await?;
     let max_output = mcp_warden_core::commands::max_output(preset, None);
     execute(actx, preset, event_id, command, max_output).await
+}
+
+/// `ssh_run`: one of the preset's named commands, filled in from typed
+/// values. Everything `render` checks happens before the approval and
+/// before the key is read (invariant 3). The call is authorised as
+/// `ssh_run:<command>` under the command's own policy, so an approval
+/// window covers that command only.
+pub async fn run_named(
+    actx: &ActionExecutor,
+    preset: &Preset,
+    command: &str,
+    params: &BTreeMap<String, Value>,
+) -> Result<SshExecResponse> {
+    let host = preset.host.as_deref().unwrap_or("");
+    let refused = super::summary::ssh_run(&preset.name, command, host, None, params.len());
+    let request = super::policy::Request::SshRun { command, params };
+    super::policy::check_request(preset, &request)
+        .inspect_err(|e| actx.record_refused(&preset.name, "ssh_run", &refused, e))?;
+    let rendered = mcp_warden_core::commands::render(preset, command, params)?;
+    let summary = super::summary::ssh_run(
+        &preset.name,
+        command,
+        host,
+        Some(&rendered.command),
+        params.len(),
+    );
+    let mut scoped = preset.clone();
+    scoped.approval = rendered.approval;
+    let action = format!("ssh_run:{command}");
+    let event_id = actx.authorise(&scoped, &action, &summary, false).await?;
+    execute(
+        actx,
+        preset,
+        event_id,
+        rendered.command,
+        rendered.max_output,
+    )
+    .await
 }
 
 /// Run `command` on the preset's host once the call was authorised as
@@ -329,6 +369,147 @@ mod tests {
             !algorithms.is_empty() && algorithms.iter().all(|a| a.starts_with("rsa-sha2-")),
             "{algorithms:?}"
         );
+    }
+
+    /// The fixture's named-command preset pointed at `server`, prompting
+    /// with `decision`; the approval transport is returned to count prompts.
+    fn named_against(
+        server: &TestSshServer,
+        decision: ApprovalDecision,
+    ) -> (
+        ActionExecutor,
+        Arc<CountingApproval>,
+        Preset,
+        tempfile::TempDir,
+    ) {
+        let dir = tempfile::tempdir().unwrap();
+        let approval = CountingApproval::new(decision);
+        let exec = ActionExecutor::new(
+            CountingKeychain::with(&[("deploy_key", &server.client_key)]),
+            approval.clone(),
+            None,
+            Arc::new(
+                mcp_warden_core::audit::sqlite_sink::LocalSqlite::open(
+                    &dir.path().join("audit.db"),
+                )
+                .unwrap(),
+            ),
+        );
+        let cfg: mcp_warden_core::config::Config =
+            toml::from_str(include_str!("../../tests/fixtures/named_commands.toml")).unwrap();
+        let mut preset = cfg.preset[0].clone();
+        preset.host = Some("127.0.0.1".into());
+        preset.port = Some(server.port);
+        preset.known_hosts = Some(server.known_hosts.display().to_string());
+        preset.timeout_seconds = Some(10);
+        (exec, approval, preset, dir)
+    }
+
+    fn params(v: serde_json::Value) -> BTreeMap<String, Value> {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[tokio::test]
+    async fn ssh_run_sends_exactly_the_rendered_command() {
+        let server = TestSshServer::start(Behaviour::Echo).await;
+        let (exec, approval, preset, _dir) = named_against(&server, ApprovalDecision::Approved);
+        let out = run_named(
+            &exec,
+            &preset,
+            "trash_file",
+            &params(serde_json::json!({"path": "/srv/app/uploads/a.png"})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            out.stdout,
+            "ran: mv /srv/app/uploads/a.png /srv/app/.trash/\n"
+        );
+        assert_eq!(
+            *server.commands.lock().unwrap(),
+            ["mv /srv/app/uploads/a.png /srv/app/.trash/"]
+        );
+        // The prompt names the command and shows the full command line.
+        let shown = approval.shown.lock().unwrap();
+        assert_eq!(shown[0].action, "ssh_run:trash_file");
+        assert!(
+            shown[0]
+                .summary
+                .contains("deploy.trash_file: ssh 127.0.0.1 -- mv /srv/app/uploads/a.png"),
+            "{}",
+            shown[0].summary
+        );
+    }
+
+    /// Refused values never reach the host, the approval prompt or the
+    /// keychain.
+    #[tokio::test]
+    async fn a_refused_value_reads_no_key_and_asks_nothing() {
+        let server = TestSshServer::start(Behaviour::Echo).await;
+        let (exec, approval, preset, _dir) = named_against(&server, ApprovalDecision::Approved);
+        let err = run_named(
+            &exec,
+            &preset,
+            "checkout",
+            &params(serde_json::json!({"tag": "v1.2.3 --upload-pack=/tmp/x"})),
+        )
+        .await
+        .unwrap_err();
+        assert!(err.to_string().contains("parameter 'tag'"), "{err}");
+        assert_eq!(approval.calls(), 0);
+        assert!(server.commands.lock().unwrap().is_empty());
+        let events = exec.audit.recent(5).unwrap();
+        assert_eq!(events[0].action, "ssh_run");
+        assert_eq!(
+            events[0].decision,
+            Some(mcp_warden_core::audit::AuditDecision::Refused)
+        );
+    }
+
+    /// A window approved for one command does not cover another.
+    #[tokio::test]
+    async fn an_approval_window_covers_one_command() {
+        let server = TestSshServer::start(Behaviour::Echo).await;
+        let (exec, approval, preset, _dir) =
+            named_against(&server, ApprovalDecision::ApprovedForWindow);
+        let restart = params(serde_json::json!({"unit": "app.service"}));
+        let lines = params(serde_json::json!({"lines": 5}));
+        run_named(&exec, &preset, "restart", &restart)
+            .await
+            .unwrap();
+        run_named(&exec, &preset, "restart", &restart)
+            .await
+            .unwrap();
+        assert_eq!(approval.calls(), 1, "the window covers restart");
+        run_named(&exec, &preset, "tail_log", &lines).await.unwrap();
+        assert_eq!(approval.calls(), 2, "tail_log asks for itself");
+    }
+
+    #[tokio::test]
+    async fn a_command_policy_applies_to_that_command() {
+        let server = TestSshServer::start(Behaviour::Echo).await;
+        let (exec, approval, mut preset, _dir) = named_against(&server, ApprovalDecision::Approved);
+        preset.commands[0].approval = Some(ApprovalPolicy::Auto);
+        preset.commands[1].approval = Some(ApprovalPolicy::Deny);
+        run_named(
+            &exec,
+            &preset,
+            "tail_log",
+            &params(serde_json::json!({"lines": 5})),
+        )
+        .await
+        .unwrap();
+        assert_eq!(approval.calls(), 0, "auto runs without a prompt");
+        let err = run_named(
+            &exec,
+            &preset,
+            "restart",
+            &params(serde_json::json!({"unit": "app.service"})),
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, WardenError::ApprovalDenied), "{err}");
+        assert_eq!(server.commands.lock().unwrap().len(), 1);
     }
 
     /// A hostile or broken host that never stops writing must not fill
