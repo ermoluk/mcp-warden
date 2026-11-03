@@ -43,7 +43,24 @@ static KNOWN: LazyLock<Vec<(&'static str, &'static str, Regex)>> = LazyLock::new
         ("OpenAI API key", "sk-", r"sk-(?:proj-)?[A-Za-z0-9_\-]{20,}"),
         ("Slack token", "xox?-", r"xox[abprs]-[A-Za-z0-9\-]{10,}"),
         ("AWS access key id", "AKIA", r"AKIA[0-9A-Z]{16}"),
+        // Temporary credentials from STS; they come with a session token.
+        ("AWS access key id", "ASIA", r"ASIA[0-9A-Z]{16}"),
         ("Google API key", "AIza", r"AIza[0-9A-Za-z_\-]{35}"),
+        (
+            "Google OAuth client secret",
+            "GOCSPX-",
+            r"GOCSPX-[A-Za-z0-9_\-]{28}",
+        ),
+        (
+            "Google OAuth refresh token",
+            "1//0",
+            r"1//0[A-Za-z0-9_\-]{40,}",
+        ),
+        (
+            "Google OAuth access token",
+            "ya29.",
+            r"ya29\.[A-Za-z0-9_\-]{20,}",
+        ),
         ("Linear API key", "lin_api_", r"lin_api_[A-Za-z0-9]{20,}"),
         ("Notion token", "ntn_", r"(?:ntn_|secret_)[A-Za-z0-9]{20,}"),
         ("npm token", "npm_", r"npm_[A-Za-z0-9]{36}"),
@@ -188,6 +205,26 @@ pub(crate) mod tests {
             (fake(&["lin", "_api_"].concat(), 30), "Linear API key"),
             (fake(&["nt", "n_"].concat(), 30), "Notion token"),
             (fake(&["hf", "_"].concat(), 34), "Hugging Face token"),
+            (
+                fake(&["AK", "IA"].concat(), 16).to_uppercase(),
+                "AWS access key id",
+            ),
+            (
+                fake(&["AS", "IA"].concat(), 16).to_uppercase(),
+                "AWS access key id",
+            ),
+            (
+                fake(&["GOC", "SPX-"].concat(), 28),
+                "Google OAuth client secret",
+            ),
+            (
+                fake(&["1/", "/0"].concat(), 60),
+                "Google OAuth refresh token",
+            ),
+            (
+                fake(&["ya", "29."].concat(), 80),
+                "Google OAuth access token",
+            ),
         ];
         for (value, want) in &cases {
             let d = detect(Some("ANY"), value).unwrap_or_else(|| panic!("{want}"));

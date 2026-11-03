@@ -21,6 +21,11 @@ pub enum Request<'a> {
     Ssh {
         command: &'a str,
     },
+    /// `ssh_run`: a named command and its parameter values.
+    SshRun {
+        command: &'a str,
+        params: &'a BTreeMap<String, Value>,
+    },
     Sftp {
         remote: &'a str,
         local: &'a str,
@@ -47,6 +52,7 @@ impl<'a> Request<'a> {
         match self {
             Request::Http { .. } => "proxy_http",
             Request::Ssh { .. } => "ssh_exec",
+            Request::SshRun { .. } => "ssh_run",
             Request::Sftp { .. } => "sftp_transfer",
             Request::Db { .. } => "db_query",
         }
@@ -56,7 +62,7 @@ impl<'a> Request<'a> {
     fn needs(&self) -> &'static str {
         match self {
             Request::Http { .. } => "http",
-            Request::Ssh { .. } | Request::Sftp { .. } => "ssh",
+            Request::Ssh { .. } | Request::SshRun { .. } | Request::Sftp { .. } => "ssh",
             Request::Db { .. } => "database (postgres / mysql / redis)",
         }
     }
@@ -64,7 +70,9 @@ impl<'a> Request<'a> {
     fn fits(&self, kind: PresetType) -> bool {
         match self {
             Request::Http { .. } => kind == PresetType::Http,
-            Request::Ssh { .. } | Request::Sftp { .. } => kind == PresetType::Ssh,
+            Request::Ssh { .. } | Request::SshRun { .. } | Request::Sftp { .. } => {
+                kind == PresetType::Ssh
+            }
             Request::Db { .. } => matches!(
                 kind,
                 PresetType::Postgres | PresetType::Mysql | PresetType::Redis
@@ -94,9 +102,13 @@ pub fn check_request(preset: &Preset, req: &Request) -> Result<()> {
             body,
         } => {
             super::http::validated_url(preset, &method.to_uppercase(), path)?;
-            super::http::check_query_and_body_keys(query, body)
+            super::http::check_query_and_body_keys(query, body)?;
+            super::http::check_auth_query_name(preset, query)
         }
         Request::Ssh { command } => super::ssh::validate_command(preset, command),
+        Request::SshRun { command, params } => {
+            mcp_warden_core::commands::render(preset, command, params).map(drop)
+        }
         Request::Sftp { remote, local } => super::sftp::validate_transfer(preset, remote, local),
         Request::Db { query, params } => {
             super::db::find_query(preset, query, params.len()).map(drop)
@@ -135,7 +147,19 @@ pub fn simulate(preset: &Preset, req: &Request, now: DateTime<Utc>) -> Verdict {
     if let Err(e) = check_expiry(preset, now).and_then(|()| check_request(preset, req)) {
         return Verdict::Refused(e.to_string());
     }
-    match preset.approval {
+    let policy = match *req {
+        Request::SshRun { command, params } => {
+            match mcp_warden_core::commands::render(preset, command, params) {
+                Ok(r) => r.approval,
+                Err(e) => return Verdict::Refused(e.to_string()),
+            }
+        }
+        _ => preset.approval,
+    };
+    match policy {
+        ApprovalPolicy::Deny if preset.approval != ApprovalPolicy::Deny => {
+            Verdict::Refused("command policy is deny".into())
+        }
         ApprovalPolicy::Deny => Verdict::Refused("preset policy is deny".into()),
         ApprovalPolicy::Auto => Verdict::Allowed {
             policy: ApprovalPolicy::Auto,
@@ -359,6 +383,107 @@ mod tests {
         }
     }
 
+    fn named() -> Preset {
+        let cfg: mcp_warden_core::config::Config =
+            toml::from_str(include_str!("../../tests/fixtures/named_commands.toml")).unwrap();
+        cfg.preset[0].clone()
+    }
+
+    fn params(v: Value) -> BTreeMap<String, Value> {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn ssh_run_renders_through_the_same_check() {
+        let p = named();
+        let ok = params(serde_json::json!({"lines": 50}));
+        let req = Request::SshRun {
+            command: "tail_log",
+            params: &ok,
+        };
+        assert_eq!(req.tool(), "ssh_run");
+        check_request(&p, &req).unwrap();
+        let bad = params(serde_json::json!({"lines": "50 ; id"}));
+        let req = Request::SshRun {
+            command: "tail_log",
+            params: &bad,
+        };
+        assert!(check_request(&p, &req).is_err());
+        // Only SSH presets run commands.
+        let req = Request::SshRun {
+            command: "tail_log",
+            params: &ok,
+        };
+        let err = check_request(&http(ApprovalPolicy::Prompt), &req)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ssh_run needs one"), "{err}");
+    }
+
+    #[test]
+    fn ssh_run_limits_come_first() {
+        let p = named();
+        let many = params(serde_json::Value::Object(
+            (0..17)
+                .map(|i| (format!("p{i}"), serde_json::json!(1)))
+                .collect(),
+        ));
+        let req = Request::SshRun {
+            command: "tail_log",
+            params: &many,
+        };
+        let err = check_request(&p, &req).unwrap_err().to_string();
+        assert!(err.contains("the limit is 16 parameters"), "{err}");
+        let long = params(serde_json::json!({"lines": "1".repeat(300)}));
+        let req = Request::SshRun {
+            command: "tail_log",
+            params: &long,
+        };
+        let err = check_request(&p, &req).unwrap_err().to_string();
+        assert!(err.contains("over the limit of 256 bytes"), "{err}");
+    }
+
+    #[test]
+    fn simulate_uses_the_command_policy() {
+        let mut p = named();
+        p.commands[0].approval = Some(ApprovalPolicy::Auto);
+        p.commands[1].approval = Some(ApprovalPolicy::Deny);
+        let lines = params(serde_json::json!({"lines": 5}));
+        let unit = params(serde_json::json!({"unit": "app.service"}));
+        let tail = Request::SshRun {
+            command: "tail_log",
+            params: &lines,
+        };
+        let restart = Request::SshRun {
+            command: "restart",
+            params: &unit,
+        };
+        assert_eq!(
+            simulate(&p, &tail, Utc::now()),
+            Verdict::Allowed {
+                policy: ApprovalPolicy::Auto,
+                window_seconds: None
+            }
+        );
+        assert_eq!(
+            simulate(&p, &restart, Utc::now()),
+            Verdict::Refused("command policy is deny".into())
+        );
+        p.commands[1].approval = None;
+        assert_eq!(
+            simulate(&p, &restart, Utc::now()),
+            Verdict::Allowed {
+                policy: ApprovalPolicy::Prompt,
+                window_seconds: Some(600)
+            }
+        );
+        p.approval = ApprovalPolicy::Deny;
+        assert_eq!(
+            simulate(&p, &tail, Utc::now()),
+            Verdict::Refused("preset policy is deny".into())
+        );
+    }
+
     // -------- hostile-input corpus --------
 
     /// Every entry of `text` must be refused for `preset`; returns how many
@@ -396,6 +521,93 @@ mod tests {
             |path| Request::http("GET", path),
         );
         assert!(n >= 50, "only {n} entries in tests/corpus/paths.txt");
+    }
+
+    /// A preset whose parameters accept anything their type allows, for the
+    /// named-command corpus.
+    fn wide_named() -> Preset {
+        toml::from_str(
+            r#"
+            name = "wide"
+            type = "ssh"
+            description = "x"
+            host = "example.com"
+            user = "deploy"
+            secret = "deploy_key"
+            approval = "prompt"
+            [[commands]]
+            name = "word"
+            description = "x"
+            template = "echo {v}"
+            params.v = { type = "string", pattern = ".*" }
+            [[commands]]
+            name = "path"
+            description = "x"
+            template = "cat {v}"
+            params.v = { type = "path", pattern = ".*" }
+            [[commands]]
+            name = "num"
+            description = "x"
+            template = "head -n {v} f"
+            params.v = { type = "int", min = 0, max = 9223372036854775807 }
+            [[commands]]
+            name = "opt"
+            description = "x"
+            template = "ls --color={v}"
+            params.v = { type = "enum", values = ["auto", "never"] }
+            "#,
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn hostile_corpus_named_commands_are_refused_whatever_the_patterns() {
+        let wide = wide_named();
+        mcp_warden_core::commands::validate_preset(&wide).unwrap();
+        for (command, ok) in [
+            ("word", r#"{"v":"a.b-c"}"#),
+            ("path", r#"{"v":"/srv/app/x"}"#),
+            ("num", r#"{"v":"9223372036854775807"}"#),
+            ("opt", r#"{"v":"never"}"#),
+        ] {
+            let params: BTreeMap<String, Value> = serde_json::from_str(ok).unwrap();
+            check_request(
+                &wide,
+                &Request::SshRun {
+                    command,
+                    params: &params,
+                },
+            )
+            .unwrap();
+        }
+        let file = "tests/corpus/named-commands.txt";
+        let entries =
+            crate::testutil::corpus(include_str!("../../tests/corpus/named-commands.txt"));
+        let allowed: Vec<String> = entries
+            .iter()
+            .filter(|(line, input, _)| {
+                let (command, json) = input
+                    .split_once(' ')
+                    .unwrap_or_else(|| panic!("{file}:{line}: no params"));
+                let params: BTreeMap<String, Value> =
+                    serde_json::from_str(json).unwrap_or_else(|e| panic!("{file}:{line}: {e}"));
+                check_request(
+                    &wide,
+                    &Request::SshRun {
+                        command,
+                        params: &params,
+                    },
+                )
+                .is_ok()
+            })
+            .map(|(line, input, note)| format!("  {file}:{line}: {input:?} — {note}"))
+            .collect();
+        assert!(allowed.is_empty(), "allowed:\n{}", allowed.join("\n"));
+        assert!(
+            entries.len() >= 60,
+            "only {} entries in {file}",
+            entries.len()
+        );
     }
 
     #[test]

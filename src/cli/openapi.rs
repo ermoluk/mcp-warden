@@ -201,6 +201,9 @@ fn build_preset(api: OpenAPI, opts: FromOpenapiOptions<'_>) -> Result<Bootstrapp
         max_response_bytes: None,
         response_fields: vec![],
         allowed_local_paths: vec![],
+        max_output_bytes: None,
+        expose_as_tools: false,
+        commands: vec![],
     };
     Ok(Bootstrapped {
         spec_title: api.info.title,
@@ -250,15 +253,23 @@ fn pick_auth(api: &OpenAPI, secret_name: Option<&str>) -> Option<Auth> {
             SecurityScheme::HTTP { scheme: s, .. } if s.eq_ignore_ascii_case("bearer") => {
                 return Some(Auth::Bearer { secret });
             }
-            SecurityScheme::APIKey { name, location, .. } => {
-                if matches!(location, openapiv3::APIKeyLocation::Header) {
+            SecurityScheme::APIKey { name, location, .. } => match location {
+                openapiv3::APIKeyLocation::Header => {
                     return Some(Auth::Header {
                         name: name.clone(),
                         secret,
                         prefix: None,
                     });
                 }
-            }
+                openapiv3::APIKeyLocation::Query => {
+                    return Some(Auth::Query {
+                        name: name.clone(),
+                        secret,
+                    });
+                }
+                // A cookie key has no auth kind of its own.
+                openapiv3::APIKeyLocation::Cookie => {}
+            },
             _ => {}
         }
     }
@@ -345,6 +356,33 @@ mod tests {
         match b.preset.auth.as_ref().unwrap() {
             Auth::Bearer { secret } => assert_eq!(secret, "api_token"),
             _ => panic!("expected Bearer"),
+        }
+    }
+
+    #[test]
+    fn an_api_key_in_the_query_becomes_query_auth() {
+        let spec = r#"
+openapi: 3.0.0
+info: { title: Maps, version: "1" }
+servers: [{ url: "https://maps.example.com" }]
+paths:
+  /geocode:
+    get: { responses: { "200": { description: ok } } }
+components:
+  securitySchemes:
+    key:
+      type: apiKey
+      in: query
+      name: key
+"#;
+        let api = parse_spec(spec.as_bytes(), "maps.yaml").unwrap();
+        let b = build_preset(api, opts()).unwrap();
+        match b.preset.auth.as_ref().unwrap() {
+            Auth::Query { name, secret } => {
+                assert_eq!(name, "key");
+                assert_eq!(secret, "api_token");
+            }
+            other => panic!("expected query auth, got {other:?}"),
         }
     }
 

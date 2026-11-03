@@ -1,9 +1,11 @@
-use clap::{Args, ValueEnum};
+use clap::{Args, Subcommand, ValueEnum};
 use mcp_warden_core::approval::sanitise_for_prompt;
+use mcp_warden_core::audit::anchor::{self, AnchorCheck};
 use mcp_warden_core::audit::{
     AuditDecision, AuditFilter, AuditOutcome, AuditSink, clip, sqlite_sink::LocalSqlite,
 };
 use mcp_warden_core::error::{Result, WardenError};
+use mcp_warden_core::keychain::KeychainStore;
 use std::path::Path;
 
 const PRESET_WIDTH: usize = 40;
@@ -13,7 +15,10 @@ const CLIENT_WIDTH: usize = 40;
 const MESSAGE_WIDTH: usize = 120;
 
 #[derive(Debug, Args)]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct AuditArgs {
+    #[command(subcommand)]
+    pub cmd: Option<AuditCmd>,
     /// Number of recent events to display.
     #[arg(long, default_value = "20")]
     pub last: usize,
@@ -27,6 +32,17 @@ pub struct AuditArgs {
     /// oldest first.
     #[arg(long, value_name = "N", conflicts_with_all = ["since", "last"])]
     pub window: Option<i64>,
+}
+
+#[derive(Debug, Subcommand)]
+pub enum AuditCmd {
+    /// Check the audit log's hash chain, and the log against its anchor in
+    /// the keychain. Exits 1 if anything does not hold.
+    Verify {
+        /// `text` or `json`.
+        #[arg(long, default_value = "text")]
+        format: String,
+    },
 }
 
 /// `AuditDecision`, as typed on the command line.
@@ -55,7 +71,15 @@ impl From<Decision> for AuditDecision {
     }
 }
 
-pub fn run(args: AuditArgs, db_path: &Path) -> Result<()> {
+pub fn run(
+    args: AuditArgs,
+    db_path: &Path,
+    kc: &dyn KeychainStore,
+    config_dir: &Path,
+) -> Result<()> {
+    if let Some(AuditCmd::Verify { format }) = args.cmd {
+        return verify(&format, db_path, kc, config_dir);
+    }
     if !db_path.exists() {
         println!("(no events)");
         return Ok(());
@@ -120,9 +144,102 @@ pub fn run(args: AuditArgs, db_path: &Path) -> Result<()> {
     Ok(())
 }
 
+/// `mcp-warden audit verify`: the chain, then the anchor. A log that holds
+/// moves the anchor up to its tip.
+fn verify(format: &str, db_path: &Path, kc: &dyn KeychainStore, config_dir: &Path) -> Result<()> {
+    if !db_path.exists() {
+        let anchored = anchor::read(kc, db_path)?;
+        let (ok, text) = match &anchored {
+            Some(a) => (
+                false,
+                format!(
+                    "the audit log is missing, but its anchor names record {}: it was deleted",
+                    a.seq
+                ),
+            ),
+            None => (true, "no audit log yet".to_string()),
+        };
+        let problems: Vec<&str> = if ok { vec![] } else { vec![&text] };
+        let json = serde_json::json!({ "intact": ok, "problems": problems });
+        print_verdict(format, &json, &text);
+        return finish(ok);
+    }
+    let sink = LocalSqlite::open(db_path)?;
+    let report = sink.verify_chain()?;
+    let check = anchor::check(kc, &sink, db_path)?;
+    let anchor_holds = check.holds();
+    let ok = report.intact() && anchor_holds;
+    let anchor_text = match check {
+        AnchorCheck::NotAnchored => "not anchored yet (a new log, or the keychain lost the \
+                                     anchor)"
+            .to_string(),
+        AnchorCheck::Anchored { seq, later: 0 } => format!("anchored through record {seq}"),
+        AnchorCheck::Anchored { seq, later } => format!(
+            "anchored through record {seq}; {later} later record(s) are covered by the chain \
+             only"
+        ),
+        AnchorCheck::Removed { seq } => format!(
+            "records up to {seq} were anchored but are gone: the log was cut short, rolled back \
+             or replaced"
+        ),
+        AnchorCheck::Rewritten { seq } => {
+            format!("the log was rewritten: record {seq} no longer has its anchored hash")
+        }
+    };
+    // A log that holds moves its anchor to the tip.
+    if ok {
+        anchor::advance(kc, &sink, db_path, Some(&config_dir.join("locks")))?;
+    }
+    let mut text = if report.intact() {
+        format!("chain:  intact, {} records", report.records)
+    } else {
+        "chain:  BROKEN".to_string()
+    };
+    if report.legacy_rows > 0 {
+        text.push_str(&format!(
+            " ({} events from before 0.6.0 are not chained)",
+            report.legacy_rows
+        ));
+    }
+    for p in &report.problems {
+        text.push_str(&format!("\n  - {}", for_terminal(p, 300)));
+    }
+    if report.more_problems {
+        text.push_str("\n  - … and more");
+    }
+    text.push_str(&format!("\nanchor: {anchor_text}"));
+    let json = serde_json::json!({
+        "intact": ok,
+        "records": report.records,
+        "legacy_rows": report.legacy_rows,
+        "problems": report.problems,
+        "more_problems": report.more_problems,
+        "anchor": anchor_text,
+        "anchor_holds": anchor_holds,
+    });
+    print_verdict(format, &json, &text);
+    finish(ok)
+}
+
+fn print_verdict(format: &str, json: &serde_json::Value, text: &str) {
+    if format == "json" {
+        println!("{json}");
+    } else {
+        println!("{text}");
+    }
+}
+
+/// The verdict is the output; exit 1 so scripts can branch on it.
+fn finish(ok: bool) -> Result<()> {
+    if !ok {
+        std::process::exit(1);
+    }
+    Ok(())
+}
+
 /// Preset names, summaries and errors can be agent-supplied (refused calls
 /// record them verbatim): strip control characters so they cannot drive the
 /// terminal, and cap the width so one event stays one readable line.
-fn for_terminal(s: &str, max_chars: usize) -> String {
+pub(crate) fn for_terminal(s: &str, max_chars: usize) -> String {
     clip(&sanitise_for_prompt(s, usize::MAX), max_chars)
 }

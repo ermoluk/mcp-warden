@@ -3,8 +3,8 @@
 //! including hostile ones (endless output, hanging after authentication).
 
 use russh::keys::ssh_key::private::Ed25519Keypair;
-use russh::keys::ssh_key::{self, LineEnding, PrivateKey};
-use russh::server::{Auth, Config, Handler, Msg, Session};
+use russh::keys::ssh_key::{LineEnding, PrivateKey};
+use russh::server::{Auth, ChannelOpenHandle, Config, Handler, Msg, Session, VerifiedPublicKey};
 use russh::{Channel, ChannelId};
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
@@ -27,6 +27,9 @@ pub struct TestSshServer {
     pub client_key: String,
     /// Commands the server was asked to run.
     pub commands: Arc<Mutex<Vec<String>>>,
+    /// The signature algorithm of each accepted client key
+    /// (`ssh-ed25519`, `rsa-sha2-256`, …).
+    pub client_algorithms: Arc<Mutex<Vec<String>>>,
     _dir: tempfile::TempDir,
 }
 
@@ -36,10 +39,22 @@ fn fresh_key() -> PrivateKey {
     PrivateKey::from(Ed25519Keypair::from_seed(&seed))
 }
 
+/// A fresh RSA key. 2048 bits, like the smallest key OpenSSH accepts; slow
+/// to generate in a debug build, so only the RSA tests use it.
+pub fn fresh_rsa_key() -> PrivateKey {
+    use getrandom_sys_rng::{SysRng, rand_core::UnwrapErr};
+    use russh::keys::ssh_key::private::RsaKeypair;
+    PrivateKey::from(RsaKeypair::random(&mut UnwrapErr(SysRng), 2048).unwrap())
+}
+
 impl TestSshServer {
     pub async fn start(behaviour: Behaviour) -> Self {
+        Self::start_with_client_key(behaviour, fresh_key()).await
+    }
+
+    /// Like [`Self::start`], with the client key the test chooses.
+    pub async fn start_with_client_key(behaviour: Behaviour, client: PrivateKey) -> Self {
         let host_key = fresh_key();
-        let client = fresh_key();
         let config = Arc::new(Config {
             keys: vec![host_key.clone()],
             auth_rejection_time: Duration::ZERO,
@@ -50,12 +65,15 @@ impl TestSshServer {
         let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
         let port = listener.local_addr().unwrap().port();
         let commands = Arc::new(Mutex::new(Vec::new()));
+        let client_algorithms = Arc::new(Mutex::new(Vec::new()));
         let seen = commands.clone();
+        let algorithms = client_algorithms.clone();
         tokio::spawn(async move {
             while let Ok((stream, _)) = listener.accept().await {
                 let handler = TestHandler {
                     behaviour,
                     commands: seen.clone(),
+                    client_algorithms: algorithms.clone(),
                 };
                 let config = config.clone();
                 tokio::spawn(async move {
@@ -80,6 +98,7 @@ impl TestSshServer {
             known_hosts,
             client_key: client.to_openssh(LineEnding::LF).unwrap().to_string(),
             commands,
+            client_algorithms,
             _dir: dir,
         }
     }
@@ -88,6 +107,7 @@ impl TestSshServer {
 struct TestHandler {
     behaviour: Behaviour,
     commands: Arc<Mutex<Vec<String>>>,
+    client_algorithms: Arc<Mutex<Vec<String>>>,
 }
 
 impl Handler for TestHandler {
@@ -96,20 +116,26 @@ impl Handler for TestHandler {
     async fn auth_publickey(
         &mut self,
         _user: &str,
-        _key: &ssh_key::PublicKey,
+        key: VerifiedPublicKey<'_>,
     ) -> Result<Auth, Self::Error> {
+        self.client_algorithms
+            .lock()
+            .unwrap()
+            .push(key.algorithm.as_str().to_string());
         Ok(Auth::Accept)
     }
 
     async fn channel_open_session(
         &mut self,
         _channel: Channel<Msg>,
+        reply: ChannelOpenHandle,
         _session: &mut Session,
-    ) -> Result<bool, Self::Error> {
+    ) -> Result<(), Self::Error> {
         if let Behaviour::HangAfterAuth = self.behaviour {
             std::future::pending::<()>().await;
         }
-        Ok(true)
+        reply.accept().await;
+        Ok(())
     }
 
     async fn exec_request(

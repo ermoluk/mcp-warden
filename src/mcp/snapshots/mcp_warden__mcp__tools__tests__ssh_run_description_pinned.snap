@@ -1,0 +1,5 @@
+---
+source: src/mcp/tools.rs
+expression: SSH_RUN_DESCRIPTION
+---
+Run one of an SSH preset's named commands. You supply `command` (a name the preset declares; `list_presets` shows each command, what it does and its parameters) and `params` (values by name). The command line is FIXED in the preset: each value fills one placeholder, checked by its type (a string or path against a pattern, an int within a range, an enum from a list) BEFORE any credential is read. Values are single words without spaces or shell syntax and may not start with `-`. Returns stdout, stderr and exit_code. Host key verified against known_hosts. The approval prompt shows the full command. If the user previously approved a time-boxed window for this command, the call proceeds without a new prompt and is recorded as 'windowed' in the audit log. Every call is recorded to the audit log.

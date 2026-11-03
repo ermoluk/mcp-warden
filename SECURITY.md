@@ -34,3 +34,9 @@ permissions a preset legitimately grants.
 ## Supported versions
 
 Only the latest release receives security fixes.
+
+## Audit reports
+
+- [November 2026](docs/security/security-audit-2026-11.md): the audit that
+  shipped as 0.5.4, with its method, input inventory, findings, fuzzing
+  results and the risks that remain.

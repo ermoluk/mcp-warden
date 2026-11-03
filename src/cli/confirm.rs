@@ -10,7 +10,7 @@
 use crate::executor::ActionExecutor;
 use mcp_warden_core::audit::AuditOutcome;
 use mcp_warden_core::audit::sqlite_sink::LocalSqlite;
-use mcp_warden_core::config::{ApprovalPolicy, Auth, Config, Preset, WrappedServer};
+use mcp_warden_core::config::{ApprovalPolicy, Config, Preset, WrappedServer};
 use mcp_warden_core::error::{Result, WardenError};
 use mcp_warden_core::keychain::KeychainStore;
 use mcp_warden_core::stamp::{self, Confirmation};
@@ -97,7 +97,7 @@ pub async fn confirm_cmd(
     let wanted: Vec<&Preset> = if names.is_empty() {
         cfg.preset
             .iter()
-            .filter(|p| p.approval == ApprovalPolicy::Auto && !is_confirmed(store.as_ref(), p))
+            .filter(|p| p.has_auto() && !is_confirmed(store.as_ref(), p))
             .collect()
     } else {
         names
@@ -136,10 +136,7 @@ pub async fn confirm_if_auto(
 ) -> Result<()> {
     let raw = std::fs::read_to_string(config_path).map_err(WardenError::Io)?;
     let cfg: Config = toml::from_str(&raw).map_err(|e| WardenError::Config(e.to_string()))?;
-    let Some(p) = cfg
-        .find(name)
-        .filter(|p| p.approval == ApprovalPolicy::Auto)
-    else {
+    let Some(p) = cfg.find(name).filter(|p| p.has_auto()) else {
         return Ok(());
     };
     let config_dir = config_path.parent().unwrap_or(Path::new("."));
@@ -170,13 +167,18 @@ fn describe(p: &Preset) -> String {
         ApprovalPolicy::Prompt => "prompt",
         ApprovalPolicy::Deny => "deny",
     };
-    let secret = match &p.auth {
-        Some(
-            Auth::Bearer { secret } | Auth::Header { secret, .. } | Auth::Basic { secret, .. },
-        ) => Some(secret.as_str()),
-        None => p.secret.as_deref(),
-    }
-    .unwrap_or("none");
+    let names = p.secret_names();
+    let secret = if names.is_empty() {
+        "none".to_string()
+    } else {
+        names.join(", ")
+    };
+    let token_via = match &p.auth {
+        Some(mcp_warden_core::config::Auth::Oauth2 { token_url, .. }) => {
+            format!(" (token from {token_url})")
+        }
+        _ => String::new(),
+    };
     let destination = p
         .base_url
         .clone()
@@ -197,8 +199,20 @@ fn describe(p: &Preset) -> String {
                 p.allowed_paths.join(", ")
             }
         )
-    } else if !p.allowed_commands.is_empty() {
-        p.allowed_commands.join(", ")
+    } else if !p.allowed_commands.is_empty() || !p.commands.is_empty() {
+        // Each named command with its own policy, if it has one: a command
+        // marked auto runs without a prompt once this is confirmed.
+        let named = p.commands.iter().map(|c| match c.approval {
+            Some(ApprovalPolicy::Auto) => format!("{} (auto)", c.template),
+            Some(ApprovalPolicy::Deny) => format!("{} (deny)", c.template),
+            _ => c.template.clone(),
+        });
+        p.allowed_commands
+            .iter()
+            .cloned()
+            .chain(named)
+            .collect::<Vec<_>>()
+            .join(", ")
     } else {
         p.queries
             .iter()
@@ -215,7 +229,7 @@ fn describe(p: &Preset) -> String {
             )
         })
         .unwrap_or_default();
-    format!("{policy}, secret {secret} → {destination}, allows {allows}{until}")
+    format!("{policy}, secret {secret} → {destination}{token_via}, allows {allows}{until}")
 }
 
 /// The prompt reads "confirm_preset → mcp-warden" / "confirm_server → mcp-warden".
@@ -280,6 +294,21 @@ mod tests {
             "Confirm preset 'gh': auto (no prompt), secret gh_pat → https://api.github.com, \
              allows GET /user/repos"
         );
+    }
+
+    #[test]
+    fn the_prompt_lists_named_commands_and_their_policies() {
+        let cfg: Config =
+            toml::from_str(include_str!("../../tests/fixtures/named_commands.toml")).unwrap();
+        let mut p = cfg.preset[0].clone();
+        p.commands[0].approval = Some(ApprovalPolicy::Auto);
+        let text = describe(&p);
+        assert!(
+            text.contains("journalctl -u app -n {lines} --no-pager (auto)"),
+            "{text}"
+        );
+        assert!(text.contains("mv {path} /srv/app/.trash/"), "{text}");
+        assert!(text.contains("warden-deploy@deploy.example.com"), "{text}");
     }
 
     #[tokio::test]

@@ -53,6 +53,31 @@ impl Harness {
             approval = "prompt"
 
             [[preset]]
+            name = "webq"
+            type = "http"
+            description = "web with a query-parameter key"
+            base_url = "{http}"
+            auth = {{ type = "query", name = "key", secret = "web_tok" }}
+            allowed_methods = ["GET", "POST"]
+            allowed_paths = [".*"]
+            approval = "prompt"
+
+            [[preset]]
+            name = "websig"
+            type = "http"
+            description = "web signed with SigV4"
+            base_url = "{http}"
+            allowed_methods = ["GET", "POST"]
+            allowed_paths = [".*"]
+            approval = "prompt"
+            [preset.auth]
+            type = "aws_sigv4"
+            region = "eu-central-1"
+            service = "execute-api"
+            access_key_id = "web_tok"
+            secret_access_key = "box_key"
+
+            [[preset]]
             name = "box"
             type = "ssh"
             description = "box"
@@ -64,6 +89,30 @@ impl Harness {
             allow_sftp = true
             sftp_allowed_paths = ["/srv/app/"]
             approval = "prompt"
+
+            [[preset.commands]]
+            name = "word"
+            description = "x"
+            template = "echo {{v}}"
+            params.v = {{ type = "string", pattern = ".*" }}
+
+            [[preset.commands]]
+            name = "path"
+            description = "x"
+            template = "cat {{v}}"
+            params.v = {{ type = "path", pattern = ".*" }}
+
+            [[preset.commands]]
+            name = "num"
+            description = "x"
+            template = "head -n {{v}} f"
+            params.v = {{ type = "int", min = 0, max = 9223372036854775807 }}
+
+            [[preset.commands]]
+            name = "opt"
+            description = "x"
+            template = "ls --color={{v}}"
+            params.v = {{ type = "enum", values = ["auto", "never"] }}
 
             [[preset]]
             name = "pg"
@@ -117,12 +166,23 @@ impl Harness {
     }
 
     pub async fn http(&self, method: &str, path: &str, query: Option<Value>, body: Option<Value>) {
+        self.http_via("web", method, path, query, body).await
+    }
+
+    pub async fn http_via(
+        &self,
+        preset: &str,
+        method: &str,
+        path: &str,
+        query: Option<Value>,
+        body: Option<Value>,
+    ) {
         let query: Option<BTreeMap<String, String>> =
             query.map(|q| serde_json::from_value(q).unwrap());
         let res = self
             .server
             .proxy_http(Parameters(ProxyHttpArgs {
-                preset_name: "web".into(),
+                preset_name: preset.into(),
                 path: path.into(),
                 method: method.into(),
                 body,
@@ -141,6 +201,18 @@ impl Harness {
             }))
             .await;
         assert!(res.is_err(), "ssh_exec {command:?} was allowed");
+    }
+
+    pub async fn ssh_run(&self, command: &str, params: BTreeMap<String, Value>) {
+        let res = self
+            .server
+            .ssh_run(Parameters(SshRunArgs {
+                preset_name: "box".into(),
+                command: command.into(),
+                params,
+            }))
+            .await;
+        assert!(res.is_err(), "ssh_run {command:?} was allowed");
     }
 
     pub async fn sftp(&self, direction: &str, remote: &str, local: &str) {
@@ -218,6 +290,37 @@ async fn corpus_query_keys_are_refused_before_anything_is_touched() {
     h.assert_all_refused_untouched(entries.len() + 1).await;
 }
 
+/// A SigV4 preset: refused calls read no key and sign nothing.
+#[tokio::test]
+async fn sigv4_presets_refuse_before_signing() {
+    let h = Harness::wide_open().await;
+    let paths = corpus(include_str!("../../tests/corpus/paths.txt"));
+    for (_, path, _) in &paths {
+        h.http_via("websig", "GET", path, None, None).await;
+    }
+    h.http_via("websig", "DELETE", "/x", None, None).await;
+    h.assert_all_refused_untouched(paths.len() + 1).await;
+}
+
+/// A preset that sends its key as a query parameter: the hostile query keys
+/// are refused there too, and so is any spelling of the key's own name.
+#[tokio::test]
+async fn query_auth_presets_refuse_the_same_keys_and_their_own_name() {
+    let h = Harness::wide_open().await;
+    let entries = corpus(include_str!("../../tests/corpus/queries.txt"));
+    for (_, key, _) in &entries {
+        h.http_via("webq", "POST", "/x", Some(json!({ key: "DELETE" })), None)
+            .await;
+    }
+    let names = ["key", "KEY", "Key", " key ", "key[]", "Key[0]"];
+    for name in names {
+        h.http_via("webq", "GET", "/x", Some(json!({ name: "mine" })), None)
+            .await;
+    }
+    h.assert_all_refused_untouched(entries.len() + names.len())
+        .await;
+}
+
 #[tokio::test]
 async fn corpus_commands_are_refused_before_anything_is_touched() {
     let h = Harness::wide_open().await;
@@ -226,6 +329,51 @@ async fn corpus_commands_are_refused_before_anything_is_touched() {
         h.ssh(command).await;
     }
     h.assert_all_refused_untouched(entries.len()).await;
+}
+
+#[tokio::test]
+async fn corpus_named_commands_are_refused_before_anything_is_touched() {
+    let h = Harness::wide_open().await;
+    let entries = corpus(include_str!("../../tests/corpus/named-commands.txt"));
+    for (_, input, _) in &entries {
+        let (command, json) = input.split_once(' ').unwrap();
+        h.ssh_run(command, serde_json::from_str(json).unwrap())
+            .await;
+    }
+    // A preset that is not an SSH preset, and one that does not exist.
+    let res = h
+        .server
+        .ssh_run(Parameters(SshRunArgs {
+            preset_name: "web".into(),
+            command: "word".into(),
+            params: serde_json::from_value(json!({"v": "a"})).unwrap(),
+        }))
+        .await;
+    assert!(res.is_err());
+    let res = h
+        .server
+        .ssh_run(Parameters(SshRunArgs {
+            preset_name: "nope".into(),
+            command: "word".into(),
+            params: BTreeMap::new(),
+        }))
+        .await;
+    assert!(res.is_err());
+    h.assert_all_refused_untouched(entries.len() + 2).await;
+}
+
+/// JSON allows a key twice; serde keeps the last. The value checked is the
+/// value run, so a repeated key cannot smuggle anything past the check.
+#[tokio::test]
+async fn a_repeated_parameter_is_checked_as_the_value_used() {
+    let h = Harness::wide_open().await;
+    let args: SshRunArgs = serde_json::from_str(
+        r#"{"preset_name":"box","command":"word","params":{"v":"ok","v":"$(id)"}}"#,
+    )
+    .unwrap();
+    assert_eq!(args.params["v"], "$(id)");
+    assert!(h.server.ssh_run(Parameters(args)).await.is_err());
+    h.assert_all_refused_untouched(1).await;
 }
 
 #[tokio::test]

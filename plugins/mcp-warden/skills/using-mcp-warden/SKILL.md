@@ -55,7 +55,7 @@ If you receive **"approval denied"**, **"approval timeout"** or **"approval prom
 
 ## Other protocols (v0.2.0+)
 
-`mcp-warden` also exposes three more tools beyond `proxy_http`:
+`mcp-warden` also exposes more tools beyond `proxy_http`:
 
 ### `ssh_exec` — run a shell command on a remote host
 
@@ -65,6 +65,15 @@ args: { preset_name: "deploy-prod", command: "docker compose ps" }
 ```
 
 The command MUST match one of the preset's `allowed_commands` regex entries (anchored `^...$`). The server validates this BEFORE reading the SSH key. Returns `{stdout, stderr, exit_code}`. Auth is key-only; host key is verified against `~/.ssh/known_hosts`. **Do not** try to inject `;`, `&&`, `$()`, backticks — the validator rejects anything outside the allow-list. If the command you need isn't allowed, tell the user the exact `^pattern$` they'd need to add to the preset.
+
+### `ssh_run` — run one of a preset's named commands
+
+```
+tool: ssh_run
+args: { preset_name: "deploy", command: "tail_log", params: { "lines": 50 } }
+```
+
+Prefer this over `ssh_exec` when the preset has `commands` (`list_presets` shows each command, its template and what each parameter accepts). The command line is fixed in the preset; you only supply the values. Each value is one word: no spaces, no shell syntax, and never starting with `-`. Ints are plain decimal numbers in the listed range, enums must match a listed value exactly. If a preset also exposes its commands as tools (`ssh_<preset>_<command>`), calling those is the same thing. If no command does what you need, tell the user which command and parameters to add.
 
 ### `sftp_transfer` — get/put a file
 

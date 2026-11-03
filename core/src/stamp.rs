@@ -124,14 +124,20 @@ pub fn is_stamp_name(name: &str) -> bool {
     name.starts_with("stamp/")
 }
 
-/// Run every `auto` preset that no human confirmed in this exact form as
-/// `prompt` instead, and say why for each.
+/// Keychain names mcp-warden keeps for itself: stamps (`stamp/`) and the
+/// audit anchor (`audit/`). They are not secrets, the CLI never writes or
+/// removes them, and no preset, server or transport may use one: a preset
+/// naming one could send it upstream or reveal it to the agent, and
+/// overwriting one would forge a confirmation or move the anchor.
+pub fn is_reserved_name(name: &str) -> bool {
+    is_stamp_name(name) || name.starts_with("audit/")
+}
+
+/// Run every `auto` preset, and every `auto` named command, that no human
+/// confirmed in this exact form as `prompt` instead, and say why for each.
 pub fn demote_unconfirmed_auto(presets: &mut [Preset], kc: &dyn KeychainStore) -> Vec<String> {
     let mut warnings = Vec::new();
-    for p in presets
-        .iter_mut()
-        .filter(|p| p.approval == ApprovalPolicy::Auto)
-    {
+    for p in presets.iter_mut().filter(|p| p.has_auto()) {
         let state = check(kc, &preset_stamp_name(&p.name), &preset_fingerprint(p))
             .unwrap_or(Confirmation::Missing);
         let why = match state {
@@ -139,12 +145,36 @@ pub fn demote_unconfirmed_auto(presets: &mut [Preset], kc: &dyn KeychainStore) -
             Confirmation::Missing => "has not been confirmed",
             Confirmation::Changed => "changed since it was confirmed",
         };
+        let auto_commands: Vec<&str> = p
+            .commands
+            .iter()
+            .filter(|c| c.approval == Some(ApprovalPolicy::Auto))
+            .map(|c| c.name.as_str())
+            .collect();
+        let what = match (p.approval == ApprovalPolicy::Auto, auto_commands.as_slice()) {
+            (true, []) => "is approval = \"auto\"".to_string(),
+            (true, names) => format!(
+                "is approval = \"auto\" (and so are its commands {})",
+                names.join(", ")
+            ),
+            (false, names) => format!(
+                "has commands with approval = \"auto\" ({})",
+                names.join(", ")
+            ),
+        };
         warnings.push(format!(
-            "preset '{}' is approval = \"auto\" but {why}; every call asks for approval \
-             until you run `mcp-warden preset confirm {}`",
+            "preset '{}' {what} but {why}; every call asks for approval until you run \
+             `mcp-warden preset confirm {}`",
             p.name, p.name
         ));
-        p.approval = ApprovalPolicy::Prompt;
+        if p.approval == ApprovalPolicy::Auto {
+            p.approval = ApprovalPolicy::Prompt;
+        }
+        for c in &mut p.commands {
+            if c.approval == Some(ApprovalPolicy::Auto) {
+                c.approval = Some(ApprovalPolicy::Prompt);
+            }
+        }
     }
     warnings
 }
@@ -169,6 +199,66 @@ mod tests {
             "#
         ))
         .unwrap()
+    }
+
+    /// Presets in the form 0.5.4 confirmed them. A new `Preset` field must
+    /// stay out of the JSON while it is unset (`skip_serializing_if`), or
+    /// every confirmed `auto` preset turns back into `prompt` on upgrade.
+    /// If this test fails, an upgrade would void the users' stamps.
+    #[test]
+    fn fingerprints_of_existing_presets_do_not_change() {
+        let golden = [
+            (
+                r#"
+                name = "gh"
+                type = "http"
+                description = "GitHub"
+                base_url = "https://api.github.com"
+                auth = { type = "bearer", secret = "gh_pat" }
+                allowed_methods = ["GET"]
+                allowed_paths = ["/user/repos"]
+                approval = "auto"
+                approval_window_seconds = 600
+                "#,
+                "67b19399302294aa88ad6458e06630e3cb511cab958f193605d9d1688d7eb5a3",
+            ),
+            (
+                r#"
+                name = "deploy"
+                type = "ssh"
+                description = "Deploy host"
+                host = "deploy.example.com"
+                user = "warden"
+                secret = "deploy_key"
+                allowed_commands = ["git pull", "systemctl status [a-z0-9][a-z0-9_-]*"]
+                allow_sftp = true
+                sftp_allowed_paths = ["/srv/app/"]
+                approval = "auto"
+                "#,
+                "42eda74aabe84fc86a2951890465399df0ca1234a2619e7c4f2ce29cdfce22d1",
+            ),
+            (
+                r#"
+                name = "db"
+                type = "postgres"
+                description = "Reporting"
+                host = "db.internal"
+                user = "ro"
+                database = "app"
+                secret = "db_pw"
+                approval = "auto"
+                [[queries]]
+                name = "user_by_id"
+                template = "SELECT id, email FROM users WHERE id = $1"
+                param_types = ["int"]
+                "#,
+                "e7e66ecb73a4b4b206391cfa074ac8a624171be565a44a176217d796944cde4c",
+            ),
+        ];
+        for (toml_text, want) in golden {
+            let p: Preset = toml::from_str(toml_text).unwrap();
+            assert_eq!(preset_fingerprint(&p), want, "{}", p.name);
+        }
     }
 
     #[test]
@@ -289,5 +379,75 @@ mod tests {
         ] {
             assert_ne!(server_fingerprint(&other), base);
         }
+    }
+
+    fn with_auto_command(preset_policy: &str) -> Preset {
+        let cfg: crate::config::Config = toml::from_str(
+            &include_str!("../../tests/fixtures/named_commands.toml")
+                .replacen(
+                    "approval = \"prompt\"",
+                    &format!("approval = \"{preset_policy}\""),
+                    1,
+                )
+                .replacen(
+                    "max_output_bytes = 262144",
+                    "max_output_bytes = 262144\napproval = \"auto\"",
+                    1,
+                ),
+        )
+        .unwrap();
+        cfg.preset[0].clone()
+    }
+
+    /// An agent that can edit config.toml must not be able to make one
+    /// command of a `prompt` preset run without asking: a command's `auto`
+    /// needs a human's confirmation of the preset, like the preset's own.
+    #[test]
+    fn an_unconfirmed_auto_command_asks() {
+        let kc = InMemoryKeychain::new();
+        let p = with_auto_command("prompt");
+        assert!(p.has_auto());
+        assert_eq!(p.commands[0].approval, Some(ApprovalPolicy::Auto));
+
+        let mut presets = vec![p.clone()];
+        let warnings = demote_unconfirmed_auto(&mut presets, &kc);
+        assert_eq!(warnings.len(), 1, "{warnings:?}");
+        assert!(warnings[0].contains("tail_log"), "{warnings:?}");
+        assert_eq!(
+            presets[0].commands[0].approval,
+            Some(ApprovalPolicy::Prompt)
+        );
+        assert_eq!(presets[0].approval, ApprovalPolicy::Prompt);
+        assert!(!presets[0].has_auto());
+
+        // Confirmed in exactly this form, it stays auto.
+        record(&kc, &preset_stamp_name(&p.name), &preset_fingerprint(&p)).unwrap();
+        let mut presets = vec![p.clone()];
+        assert!(demote_unconfirmed_auto(&mut presets, &kc).is_empty());
+        assert_eq!(presets[0].commands[0].approval, Some(ApprovalPolicy::Auto));
+
+        // Any edit to a command voids the confirmation.
+        let mut edited = p.clone();
+        edited.commands[0].template = "journalctl -n {lines}".into();
+        let mut presets = vec![edited];
+        assert_eq!(demote_unconfirmed_auto(&mut presets, &kc).len(), 1);
+        assert_eq!(
+            presets[0].commands[0].approval,
+            Some(ApprovalPolicy::Prompt)
+        );
+    }
+
+    #[test]
+    fn an_unconfirmed_auto_preset_demotes_its_commands_too() {
+        let kc = InMemoryKeychain::new();
+        let mut presets = vec![with_auto_command("auto")];
+        assert_eq!(demote_unconfirmed_auto(&mut presets, &kc).len(), 1);
+        assert_eq!(presets[0].approval, ApprovalPolicy::Prompt);
+        assert_eq!(
+            presets[0].commands[0].approval,
+            Some(ApprovalPolicy::Prompt)
+        );
+        // Commands without their own policy follow the preset's.
+        assert_eq!(presets[0].commands[1].approval, None);
     }
 }

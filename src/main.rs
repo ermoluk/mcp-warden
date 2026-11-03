@@ -17,7 +17,7 @@ async fn main() -> anyhow::Result<()> {
         cli::Command::Init => cli::init::run(&config_dir)?,
         cli::Command::Secret { cmd } => cli::secret::run(cmd, store.as_ref())?,
         cli::Command::Preset { cmd } => cli::preset::run(cmd, &config_path, store).await?,
-        cli::Command::Audit(args) => cli::audit::run(args, &audit_db)?,
+        cli::Command::Audit(args) => cli::audit::run(args, &audit_db, store.as_ref(), &config_dir)?,
         cli::Command::Approval(args) if args.is_telegram_test() => {
             cli::approval::telegram_test(&config_dir, store).await?
         }
@@ -33,7 +33,7 @@ async fn main() -> anyhow::Result<()> {
         cli::Command::Lock { reason } => {
             fsutil::ensure_private_dir(&config_dir)?;
             let audit = mcp_warden_core::audit::sqlite_sink::LocalSqlite::open(&audit_db)?;
-            cli::lock::lock(&config_dir, reason, &audit)?
+            cli::lock::lock(&config_dir, reason, &audit, store.as_ref())?
         }
         cli::Command::Unlock => cli::lock::unlock_cmd(&config_dir, store, &audit_db).await?,
         cli::Command::Run { name } => {

@@ -20,6 +20,30 @@ pub fn ssh(host: &str, command: &str) -> String {
     format!("ssh {host} -- {command}")
 }
 
+/// `deploy.trash_file: ssh deploy.example.com -- mv /srv/app/uploads/a.png
+/// /srv/app/.trash/`: the preset, the command's name and the command line it
+/// runs, so the prompt shows every value. Before the values are checked (a
+/// refused call) the command line is not known: `deploy.trash_file: ssh
+/// deploy.example.com (1 param)`. A name that is not a valid command name
+/// is shown as `?`.
+pub fn ssh_run(
+    preset: &str,
+    command_name: &str,
+    host: &str,
+    command: Option<&str>,
+    params: usize,
+) -> String {
+    let name = if mcp_warden_core::commands::is_identifier(command_name) {
+        command_name
+    } else {
+        "?"
+    };
+    match command {
+        Some(command) => format!("{preset}.{name}: {}", ssh(host, command)),
+        None => format!("{preset}.{name}: ssh {host} ({params} param)"),
+    }
+}
+
 pub fn sftp(direction: &str, remote: &str, local: &str) -> String {
     format!("sftp {direction} {remote} ↔ {local}")
 }

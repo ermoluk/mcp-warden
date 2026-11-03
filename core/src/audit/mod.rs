@@ -2,6 +2,8 @@ use crate::error::Result;
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+pub mod anchor;
+pub mod chain;
 pub mod sqlite_sink;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -100,6 +102,30 @@ pub enum AuditOutcome {
     Err { message: String },
 }
 
+/// What `AuditSink::verify_chain` found.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct ChainReport {
+    /// Records in the chain, the genesis record included.
+    pub records: i64,
+    /// The last record's sequence number and hash.
+    pub tip: Option<(i64, String)>,
+    /// The chain's random id, from its genesis record.
+    pub chain_id: Option<String>,
+    /// Rows written before the chain started (before 0.6.0).
+    pub legacy_rows: i64,
+    /// What is wrong, the first problem first. Empty: the chain holds and
+    /// the table matches it.
+    pub problems: Vec<String>,
+    /// There were more problems than listed.
+    pub more_problems: bool,
+}
+
+impl ChainReport {
+    pub fn intact(&self) -> bool {
+        self.problems.is_empty()
+    }
+}
+
 /// Append-only audit log surface. There is intentionally no `delete`,
 /// `clear`, or `truncate` method — the trait surface enforces append-only
 /// (spec §9.7).
@@ -129,6 +155,38 @@ pub trait AuditSink: Send + Sync {
     /// Tag events recorded from now on with this session id. Sinks that
     /// don't store sessions may ignore it.
     fn set_session(&self, _id: &str) {}
+    /// The last chain record's `(seq, hash)`, if the sink keeps a hash chain
+    /// (docs/design/audit-hash-chain.md). Read-only, like the two below.
+    fn chain_tip(&self) -> Result<Option<(i64, String)>> {
+        Err(crate::error::WardenError::Audit(
+            "this audit sink keeps no hash chain".into(),
+        ))
+    }
+    /// The stored hash of chain record `seq`.
+    fn chain_hash_at(&self, _seq: i64) -> Result<Option<String>> {
+        Err(crate::error::WardenError::Audit(
+            "this audit sink keeps no hash chain".into(),
+        ))
+    }
+    /// Whether the records from `seq` (with hash `hash`) to the tip are
+    /// contiguous and linked.
+    fn chain_links_from(&self, _seq: i64, _hash: &str) -> Result<bool> {
+        Err(crate::error::WardenError::Audit(
+            "this audit sink keeps no hash chain".into(),
+        ))
+    }
+    /// The chain's random id, from its genesis record.
+    fn chain_id(&self) -> Result<Option<String>> {
+        Err(crate::error::WardenError::Audit(
+            "this audit sink keeps no hash chain".into(),
+        ))
+    }
+    /// Check the chain's links and every event against its records.
+    fn verify_chain(&self) -> Result<ChainReport> {
+        Err(crate::error::WardenError::Audit(
+            "this audit sink keeps no hash chain".into(),
+        ))
+    }
     /// Tag events recorded from now on with the MCP client (`name version`)
     /// once it has introduced itself. Sinks may ignore it.
     fn set_client(&self, _client: &str) {}

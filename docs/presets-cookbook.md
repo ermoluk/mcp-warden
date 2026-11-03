@@ -116,6 +116,67 @@ forced command in `authorized_keys` or `ForceCommand` — so a pattern that is
 too broad or a leaked key still can't run anything else. Step by step, with a
 working gate script: [`docs/ssh-hardening.md`](ssh-hardening.md).
 
+## SSH — named commands (v0.6.0)
+
+Instead of letting the agent compose a command line that a regex then has to
+judge, declare the commands it may run and the values it may fill in. The agent
+calls `ssh_run` with the command's name and typed values; nothing else reaches
+the host.
+
+```toml
+[[preset]]
+name = "deploy"
+type = "ssh"
+description = "Production deploy host"
+host = "deploy.example.com"
+user = "warden-deploy"
+secret = "deploy_key"
+approval = "prompt"
+approval_window_seconds = 600
+max_output_bytes = 65536
+
+[[preset.commands]]
+name = "tail_log"
+description = "Last N lines of the app log"
+template = "journalctl -u app -n {lines} --no-pager"
+params.lines = { type = "int", min = 1, max = 500 }
+
+[[preset.commands]]
+name = "restart"
+description = "Restart one service"
+template = "sudo -n systemctl restart {unit}"
+params.unit = { type = "enum", values = ["app.service", "worker.service"] }
+
+[[preset.commands]]
+name = "trash_file"
+description = "Move one uploaded file to the trash folder"
+template = "mv {path} /srv/app/.trash/"
+params.path = { type = "path", pattern = "/srv/app/uploads/[a-z0-9._-]+" }
+```
+
+- **Parameter types.** `int` (`min`, `max`; a decimal number without sign or
+  leading zeros), `enum` (`values`, matched exactly), `string` (one word
+  matching `pattern`) and `path` (an absolute path matching `pattern`, with no
+  `//` and no `.` or `..` segment). No value may start with `-`, contain a
+  space or shell syntax.
+- **Placeholders.** A `string` or `path` fills a whole word; an `int` or
+  `enum` may be part of one (`--lines={n}`). Only an `enum` may be the first
+  word.
+- **Checked at startup.** A template that could ever produce shell syntax or a
+  command over 1024 bytes, an undeclared or unused parameter, or a bad pattern
+  stops the server with the preset and command named.
+- **Approval.** A command may set its own `approval`; the window is per
+  command (`ssh_run:tail_log`), and the prompt shows the full command line. A
+  command's `auto` needs `mcp-warden approval deploy auto --command tail_log
+  --confirm-auto` and counts only once the preset is confirmed.
+- **Try it first.** `mcp-warden preset test deploy --run tail_log --param
+  lines=50` prints the verdict and the exact command it would send.
+- **Tools of their own.** `expose_as_tools = true` also offers each command as
+  `ssh_deploy_tail_log` and so on (at most 32 tools across the config).
+- **Starting point.** `mcp-warden preset scaffold ssh-deploy --host H --user U`
+  writes a preset with status, logs, restart and pull commands and no
+  `allowed_commands`, so `ssh_exec` refuses everything.
+
 ## SSH + SFTP — Log fetcher
 
 ```toml
@@ -210,6 +271,89 @@ approval = "prompt"
 
 The Redis `template` is the command name; `param_types` is the positional arg schema.
 
+## HTTP — other ways to authenticate (v0.6.0)
+
+Besides `bearer`, `header` and `basic`, an HTTP preset can send its key as a
+query parameter, use OAuth2, or sign requests with AWS SigV4. Every field that
+names a secret holds a **keychain entry name**, as `secret` does elsewhere.
+
+**Query parameter** — for APIs that want `?key=…` (Google Maps):
+
+```toml
+[[preset]]
+name = "google-maps"
+type = "http"
+description = "Google Maps Platform web services"
+base_url = "https://maps.googleapis.com"
+auth = { type = "query", name = "key", secret = "gmaps_key" }
+allowed_methods = ["GET"]
+allowed_paths = ["/maps/api/geocode/json", "/maps/api/place/textsearch/json"]
+approval = "prompt"
+```
+
+The key is appended after the agent's own query parameters. A parameter of
+the same name from the agent, in any case, is refused before the key is read.
+The prompt and the audit log never show the query string, and upstream errors
+no longer include the URL.
+
+**OAuth2** — a fresh access token from the provider for every call
+(`refresh_token` or `client_credentials` grant), sent as a bearer token and
+never kept between calls:
+
+```toml
+[[preset]]
+name = "google-drive-read"
+type = "http"
+description = "Google Drive (read-only)"
+base_url = "https://www.googleapis.com"
+allowed_methods = ["GET"]
+allowed_paths = ["/drive/v3/files", "/drive/v3/files/[A-Za-z0-9_-]+"]
+approval = "prompt"
+
+[preset.auth]
+type = "oauth2"
+grant = "refresh_token"            # or "client_credentials"
+token_url = "https://oauth2.googleapis.com/token"
+client_id = "YOUR_CLIENT_ID.apps.googleusercontent.com"
+client_secret = "gdrive_client_secret"
+refresh_token = "gdrive_refresh_token"
+scopes = ["https://www.googleapis.com/auth/drive.readonly"]
+# client_auth = "body"             # client id and secret in the form body, not HTTP Basic
+```
+
+- `token_url` must be https (plain http only to localhost): it receives the
+  client secret and the refresh token.
+- When the provider rotates the refresh token, the new one is written back to
+  `refresh_token`'s keychain entry, under a lock shared by every mcp-warden
+  process. That entry may not be used by anything else. If storing it fails,
+  the call fails and says so.
+- `get_secret_for_env` never reveals an OAuth2 preset's secrets.
+- A failing token endpoint is reported by status and `error` code only.
+
+**AWS SigV4** — for AWS APIs, signed after every allow-list check:
+
+```toml
+[[preset]]
+name = "aws-s3-read"
+type = "http"
+description = "Amazon S3 bucket (read-only)"
+base_url = "https://your-bucket.s3.eu-central-1.amazonaws.com"
+allowed_methods = ["GET"]
+allowed_paths = ["/", "/[A-Za-z0-9!_.*'()/-]+"]
+approval = "prompt"
+
+[preset.auth]
+type = "aws_sigv4"
+region = "eu-central-1"
+service = "s3"
+access_key_id = "aws_s3_access_key_id"
+secret_access_key = "aws_s3_secret_access_key"
+# session_token = "aws_s3_session_token"   # for temporary credentials
+```
+
+`mcp-warden preset scaffold google-maps`, `google-drive-read` and `aws-s3-read`
+write these presets; each prints the `secret add` commands it needs.
+
 ## HTTP — limit what the agent sees
 
 A list endpoint can return megabytes, and most of it is noise in the agent's context — or text written by strangers (issue bodies, comments) that can try to steer it. Cap the size and keep only the fields the task needs:
@@ -243,10 +387,14 @@ response_fields = ["[].number", "[].title", "[].state", "[].user.login"]
 | `jira-read` | myself, `search/jql`, issues and comments, projects | Basic auth with your account e-mail; set `MCP_WARDEN_JIRA_BASE_URL` / `MCP_WARDEN_JIRA_EMAIL` before scaffolding, or edit afterwards |
 | `slack-read` | `auth.test`, `conversations.*` reads, `users.list` / `users.info` | Bot token (`xoxb-…`) |
 | `vercel-read` | user, projects, deployments | Not `/v9/projects/:id/env`, which returns a project's secrets |
+| `google-maps` | geocoding, place search and details, distance matrix | `query` auth; restrict the key to these APIs in Google Cloud Console |
+| `google-drive-read` | file list and metadata | `oauth2` with a refresh token; replace `client_id` |
+| `aws-s3-read` | list and get objects in one bucket | `aws_sigv4`; replace the bucket and region, use a read-only IAM identity |
+| `ssh-deploy` | status, logs, restart, pull as named commands | needs `--host` and `--user`; `ssh_exec` refuses everything |
 
 ## Patterns to AVOID
 
-- **Wildcard SSH commands.** `^git.*$` lets the agent run `git rebase --continue || rm -rf /`. Always anchor the entire pattern with explicit alternations.
+- **Wildcard SSH commands.** `^git.*$` lets the agent pick any git subcommand and options, such as `git pull --upload-pack=/tmp/x`. Anchor the entire pattern with explicit alternations, or better, use named commands. `mcp-warden doctor` warns about catch-alls.
 - **Open-ended SFTP allow-lists.** `sftp_allowed_paths = ["/"]` is a footgun. Pick the narrowest prefix that covers your use case.
 - **Destructive named queries with `auto` approval.** `DELETE FROM users WHERE id = $1` paired with `approval = "auto"` lets the agent drop arbitrary rows. Use `prompt` (or `deny`) for any query that mutates.
 - **Sharing a preset secret across types.** A preset's `secret` is read once per call; don't reuse the same keychain entry as both an SSH key and a DB password — rotate independently.

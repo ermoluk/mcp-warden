@@ -353,6 +353,21 @@ fn render_preset_detail(p: &Preset) -> String {
         let names: Vec<&str> = p.queries.iter().map(|q| q.name.as_str()).collect();
         add(&mut rows, "Named queries", &names.join(", "));
     }
+    for c in &p.commands {
+        let policy = match mcp_warden_core::commands::effective_approval(p, c) {
+            ApprovalPolicy::Auto => "auto",
+            ApprovalPolicy::Prompt => "prompt",
+            ApprovalPolicy::Deny => "deny",
+        };
+        add(
+            &mut rows,
+            &format!("Command {}", c.name),
+            &format!("{} ({policy})", c.template),
+        );
+    }
+    if let Some(max) = p.max_output_bytes {
+        add(&mut rows, "Max output (bytes)", &max.to_string());
+    }
 
     // SECURITY: Show only the secret reference name (keychain key), never the value.
     // `p.secret` is the keychain entry name; `p.auth` contains a keychain entry name.
@@ -365,17 +380,13 @@ fn render_preset_detail(p: &Preset) -> String {
         ));
     }
     if let Some(ref auth) = p.auth {
-        use mcp_warden_core::config::Auth;
-        let secret_ref = match auth {
-            Auth::Bearer { secret } => secret.as_str(),
-            Auth::Header { secret, .. } => secret.as_str(),
-            Auth::Basic { secret, .. } => secret.as_str(),
-        };
-        rows.push_str(&format!(
-            "<dt>{}</dt><dd><code>{}</code> <em>(keychain ref, not value)</em></dd>",
-            esc("Auth secret ref"),
-            esc(secret_ref),
-        ));
+        for secret_ref in auth.secrets() {
+            rows.push_str(&format!(
+                "<dt>{}</dt><dd><code>{}</code> <em>(keychain ref, not value)</em></dd>",
+                esc("Auth secret ref"),
+                esc(secret_ref),
+            ));
+        }
     }
 
     format!("<dl>{rows}</dl>")
@@ -440,6 +451,25 @@ fn audit_filter_form(filter: &AuditFilter, limit: usize) -> String {
 
 /// `GET /audit?decision=…&limit=N` — Recent audit log entries, optionally
 /// only those with the given decisions (filtered in SQL).
+/// The hash chain's state, checked inside the database only: the web UI
+/// never touches the keychain, so the anchor is `audit verify`'s to check.
+fn chain_banner(sink: &LocalSqlite) -> String {
+    match sink.verify_chain() {
+        Ok(r) if r.intact() => format!(
+            r#"<p class="chain">Hash chain intact ({} records); not checked against the keychain anchor — run <code>mcp-warden audit verify</code> for that.</p>"#,
+            r.records
+        ),
+        Ok(r) => format!(
+            r#"<p class="chain broken"><strong>Hash chain broken:</strong> {} — run <code>mcp-warden audit verify</code>.</p>"#,
+            esc(r.problems.first().map(String::as_str).unwrap_or(""))
+        ),
+        Err(e) => format!(
+            r#"<p class="chain broken">Hash chain not checked: {}</p>"#,
+            esc(&e.to_string())
+        ),
+    }
+}
+
 pub async fn audit_log(State(state): State<Arc<AppState>>, RawQuery(raw): RawQuery) -> Response {
     let (filter, limit) = audit_query(raw.as_deref());
 
@@ -458,10 +488,12 @@ pub async fn audit_log(State(state): State<Arc<AppState>>, RawQuery(raw): RawQue
         Ok(v) => v,
         Err(e) => return err_page(StatusCode::INTERNAL_SERVER_ERROR, &e.to_string()),
     };
+    let chain = chain_banner(&sink);
 
     if events.is_empty() {
         let body = format!(
             r#"<h1>Audit log</h1>
+{chain}
 {}
 <p class="empty">No events match.</p>"#,
             audit_filter_form(&filter, limit)
@@ -507,6 +539,7 @@ pub async fn audit_log(State(state): State<Arc<AppState>>, RawQuery(raw): RawQue
 
     let body = format!(
         r#"<h1>Audit log <small>(last {limit})</small></h1>
+{chain}
 {form}
 <table>
   <thead>
@@ -518,6 +551,7 @@ pub async fn audit_log(State(state): State<Arc<AppState>>, RawQuery(raw): RawQue
   <tbody>{rows}</tbody>
 </table>"#,
         limit = limit,
+        chain = chain,
         form = audit_filter_form(&filter, limit),
         rows = rows,
     );
@@ -602,6 +636,38 @@ mod tests {
         }
         assert!(html.contains(r"p\u{202E}x") && html.contains(r"/a\u{2066}b"));
         assert!(html.contains(r"bad\u{2028}line"), "{html}");
+    }
+
+    #[test]
+    fn the_preset_page_lists_named_commands() {
+        let cfg: Config =
+            toml::from_str(include_str!("../../tests/fixtures/named_commands.toml")).unwrap();
+        let html = render_preset_detail(&cfg.preset[0]);
+        assert!(
+            html.contains(
+                "Command tail_log</dt><dd>journalctl -u app -n {lines} --no-pager (prompt)"
+            ),
+            "{html}"
+        );
+        assert!(html.contains("Max output (bytes)"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn the_audit_page_shows_the_chain_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let state = state_with_events(dir.path());
+        let html = body(audit_log(State(state.clone()), RawQuery(None)).await).await;
+        assert!(html.contains("Hash chain intact"), "{html}");
+        assert!(
+            html.contains("not checked against the keychain anchor"),
+            "{html}"
+        );
+        rusqlite::Connection::open(&state.audit_db)
+            .unwrap()
+            .execute_batch("UPDATE events SET decision = 'denied' WHERE id = 1")
+            .unwrap();
+        let html = body(audit_log(State(state), RawQuery(None)).await).await;
+        assert!(html.contains("Hash chain broken"), "{html}");
     }
 
     #[test]

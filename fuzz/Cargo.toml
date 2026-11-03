@@ -17,7 +17,7 @@ mcp-warden = { path = ".." }
 mcp-warden-core = { path = "../core" }
 serde_json = "1"
 toml = "0.8"
-russh = "0.60"
+russh = "0.65"
 tempfile = "3"
 
 [workspace]
@@ -78,6 +78,27 @@ bench = false
 [[bin]]
 name = "sanitise_for_prompt"
 path = "fuzz_targets/sanitise_for_prompt.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "named_command"
+path = "fuzz_targets/named_command.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "oauth_token_response"
+path = "fuzz_targets/oauth_token_response.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "audit_verify"
+path = "fuzz_targets/audit_verify.rs"
 test = false
 doc = false
 bench = false

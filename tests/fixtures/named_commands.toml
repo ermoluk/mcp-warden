@@ -1,0 +1,44 @@
+# Named SSH commands (v0.6.0): the agent runs a command by name with typed
+# parameters (`ssh_run`) instead of composing a command line.
+[[preset]]
+name = "deploy"
+type = "ssh"
+description = "Production deploy host"
+host = "deploy.example.com"
+user = "warden-deploy"
+secret = "deploy_key"
+approval = "prompt"
+approval_window_seconds = 600
+max_output_bytes = 65536
+expose_as_tools = true
+
+[[preset.commands]]
+name = "tail_log"
+description = "Last N lines of the app log"
+template = "journalctl -u app -n {lines} --no-pager"
+max_output_bytes = 262144
+params.lines = { type = "int", min = 1, max = 500 }
+
+[[preset.commands]]
+name = "restart"
+description = "Restart one service"
+template = "sudo -n systemctl restart {unit}"
+params.unit = { type = "enum", values = ["app.service", "worker.service"] }
+
+[[preset.commands]]
+name = "trash_file"
+description = "Move one uploaded file to the trash folder"
+template = "mv {path} /srv/app/.trash/"
+params.path = { type = "path", pattern = "/srv/app/uploads/[a-z0-9._-]+" }
+
+[[preset.commands]]
+name = "checkout"
+description = "Check out one release tag"
+template = "git -C /srv/app checkout {tag}"
+params.tag = { type = "string", pattern = "v[0-9]+\\.[0-9]+\\.[0-9]+" }
+
+[[preset.commands]]
+name = "head_log"
+description = "First N lines of the app log"
+template = "sed -n 1,{n}p /srv/app/log.txt"
+params.n = { type = "int", min = 1, max = 200 }

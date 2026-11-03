@@ -4,7 +4,7 @@ use crate::executor::credential_echo::CredentialForms;
 use clap::Args;
 use mcp_warden_core::audit::AuditOutcome;
 use mcp_warden_core::audit::sqlite_sink::LocalSqlite;
-use mcp_warden_core::config::{ApprovalPolicy, Auth, Config, Preset, PresetType};
+use mcp_warden_core::config::{ApprovalPolicy, Config, Preset, PresetType};
 use mcp_warden_core::error::Result;
 use mcp_warden_core::keychain::KeychainStore;
 use serde::Serialize;
@@ -54,11 +54,14 @@ pub async fn run(args: DoctorArgs, config_dir: &Path, store: Arc<dyn KeychainSto
             "absent (created on first MCP call)"
         }
     );
+    if db_path.exists() {
+        println!("audit chain: {}", audit_chain_status(&db_path, kc));
+    }
     let names: Vec<String> = kc
         .list_names()
         .unwrap_or_default()
         .into_iter()
-        .filter(|n| !mcp_warden_core::stamp::is_stamp_name(n))
+        .filter(|n| !mcp_warden_core::stamp::is_reserved_name(n))
         .collect();
     println!("secrets:    {} stored", names.len());
     match crate::executor::lock::read(&config_dir.join(crate::executor::lock::LOCK_FILE)) {
@@ -91,6 +94,9 @@ pub async fn run(args: DoctorArgs, config_dir: &Path, store: Arc<dyn KeychainSto
                     println!("warning:    {w}");
                 }
                 for w in cfg.preset.iter().flat_map(pattern_warnings) {
+                    println!("warning:    {w}");
+                }
+                for w in cfg.preset.iter().flat_map(command_warnings) {
                     println!("warning:    {w}");
                 }
                 for w in cfg.preset.iter().flat_map(query_warnings) {
@@ -128,7 +134,8 @@ pub async fn run(args: DoctorArgs, config_dir: &Path, store: Arc<dyn KeychainSto
                 transports.fallback,
                 audit,
             )
-            .with_lock(config_dir.join(crate::executor::lock::LOCK_FILE));
+            .with_lock(config_dir.join(crate::executor::lock::LOCK_FILE))
+            .with_state_dir(config_dir.to_path_buf());
             let results = run_probes(&cfg, kc, &args, &exec).await;
             match args.format.as_str() {
                 "json" => {
@@ -247,7 +254,8 @@ async fn run_probes(
                         continue;
                     }
                 };
-                let (status, detail) = probe_http(p, kc, client.as_ref()).await;
+                let (status, detail) =
+                    probe_http(p, kc, exec.state_dir.as_deref(), client.as_ref()).await;
                 let _ = exec.audit.record_outcome(
                     event,
                     match status {
@@ -279,9 +287,43 @@ async fn run_probes(
     out
 }
 
+/// One line on the audit log's hash chain and its keychain anchor; the
+/// details are `mcp-warden audit verify`'s.
+pub(crate) fn audit_chain_status(db: &Path, kc: &dyn KeychainStore) -> String {
+    use mcp_warden_core::audit::AuditSink;
+    use mcp_warden_core::audit::anchor::{self, AnchorCheck};
+    let sink = match mcp_warden_core::audit::sqlite_sink::LocalSqlite::open(db) {
+        Ok(s) => s,
+        Err(e) => return format!("cannot open the audit log: {e}"),
+    };
+    let report = match sink.verify_chain() {
+        Ok(r) => r,
+        Err(e) => return format!("cannot check: {e}"),
+    };
+    if let Some(first) = report.problems.first() {
+        return format!(
+            "BROKEN — {} (`mcp-warden audit verify` lists everything)",
+            crate::cli::audit::for_terminal(first, 160)
+        );
+    }
+    let anchor = match anchor::check(kc, &sink, db) {
+        Ok(AnchorCheck::NotAnchored) => "not anchored yet".to_string(),
+        Ok(AnchorCheck::Anchored { seq, .. }) => format!("anchored through record {seq}"),
+        Ok(AnchorCheck::Removed { seq }) => {
+            format!("BROKEN — records up to the anchored {seq} are gone")
+        }
+        Ok(AnchorCheck::Rewritten { seq }) => {
+            format!("BROKEN — rewritten before the anchored record {seq}")
+        }
+        Err(e) => format!("anchor unreadable: {e}"),
+    };
+    format!("intact, {} records; {anchor}", report.records)
+}
+
 async fn probe_http(
     p: &Preset,
     kc: &dyn KeychainStore,
+    state_dir: Option<&Path>,
     client: Option<&reqwest::Client>,
 ) -> (ProbeStatus, String) {
     let Some(client) = client else {
@@ -307,46 +349,35 @@ async fn probe_http(
     let probe_path = pick_probe_path(&p.allowed_paths);
     let url = format!("{}{}", base_url.trim_end_matches('/'), probe_path);
 
-    // Fetch the secret (if any) from keychain.
-    let secret = if let Some(auth) = &p.auth {
-        let secret_name = match auth {
-            Auth::Bearer { secret } => Some(secret),
-            Auth::Header { secret, .. } => Some(secret),
-            Auth::Basic { secret, .. } => Some(secret),
-        };
-        match secret_name {
-            Some(name) => match kc.get(name) {
-                Ok(Some(s)) => Some(s),
-                Ok(None) => {
+    // The credential, if the preset has one; put on the request and turned
+    // into scrub forms the way proxy_http does.
+    let mut req = client.get(&url);
+    let forms = match &p.auth {
+        Some(_) => match crate::executor::auth::load(kc, p) {
+            Ok(mut credential) => {
+                // OAuth2 mints a token, as a real call would.
+                if let Err(e) = credential.prepare(kc, state_dir, p).await {
+                    let e = credential.forms().scrub_error(e);
                     return (
-                        ProbeStatus::Skipped,
-                        format!("secret '{name}' not found in keychain"),
+                        ProbeStatus::AuthFailed,
+                        redact(&truncate(&e.to_string(), 200)),
                     );
                 }
-                Err(e) => {
-                    return (ProbeStatus::Skipped, format!("keychain read failed: {e}"));
-                }
-            },
-            None => None,
-        }
-    } else {
-        None
+                req = credential.apply(req);
+                credential.forms()
+            }
+            Err(mcp_warden_core::error::WardenError::MissingSecret { secret, .. }) => {
+                return (
+                    ProbeStatus::Skipped,
+                    format!("secret '{secret}' not found in keychain"),
+                );
+            }
+            Err(e) => {
+                return (ProbeStatus::Skipped, format!("keychain read failed: {e}"));
+            }
+        },
+        None => CredentialForms::raw(&mcp_warden_core::secret::Secret::new(String::new())),
     };
-
-    let mut req = client.get(&url);
-    if let (Some(auth), Some(secret)) = (&p.auth, secret.as_ref()) {
-        req = inject_auth(req, auth, secret);
-    }
-
-    // An upstream that reflects the credential must not get it printed:
-    // scrub every form it was sent in before anything is cut or shown.
-    let forms = secret
-        .as_ref()
-        .map(|s| CredentialForms::http(&p.auth, s))
-        .unwrap_or_else(|| {
-            CredentialForms::raw(&mcp_warden_core::secret::Secret::new(String::new()))
-        });
-    drop(secret);
     let scrubbed = |mut text: String| {
         forms.scrub_text(&mut text);
         text
@@ -356,7 +387,7 @@ async fn probe_http(
     let resp = match req.send().await {
         Ok(r) => r,
         Err(e) => {
-            let msg = scrubbed(e.to_string());
+            let msg = scrubbed(crate::executor::http::error_text(e));
             let lower = msg.to_lowercase();
             let status = if lower.contains("tls") || lower.contains("certificate") {
                 ProbeStatus::TlsError
@@ -423,24 +454,6 @@ fn pick_probe_path(allowed_paths: &[String]) -> String {
         }
     }
     "/".into()
-}
-
-fn inject_auth(
-    b: reqwest::RequestBuilder,
-    auth: &Auth,
-    secret: &mcp_warden_core::secret::Secret,
-) -> reqwest::RequestBuilder {
-    match auth {
-        Auth::Bearer { .. } => b.bearer_auth(secret.expose()),
-        Auth::Header { name, prefix, .. } => {
-            let value = match prefix {
-                Some(p) => format!("{p}{}", secret.expose()),
-                None => secret.expose().to_string(),
-            };
-            b.header(name, value)
-        }
-        Auth::Basic { username, .. } => b.basic_auth(username, Some(secret.expose())),
-    }
 }
 
 fn truncate(s: &str, max: usize) -> String {
@@ -560,15 +573,75 @@ pub(crate) fn query_warnings(p: &Preset) -> Vec<String> {
 pub(crate) fn pattern_warnings(p: &Preset) -> Vec<String> {
     p.allowed_commands
         .iter()
-        .filter(|pattern| argument_may_start_with_dash(pattern))
-        .map(|pattern| {
-            format!(
-                "preset '{}': allowed_commands pattern '{pattern}' lets an argument start \
-                 with '-', so the agent can pass options of its own (e.g. `-Hhost`, \
-                 `--upload-pack=…`); start it with a character that cannot be one, \
-                 e.g. `[a-z0-9][a-z0-9._-]*`",
-                p.name
-            )
+        .filter_map(|pattern| {
+            if argument_may_start_with_dash(pattern) {
+                Some(format!(
+                    "preset '{}': allowed_commands pattern '{pattern}' lets an argument start \
+                     with '-', so the agent can pass options of its own (e.g. `-Hhost`, \
+                     `--upload-pack=…`); start it with a character that cannot be one, \
+                     e.g. `[a-z0-9][a-z0-9._-]*`",
+                    p.name
+                ))
+            } else if has_catch_all(pattern) {
+                Some(format!(
+                    "preset '{}': allowed_commands pattern '{pattern}' ends in a catch-all \
+                     (`.*`, `.+`, `\\S+`, `[^ ]+`), which also admits arguments you did not \
+                     list, e.g. `git pull --upload-pack=…`; list the exact commands, or use \
+                     named commands ([[preset.commands]]) with typed parameters",
+                    p.name
+                ))
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+/// Whether `pattern` repeats `.`, `\S` or `[^ ]` (`*` or `+`) anywhere:
+/// any of them lets the agent append words of its own.
+fn has_catch_all(pattern: &str) -> bool {
+    let bytes = pattern.as_bytes();
+    let repeated = |at: usize| matches!(bytes.get(at), Some(b'*' | b'+'));
+    let mut i = 0;
+    while i < bytes.len() {
+        match bytes[i] {
+            b'\\' if bytes.get(i + 1) == Some(&b'S') && repeated(i + 2) => return true,
+            b'\\' => i += 2,
+            b'.' if repeated(i + 1) => return true,
+            b'[' if pattern[i..].starts_with("[^ ]") && repeated(i + 4) => return true,
+            _ => i += 1,
+        }
+    }
+    false
+}
+
+/// Named commands whose template destroys data or rewrites permissions:
+/// each deserves narrow parameters and a prompt.
+pub(crate) fn command_warnings(p: &Preset) -> Vec<String> {
+    p.commands
+        .iter()
+        .filter_map(|c| {
+            let mut words = c.template.split(' ').peekable();
+            if words.peek() == Some(&"sudo") {
+                words.next();
+                while words.peek().is_some_and(|w| w.starts_with('-')) {
+                    words.next();
+                }
+            }
+            let program = words.next()?;
+            let recursive = words.any(|w| w == "-R" || w == "-r" || w == "--recursive");
+            let what = match program {
+                "rm" | "shred" => "deletes files",
+                "dd" => "writes raw devices or files",
+                p if p.starts_with("mkfs") => "formats a filesystem",
+                "chmod" | "chown" if recursive => "rewrites permissions recursively",
+                _ => return None,
+            };
+            Some(format!(
+                "preset '{}': command '{}' runs `{program}`, which {what}; keep its parameters \
+                 as narrow as possible and its approval at \"prompt\"",
+                p.name, c.name
+            ))
         })
         .collect()
 }
@@ -805,6 +878,80 @@ mod tests {
         }
     }
 
+    #[test]
+    fn doctor_reports_the_audit_chain() {
+        use mcp_warden_core::audit::AuditSink;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("audit.db");
+        let sink = mcp_warden_core::audit::sqlite_sink::LocalSqlite::open(&db).unwrap();
+        sink.record_pending("p", "proxy_http", "GET /").unwrap();
+        let kc = mcp_warden_core::keychain::memory::InMemoryKeychain::new();
+        assert_eq!(
+            audit_chain_status(&db, &kc),
+            "intact, 2 records; not anchored yet"
+        );
+        mcp_warden_core::audit::anchor::advance(&kc, &sink, &db, None).unwrap();
+        assert_eq!(
+            audit_chain_status(&db, &kc),
+            "intact, 2 records; anchored through record 2"
+        );
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.execute_batch("UPDATE events SET summary = 'x' WHERE id = 1")
+            .unwrap();
+        assert!(audit_chain_status(&db, &kc).starts_with("BROKEN — event 1 changed"));
+    }
+
+    #[test]
+    fn catch_all_patterns_are_flagged() {
+        for loose in ["git pull.*", "ls -la.+", "cat /var/log/\\S+", "echo x[^ ]*"] {
+            let w = pattern_warnings(&ssh_with(&[loose]));
+            assert_eq!(w.len(), 1, "{loose}: {w:?}");
+            assert!(w[0].contains("catch-all"), "{w:?}");
+        }
+        for fine in [
+            "cat /var/log/app\\.log",
+            "git pull",
+            "tail -n [0-9]+ app\\.log",
+        ] {
+            assert!(pattern_warnings(&ssh_with(&[fine])).is_empty(), "{fine}");
+        }
+    }
+
+    #[test]
+    fn destructive_command_templates_are_flagged() {
+        let cfg: mcp_warden_core::config::Config =
+            toml::from_str(include_str!("../../tests/fixtures/named_commands.toml")).unwrap();
+        let mut p = cfg.preset[0].clone();
+        assert!(
+            command_warnings(&p).is_empty(),
+            "{:?}",
+            command_warnings(&p)
+        );
+        let set = |p: &mut Preset, template: &str| {
+            p.commands[2].template = template.into();
+            command_warnings(p)
+        };
+        for template in [
+            "rm {path}",
+            "sudo -n rm -f {path}",
+            "dd if=/dev/zero of={path}",
+            "mkfs.ext4 {path}",
+            "chmod -R 777 {path}",
+            "sudo chown -R app {path}",
+        ] {
+            let w = set(&mut p, template);
+            assert_eq!(w.len(), 1, "{template}: {w:?}");
+            assert!(w[0].contains("command 'trash_file'"), "{w:?}");
+        }
+        for template in [
+            "chmod 644 {path}",
+            "cat {path}",
+            "mv {path} /srv/app/.trash/",
+        ] {
+            assert!(set(&mut p, template).is_empty(), "{template}");
+        }
+    }
+
     /// The patterns the docs recommend refuse option injection, and doctor
     /// has nothing to say about them.
     #[test]
@@ -847,6 +994,36 @@ mod tests {
                 "{evil}"
             );
         }
+    }
+
+    /// The named commands the docs show pass startup validation.
+    #[test]
+    fn documented_named_commands_validate() {
+        let mut checked = 0;
+        for (file, doc) in [
+            (
+                "docs/presets-cookbook.md",
+                include_str!("../../docs/presets-cookbook.md"),
+            ),
+            (
+                "docs/design/named-commands.md",
+                include_str!("../../docs/design/named-commands.md"),
+            ),
+        ] {
+            for block in doc.split("```toml").skip(1) {
+                let block = block.split("```").next().unwrap();
+                let Ok(cfg) = toml::from_str::<Config>(block) else {
+                    continue;
+                };
+                for p in cfg.preset.iter().filter(|p| !p.commands.is_empty()) {
+                    mcp_warden_core::commands::validate_preset(p)
+                        .unwrap_or_else(|e| panic!("{file}: {e}"));
+                    assert!(command_warnings(p).is_empty(), "{file}");
+                    checked += p.commands.len();
+                }
+            }
+        }
+        assert!(checked >= 6, "only {checked} documented commands");
     }
 
     #[test]

@@ -32,6 +32,7 @@
     { "name": "proxy_http", "description": "HTTP request to a preset's base URL, method and path allow-list, with the credential injected." },
     { "name": "get_secret_for_env", "description": "Reveal one secret for a legacy tool, after explicit approval every time." },
     { "name": "ssh_exec", "description": "Run an allow-listed command on a host whose key is pinned in known_hosts." },
+    { "name": "ssh_run", "description": "Run one of a preset's named SSH commands, filled in from typed values." },
     { "name": "sftp_transfer", "description": "Get or put a file along an allow-listed path." },
     { "name": "db_query", "description": "Run a named query (PostgreSQL, MySQL, Redis) defined in the preset." }
   ],

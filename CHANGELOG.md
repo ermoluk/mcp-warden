@@ -2,6 +2,34 @@
 
 All notable changes to this project will be documented in this file. The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.6.0]
+
+Building from source now needs Rust 1.94.1 (AWS's `aws-sigv4` crate); prebuilt binaries and packages are unaffected.
+
+### Added
+
+- **Named commands for SSH presets** (`[[preset.commands]]`, the new `ssh_run` tool). The preset fixes each command line; the agent names a command and supplies typed values: `int` (a range), `enum` (a list), `string` (one word matching a pattern) or `path` (an absolute path matching a pattern, no `//`, `.` or `..`). Values are checked before any credential is read, may not start with `-`, contain a space or shell syntax, and the filled-in command passes the shell-syntax check again (invariants 3 and 5). Templates are checked at startup: one bad command stops the server, naming the preset and the command (invariant 10). Each command may set its own `approval` (`mcp-warden approval PRESET POLICY --command NAME`); a command's `auto` counts only once the preset is confirmed (`preset confirm`), and the approval window is per command. `list_presets` shows each command and what its parameters accept; `expose_as_tools = true` also offers each command as its own tool, `ssh_<preset>_<command>` (at most 32). `mcp-warden preset test NAME --run CMD --param k=v` shows the verdict and the exact command it would send. `preset scaffold ssh-deploy --host H --user U` writes a preset with named commands only. See the cookbook and threat model R4.
+- **Three new HTTP auth kinds.**
+  - `query`: the key as a query parameter (`?key=…`), appended after the agent's parameters; a parameter of that name from the agent is refused before the key is read.
+  - `oauth2`: a fresh access token from `token_url` for every call (`refresh_token` or `client_credentials` grant, client authentication by HTTP Basic or in the body), never cached (invariant 8). A rotated refresh token is written back to its keychain entry under a lock shared by every mcp-warden process; if that fails, so does the call. The token endpoint must be https (or loopback) and is treated as hostile: no redirects, at most 64 KiB and 15 s, errors give only the status and the `error` code.
+  - `aws_sigv4`: requests signed with AWS Signature Version 4 by AWS's `aws-sigv4` crate, after every allow-list check; optional session token, S3 payload hash.
+  - Every key, the minted access token included, is scrubbed from responses and errors. OAuth2 secrets are never revealed by `get_secret_for_env`. See the cookbook and threat model R18.
+- **Templates** `google-maps`, `google-drive-read` and `aws-s3-read` for the new auth kinds; a template can now read several keychain entries and prints a `secret add` for each. `preset from-openapi` turns an `apiKey` in the query into `query` auth.
+- **`scan` / `import` recognise** AWS temporary access key ids (`ASIA…`) and Google OAuth client secrets, refresh tokens and access tokens.
+- **A tamper-evident audit log.** Every write to `audit.db` also appends a record to a hash chain in the same transaction, and how far the chain reached is anchored in the keychain (`audit/anchor/…`): moved about once a minute by a running server while the log grows, when it stops, by `lock`, `unlock` and a clean `audit verify`, and only if the anchored record still matches, so a rewritten log is never anchored. `mcp-warden audit verify [--format json]` names each changed field, deleted or unchained event, and whether the log was cut short, rolled back or rewritten; exit code 1 if anything fails. `doctor` and the web UI show the chain's state. See threat model R3 for what it does and does not cover. **After upgrading:** restart your MCP clients, so no 0.5.x server keeps writing unchained rows; rows written before 0.6.0 are kept and marked as such, and downgrading to 0.5.x breaks the chain.
+- **`max_output_bytes` for SSH presets**: lowers how much stdout and stderr `ssh_exec` and `ssh_run` read (default and ceiling 1 MiB per stream); a named command can lower it further.
+- **`doctor` warns** about catch-alls (`.*`, `.+`, `\S+`, `[^ ]+`) anywhere in `allowed_commands`, such as `git pull.*`, and about named commands that run `rm`, `shred`, `dd`, `mkfs*` or a recursive `chmod` / `chown`.
+
+### Security
+
+- **Seven of the eight accepted dependency advisories are gone.** russh 0.65 (RUSTSEC-2026-0387, `crypto-bigint`), notify-rust 4.18 (RUSTSEC-2026-0194 and -0195, `quick-xml`, Windows only) and mysql_async 0.37 (RUSTSEC-2026-0391, -0398, -0403 and -0410, `zstd`). The one left is `rsa` (RUSTSEC-2023-0071, the Marvin attack): no `rsa` release fixes it, and mcp-warden only signs with RSA keys, never decrypts. A host certificate offered by an SSH server is checked by the key it certifies, which `known_hosts` must pin like any other host key; `@cert-authority` lines are still not supported.
+
+### Fixed
+
+- **`approval.telegram.bot_token_secret` could name a reserved keychain entry** (`stamp/…`); it is now refused like a preset secret, and the new `audit/…` entries are reserved the same way.
+- **Upstream errors carried the request URL.** When a `proxy_http` request failed (connection refused, TLS, timeout), the error the agent and the audit log got quoted the full URL, query string included. It now gives the error and its causes without the URL.
+- **SSH logins with an RSA key failed against current OpenSSH.** `ssh_exec` and `sftp_transfer` signed with `ssh-rsa` (SHA-1), which OpenSSH 8.8 and later refuse by default. An RSA key now signs with `rsa-sha2-512` or `rsa-sha2-256`, whichever the server announces (`rsa-sha2-256` if it announces none). Ed25519 and ECDSA keys were not affected.
+
 ## [0.5.4]
 
 ### Security

@@ -10,7 +10,12 @@ use std::sync::Arc;
 
 /// `mcp-warden lock`: write the lock file. Every MCP server refuses every
 /// call from its next one on and drops its approval windows.
-pub fn lock(config_dir: &Path, reason: Option<String>, audit: &dyn AuditSink) -> Result<()> {
+pub fn lock(
+    config_dir: &Path,
+    reason: Option<String>,
+    audit: &dyn AuditSink,
+    kc: &dyn KeychainStore,
+) -> Result<()> {
     std::fs::create_dir_all(config_dir).map_err(WardenError::Io)?;
     let path = config_dir.join(lock::LOCK_FILE);
     if let Some(existing) = lock::read(&path) {
@@ -24,6 +29,14 @@ pub fn lock(config_dir: &Path, reason: Option<String>, audit: &dyn AuditSink) ->
     lock::write(&path, &info)?;
     let id = audit.record_pending("*", "lock", &info.describe())?;
     audit.record_decision(id, AuditDecision::Auto)?;
+    // A lock is when the log matters most: anchor it (best effort; a log
+    // that no longer matches its anchor is reported on stderr).
+    let _ = mcp_warden_core::audit::anchor::advance(
+        kc,
+        audit,
+        &config_dir.join("audit.db"),
+        Some(&config_dir.join("locks")),
+    );
     eprintln!(
         "mcp-warden is {}. Every MCP server refuses every call from its next one on.\n\
          Undo with `mcp-warden unlock` (it asks for approval); servers that saw the lock \
@@ -70,6 +83,12 @@ pub async fn unlock(config_dir: &Path, exec: &ActionExecutor) -> Result<()> {
     std::fs::remove_file(&path).map_err(WardenError::Io)?;
     exec.audit
         .record_outcome(event_id, AuditOutcome::Ok { status: 200 })?;
+    let _ = mcp_warden_core::audit::anchor::advance(
+        exec.keychain.as_ref(),
+        exec.audit.as_ref(),
+        &config_dir.join("audit.db"),
+        Some(&config_dir.join("locks")),
+    );
     eprintln!("Unlocked. MCP servers that saw the lock stay locked until they restart.");
     Ok(())
 }
@@ -118,8 +137,28 @@ mod tests {
     fn locked_dir() -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         let audit = LocalSqlite::open(&dir.path().join("audit.db")).unwrap();
-        lock(dir.path(), Some("test".into()), &audit).unwrap();
+        lock(
+            dir.path(),
+            Some("test".into()),
+            &audit,
+            &InMemoryKeychain::new(),
+        )
+        .unwrap();
         dir
+    }
+
+    /// A lock anchors the audit log in the keychain.
+    #[test]
+    fn lock_anchors_the_audit_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("audit.db");
+        let audit = LocalSqlite::open(&db).unwrap();
+        let kc = InMemoryKeychain::new();
+        lock(dir.path(), None, &audit, &kc).unwrap();
+        let anchor = mcp_warden_core::audit::anchor::read(&kc, &db)
+            .unwrap()
+            .unwrap();
+        assert_eq!(Some((anchor.seq, anchor.hash)), audit.chain_tip().unwrap());
     }
 
     #[test]

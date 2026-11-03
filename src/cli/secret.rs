@@ -17,14 +17,15 @@ pub enum SecretCmd {
 
 pub fn run(cmd: SecretCmd, store: &dyn KeychainStore) -> Result<()> {
     // `stamp/…` entries record what a human confirmed in an approval
-    // prompt. The CLI cannot tell a human from an agent with a shell, so it
-    // never writes or removes them.
+    // prompt, `audit/…` how far the audit log reached. The CLI cannot tell
+    // a human from an agent with a shell, so it never writes or removes
+    // them.
     if let SecretCmd::Add { name } | SecretCmd::Remove { name } = &cmd
-        && mcp_warden_core::stamp::is_stamp_name(name)
+        && mcp_warden_core::stamp::is_reserved_name(name)
     {
         return Err(WardenError::Validation(format!(
-            "'{name}' is reserved for mcp-warden's confirmations; use `mcp-warden preset \
-             confirm` to confirm a preset"
+            "'{name}' is reserved for mcp-warden's own records (confirmations, the audit \
+             anchor); use `mcp-warden preset confirm` to confirm a preset"
         )));
     }
     match cmd {
@@ -62,7 +63,7 @@ fn list(store: &dyn KeychainStore) -> Result<()> {
     let names: Vec<String> = store
         .list_names()?
         .into_iter()
-        .filter(|n| !mcp_warden_core::stamp::is_stamp_name(n))
+        .filter(|n| !mcp_warden_core::stamp::is_reserved_name(n))
         .collect();
     if names.is_empty() {
         println!("(no secrets)");
@@ -88,7 +89,7 @@ mod tests {
     /// The CLI cannot tell a human from an agent with a shell, so it must
     /// not write or remove confirmation stamps: only an approved prompt may.
     #[test]
-    fn stamps_cannot_be_written_or_removed_from_the_cli() {
+    fn reserved_entries_cannot_be_written_or_removed_from_the_cli() {
         let kc = InMemoryKeychain::new();
         for cmd in [
             SecretCmd::Add {
@@ -99,6 +100,12 @@ mod tests {
             },
             SecretCmd::Remove {
                 name: "stamp/key".into(),
+            },
+            SecretCmd::Add {
+                name: "audit/anchor/0123456789abcdef".into(),
+            },
+            SecretCmd::Remove {
+                name: "audit/anchor/0123456789abcdef".into(),
             },
         ] {
             let err = run(cmd, &kc).unwrap_err().to_string();

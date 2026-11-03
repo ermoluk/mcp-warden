@@ -8,7 +8,7 @@ use crate::approval::{
 use crate::executor::ActionExecutor;
 use crate::mcp::server::WardenServer;
 use is_terminal::IsTerminal;
-use mcp_warden_core::approval::{ApprovalDecision, ApprovalTransport};
+use mcp_warden_core::approval::ApprovalTransport;
 use mcp_warden_core::audit::{AuditSink, sqlite_sink::LocalSqlite};
 use mcp_warden_core::config::{Config, TelegramConfig};
 use mcp_warden_core::error::{Result, WardenError};
@@ -61,7 +61,8 @@ pub async fn cmd(config_dir: &Path) -> Result<()> {
 
     let executor = Arc::new(
         ActionExecutor::new(keychain, transports.primary, transports.fallback, audit)
-            .with_lock(config_dir.join(crate::executor::lock::LOCK_FILE)),
+            .with_lock(config_dir.join(crate::executor::lock::LOCK_FILE))
+            .with_state_dir(config_dir.to_path_buf()),
     );
     // `get_secret_for_env` may reveal the secrets of these presets and
     // wrapped servers, but never the Telegram bot token.
@@ -73,7 +74,8 @@ pub async fn cmd(config_dir: &Path) -> Result<()> {
     let revealable = cfg
         .preset
         .iter()
-        .filter_map(crate::mcp::server::preset_secret)
+        .flat_map(|p| p.revealable_secrets())
+        .map(str::to_string)
         .chain(
             cfg.server
                 .iter()
@@ -84,18 +86,30 @@ pub async fn cmd(config_dir: &Path) -> Result<()> {
     let _lock_watch = executor
         .clone()
         .watch_lock(std::time::Duration::from_secs(1));
+    // Anchor the audit log outside SQLite while the server runs, and once
+    // more when it stops.
+    let audit_db = config_dir.join("audit.db");
+    let _anchor_watch = executor
+        .clone()
+        .watch_anchor(ANCHOR_EVERY, audit_db.clone());
+    let anchoring = executor.clone();
     let server = WardenServer::new(presets, executor).with_revealable(revealable);
 
     let running = server
         .serve(stdio_transport())
         .await
         .map_err(|e| WardenError::Executor(format!("serve: {e}")))?;
-    running
+    let stopped = running
         .waiting()
         .await
-        .map_err(|e| WardenError::Executor(format!("waiting: {e}")))?;
+        .map_err(|e| WardenError::Executor(format!("waiting: {e}")));
+    anchoring.anchor_if_moved(&audit_db, None).await;
+    stopped?;
     Ok(())
 }
+
+/// How often a running server moves the audit anchor (when the log grew).
+const ANCHOR_EVERY: std::time::Duration = std::time::Duration::from_secs(60);
 
 /// The presets the server serves: the config's, with every `auto` preset
 /// that no human confirmed in its current form run as `prompt` (an agent
@@ -234,8 +248,8 @@ pub(crate) fn build_approval(
     #[cfg(debug_assertions)]
     if std::env::var("MCP_WARDEN_BACKEND").as_deref() == Ok("memory") {
         let fixed = match env_choice.as_deref() {
-            Some("test-approve") => Some(ApprovalDecision::Approved),
-            Some("test-deny") => Some(ApprovalDecision::Denied),
+            Some("test-approve") => Some(mcp_warden_core::approval::ApprovalDecision::Approved),
+            Some("test-deny") => Some(mcp_warden_core::approval::ApprovalDecision::Denied),
             _ => None,
         };
         if let Some(decision) = fixed {

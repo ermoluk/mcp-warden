@@ -1,6 +1,7 @@
 use crate::error::{Result, WardenError};
 use crate::keychain::KeychainStore;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use url::Url;
 
@@ -145,6 +146,51 @@ pub struct Preset {
     /// except the locations that hold credentials or run code.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_local_paths: Vec<String>,
+    // Named commands (v0.6.0). Every new field stays out of the JSON while
+    // unset: a stamp hashes the preset's JSON, and a field that appeared
+    // there would void every confirmed `auto` preset on upgrade.
+    /// SSH: largest stdout and stderr, each, that `ssh_exec` and `ssh_run`
+    /// read, in bytes; the default for this preset's named commands. It can
+    /// only lower mcp-warden's own ceiling (1 MiB); `None` uses that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_bytes: Option<u64>,
+    /// SSH: also offer each named command as its own MCP tool,
+    /// `ssh_<preset>_<command>`. `ssh_run` works either way.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub expose_as_tools: bool,
+    /// SSH: commands the agent runs by name with typed parameters
+    /// (`ssh_run`), instead of composing a command line.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<NamedCommand>,
+}
+
+impl Preset {
+    /// Every keychain entry this preset reads: its auth's, or its `secret`.
+    pub fn secret_names(&self) -> Vec<&str> {
+        match &self.auth {
+            Some(auth) => auth.secrets(),
+            None => self.secret.as_deref().into_iter().collect(),
+        }
+    }
+
+    /// The entries `get_secret_for_env` may reveal for this preset.
+    pub fn revealable_secrets(&self) -> Vec<&str> {
+        match &self.auth {
+            Some(auth) => auth.revealable(),
+            None => self.secret_names(),
+        }
+    }
+
+    /// Whether a call through this preset could run without a prompt: the
+    /// preset's policy, or any named command's, is `auto`. Each counts only
+    /// once a human confirmed the preset (`stamp::demote_unconfirmed_auto`).
+    pub fn has_auto(&self) -> bool {
+        self.approval == ApprovalPolicy::Auto
+            || self
+                .commands
+                .iter()
+                .any(|c| c.approval == Some(ApprovalPolicy::Auto))
+    }
 }
 
 /// One step of a `response_fields` path.
@@ -198,6 +244,45 @@ pub struct NamedQuery {
     pub readonly: bool,
 }
 
+/// A command an SSH preset runs by name. The template is fixed; the agent
+/// supplies only typed parameter values, each of which becomes one word of
+/// the command (or, for `int` and `enum`, part of one).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NamedCommand {
+    pub name: String,
+    pub description: String,
+    /// Words separated by single spaces; `{param}` stands for a parameter.
+    pub template: String,
+    /// Ordered by name, so the preset's fingerprint is the same on every
+    /// start.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, ParamSpec>,
+    /// Overrides the preset's policy for this command. `auto` counts only
+    /// once a human confirmed the preset (`preset confirm`); a preset set to
+    /// `deny` refuses every command whatever this says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<ApprovalPolicy>,
+    /// Lowers the preset's `max_output_bytes` for this command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_bytes: Option<u64>,
+}
+
+/// What a named command's parameter accepts.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+pub enum ParamSpec {
+    /// One word matching `pattern` (anchored).
+    String { pattern: String },
+    /// An absolute path matching `pattern` (anchored), with no `.` or `..`
+    /// segment and no `//`.
+    Path { pattern: String },
+    /// A decimal integer from `min` to `max`.
+    Int { min: u64, max: u64 },
+    /// One of `values`, exactly.
+    Enum { values: Vec<String> },
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum PresetType {
@@ -232,6 +317,179 @@ pub enum Auth {
         username: String,
         secret: String,
     },
+    /// The credential as a query parameter, `?<name>=<secret>`, as some
+    /// APIs want (Google Maps `key=`). The agent cannot send a parameter of
+    /// that name itself.
+    Query {
+        name: String,
+        secret: String,
+    },
+    /// OAuth 2.0: a fresh access token from `token_url` for every call, sent
+    /// as a bearer token. `client_secret` and `refresh_token` name keychain
+    /// entries; the access token is never stored (invariant 8).
+    Oauth2 {
+        grant: OAuth2Grant,
+        token_url: String,
+        client_id: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        client_secret: Option<String>,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        refresh_token: Option<String>,
+        #[serde(default, skip_serializing_if = "Vec::is_empty")]
+        scopes: Vec<String>,
+        #[serde(default, skip_serializing_if = "ClientAuth::is_basic")]
+        client_auth: ClientAuth,
+    },
+    /// AWS Signature Version 4, signed after every allow-list check.
+    /// `access_key_id`, `secret_access_key` and `session_token` name
+    /// keychain entries.
+    #[serde(rename = "aws_sigv4")]
+    AwsSigv4 {
+        region: String,
+        service: String,
+        access_key_id: String,
+        secret_access_key: String,
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        session_token: Option<String>,
+    },
+}
+
+/// How an OAuth2 preset gets its access token.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuth2Grant {
+    /// Exchange a stored refresh token; a rotated one replaces it.
+    RefreshToken,
+    /// The client's own credentials (machine-to-machine).
+    ClientCredentials,
+}
+
+/// How the client authenticates to the token endpoint (RFC 6749 §2.3.1).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClientAuth {
+    /// HTTP Basic with the client id and secret.
+    #[default]
+    Basic,
+    /// `client_id` and `client_secret` in the form body.
+    Body,
+}
+
+impl ClientAuth {
+    fn is_basic(&self) -> bool {
+        *self == ClientAuth::Basic
+    }
+}
+
+impl Auth {
+    /// The keychain entries this auth reads, in a fixed order.
+    pub fn secrets(&self) -> Vec<&str> {
+        match self {
+            Auth::Bearer { secret }
+            | Auth::Header { secret, .. }
+            | Auth::Basic { secret, .. }
+            | Auth::Query { secret, .. } => vec![secret],
+            Auth::Oauth2 {
+                client_secret,
+                refresh_token,
+                ..
+            } => client_secret
+                .iter()
+                .chain(refresh_token)
+                .map(String::as_str)
+                .collect(),
+            Auth::AwsSigv4 {
+                access_key_id,
+                secret_access_key,
+                session_token,
+                ..
+            } => [access_key_id, secret_access_key]
+                .into_iter()
+                .chain(session_token)
+                .map(String::as_str)
+                .collect(),
+        }
+    }
+
+    /// The entries `get_secret_for_env` may reveal. Not an OAuth2 preset's:
+    /// a refresh token in the agent's hands outlives the call, and once the
+    /// provider rotates it, the stored copy no longer matches.
+    pub fn revealable(&self) -> Vec<&str> {
+        match self {
+            Auth::Oauth2 { .. } => vec![],
+            other => other.secrets(),
+        }
+    }
+}
+
+/// An OAuth2 preset's token endpoint and client. The endpoint receives the
+/// client secret and the refresh token, so it gets the same transport rule
+/// as `base_url`: https, or plain http only to loopback.
+fn validate_oauth2(p: &Preset, auth: &Auth) -> Result<()> {
+    let Auth::Oauth2 {
+        grant,
+        token_url,
+        client_id,
+        client_secret,
+        refresh_token,
+        scopes,
+        ..
+    } = auth
+    else {
+        return Ok(());
+    };
+    let refuse =
+        |why: String| WardenError::Validation(format!("preset '{}': oauth2 {why}", p.name));
+    let url = Url::parse(token_url).map_err(|e| refuse(format!("token_url parse: {e}")))?;
+    let secure = match url.scheme() {
+        "https" => true,
+        "http" => url.host().is_some_and(|h| is_loopback(&h)),
+        _ => false,
+    };
+    if !secure || url.host().is_none() {
+        return Err(refuse(
+            "token_url must be https (plain http only to localhost): it receives the client \
+             secret and the refresh token"
+                .into(),
+        ));
+    }
+    if client_id.is_empty() || client_id.len() > 256 || client_id.chars().any(char::is_control) {
+        return Err(refuse(
+            "client_id must be 1-256 characters, no control characters".into(),
+        ));
+    }
+    match grant {
+        OAuth2Grant::RefreshToken if refresh_token.is_none() => {
+            return Err(refuse(
+                "grant = \"refresh_token\" needs refresh_token".into(),
+            ));
+        }
+        OAuth2Grant::ClientCredentials if client_secret.is_none() => {
+            return Err(refuse(
+                "grant = \"client_credentials\" needs client_secret".into(),
+            ));
+        }
+        OAuth2Grant::ClientCredentials if refresh_token.is_some() => {
+            return Err(refuse(
+                "grant = \"client_credentials\" takes no refresh_token".into(),
+            ));
+        }
+        _ => {}
+    }
+    // RFC 6749 §3.3: scope tokens are printable ASCII without space, '"'
+    // or '\'.
+    if let Some(bad) = scopes.iter().find(|s| {
+        s.is_empty()
+            || !s
+                .bytes()
+                .all(|b| matches!(b, 0x21 | 0x23..=0x5B | 0x5D..=0x7E))
+    }) {
+        return Err(refuse(format!(
+            "scope '{}' is not a valid scope token",
+            bad.escape_debug()
+        )));
+    }
+    Ok(())
 }
 
 /// `localhost`, 127.0.0.0/8 or `::1`: a host whose traffic cannot leave
@@ -268,18 +526,23 @@ impl Config {
             }
             // A preset naming a confirmation stamp (or the key that signs
             // them) could send it upstream or reveal it to the agent.
-            let secret = match &p.auth {
-                Some(
-                    Auth::Bearer { secret }
-                    | Auth::Header { secret, .. }
-                    | Auth::Basic { secret, .. },
-                ) => Some(secret),
-                None => p.secret.as_ref(),
-            };
-            if let Some(secret) = secret.filter(|s| crate::stamp::is_stamp_name(s)) {
+            if let Some(secret) = p
+                .secret_names()
+                .into_iter()
+                .find(|s| crate::stamp::is_reserved_name(s))
+            {
                 return Err(WardenError::Validation(format!(
-                    "preset '{}': keychain entry '{secret}' is reserved for mcp-warden's \
-                     confirmations and cannot be a preset's secret",
+                    "preset '{}': keychain entry '{secret}' is reserved for mcp-warden's own \
+                     records and cannot be a preset's secret",
+                    p.name
+                )));
+            }
+            if p.preset_type != PresetType::Ssh
+                && (!p.commands.is_empty() || p.expose_as_tools || p.max_output_bytes.is_some())
+            {
+                return Err(WardenError::Validation(format!(
+                    "preset '{}': commands, expose_as_tools and max_output_bytes are for ssh \
+                     presets",
                     p.name
                 )));
             }
@@ -291,6 +554,8 @@ impl Config {
                 }
             }
         }
+        crate::commands::validate_tool_names(&self.preset)?;
+        self.validate_refresh_token_entries()?;
         if let Some(approval) = &self.approval
             && let Some(tg) = &approval.telegram
         {
@@ -298,6 +563,13 @@ impl Config {
                 return Err(WardenError::Validation(
                     "approval.telegram.bot_token_secret is empty".into(),
                 ));
+            }
+            if crate::stamp::is_reserved_name(&tg.bot_token_secret) {
+                return Err(WardenError::Validation(format!(
+                    "approval.telegram.bot_token_secret '{}' is reserved for mcp-warden's own \
+                     records",
+                    tg.bot_token_secret
+                )));
             }
             if tg.chat_id == 0 {
                 return Err(WardenError::Validation(
@@ -373,22 +645,74 @@ impl Config {
                 }
             }
         }
-        let secret_name = match &p.auth {
-            Some(Auth::Bearer { secret })
-            | Some(Auth::Header { secret, .. })
-            | Some(Auth::Basic { secret, .. }) => secret.clone(),
-            None => {
+        let Some(auth) = &p.auth else {
+            return Err(WardenError::Validation(format!(
+                "preset '{}': auth required",
+                p.name
+            )));
+        };
+        if let Auth::Query { name, .. } = auth {
+            if name.is_empty()
+                || name.len() > 64
+                || !name
+                    .chars()
+                    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '.' | '-'))
+            {
                 return Err(WardenError::Validation(format!(
-                    "preset '{}': auth required",
+                    "preset '{}': query auth name must be 1-64 of A-Z a-z 0-9 _ . -",
                     p.name
                 )));
             }
-        };
-        if kc.get(&secret_name)?.is_none() {
-            return Err(WardenError::MissingSecret {
-                preset: p.name.clone(),
-                secret: secret_name,
-            });
+            if parsed
+                .query_pairs()
+                .any(|(k, _)| k.eq_ignore_ascii_case(name))
+            {
+                return Err(WardenError::Validation(format!(
+                    "preset '{}': base_url already has a '{name}' query parameter; the \
+                     credential would be sent twice",
+                    p.name
+                )));
+            }
+        }
+        if let Auth::Oauth2 { .. } = auth {
+            validate_oauth2(p, auth)?;
+        }
+        if let Auth::AwsSigv4 {
+            region, service, ..
+        } = auth
+        {
+            for (field, value) in [("region", region), ("service", service)] {
+                if value.is_empty()
+                    || value.len() > 32
+                    || !value
+                        .bytes()
+                        .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'-')
+                {
+                    return Err(WardenError::Validation(format!(
+                        "preset '{}': aws_sigv4 {field} must be 1-32 of a-z 0-9 -",
+                        p.name
+                    )));
+                }
+            }
+        }
+        let names = auth.secrets();
+        if names
+            .iter()
+            .enumerate()
+            .any(|(i, n)| names[..i].contains(n))
+        {
+            return Err(WardenError::Validation(format!(
+                "preset '{}': each credential of its auth needs a keychain entry of its own",
+                p.name
+            )));
+        }
+        for secret in auth.secrets() {
+            if kc.get(secret)?.is_none() {
+                return Err(WardenError::MissingSecret {
+                    preset: p.name.clone(),
+                    secret: secret.to_string(),
+                });
+            }
         }
         Ok(())
     }
@@ -426,6 +750,7 @@ impl Config {
                 ))
             })?;
         }
+        crate::commands::validate_preset(p)?;
         if p.allow_sftp {
             for dir in &p.allowed_local_paths {
                 if !Path::new(dir).is_absolute() {
@@ -488,6 +813,45 @@ impl Config {
             if q.name.is_empty() || q.template.is_empty() {
                 return Err(WardenError::Validation(format!(
                     "preset '{}': named query has empty name or template",
+                    p.name
+                )));
+            }
+        }
+        Ok(())
+    }
+
+    /// A refresh token's keychain entry is written when the provider
+    /// rotates the token, so it may belong to that one preset only: a
+    /// hostile token endpoint must not be able to overwrite another
+    /// preset's credential, a wrapped server's key or the Telegram token.
+    fn validate_refresh_token_entries(&self) -> Result<()> {
+        for p in &self.preset {
+            let Some(Auth::Oauth2 {
+                refresh_token: Some(entry),
+                ..
+            }) = &p.auth
+            else {
+                continue;
+            };
+            let shared = self
+                .preset
+                .iter()
+                .filter(|q| q.secret_names().contains(&entry.as_str()))
+                .count()
+                > 1
+                || self
+                    .server
+                    .iter()
+                    .any(|s| s.env.iter().any(|var| &s.secret_name(var) == entry))
+                || self
+                    .approval
+                    .as_ref()
+                    .and_then(|a| a.telegram.as_ref())
+                    .is_some_and(|t| &t.bot_token_secret == entry);
+            if shared {
+                return Err(WardenError::Validation(format!(
+                    "preset '{}': refresh_token entry '{entry}' is also used elsewhere; a \
+                     rotated token is written back to it, so give it an entry of its own",
                     p.name
                 )));
             }
@@ -757,7 +1121,13 @@ mod tests {
     #[test]
     fn presets_cannot_use_a_reserved_keychain_name() {
         let kc = InMemoryKeychain::new();
-        kc.set("stamp/key", Secret::new("k".into())).unwrap();
+        for name in [
+            "stamp/key",
+            "audit/anchor/0123456789abcdef",
+            "audit/anchor/x",
+        ] {
+            kc.set(name, Secret::new("k".into())).unwrap();
+        }
         for preset in [
             r#"
             [[preset]]
@@ -778,6 +1148,21 @@ mod tests {
             user = "u"
             secret = "stamp/key"
             approval = "prompt"
+            "#,
+            r#"
+            [[preset]]
+            name = "p"
+            type = "http"
+            description = "x"
+            base_url = "https://example.com"
+            auth = { type = "query", name = "key", secret = "audit/anchor/0123456789abcdef" }
+            allowed_methods = ["GET"]
+            approval = "prompt"
+            "#,
+            r#"
+            [approval.telegram]
+            bot_token_secret = "audit/anchor/x"
+            chat_id = 42
             "#,
         ] {
             let cfg: Config = toml::from_str(preset).unwrap();
@@ -1018,6 +1403,9 @@ mod tests {
                 max_response_bytes: None,
                 response_fields: vec![],
                 allowed_local_paths: vec![],
+                max_output_bytes: None,
+                expose_as_tools: false,
+                commands: vec![],
             }],
         };
         let s = toml::to_string(&cfg).unwrap();
@@ -1033,5 +1421,222 @@ mod tests {
         let kc = InMemoryKeychain::new();
         kc.set("redis_password", Secret::new("p".into())).unwrap();
         cfg.validate(&kc).unwrap();
+    }
+
+    fn named_commands() -> Config {
+        toml::from_str(include_str!("../../tests/fixtures/named_commands.toml")).unwrap()
+    }
+
+    #[test]
+    fn named_commands_parse() {
+        let cfg = named_commands();
+        let p = &cfg.preset[0];
+        assert!(p.expose_as_tools);
+        assert_eq!(p.max_output_bytes, Some(65536));
+        let names: Vec<_> = p.commands.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["tail_log", "restart", "trash_file", "checkout", "head_log"]
+        );
+        assert_eq!(
+            p.commands[0].params["lines"],
+            ParamSpec::Int { min: 1, max: 500 }
+        );
+        assert_eq!(p.commands[0].max_output_bytes, Some(262144));
+        assert_eq!(
+            p.commands[1].params["unit"],
+            ParamSpec::Enum {
+                values: vec!["app.service".into(), "worker.service".into()]
+            }
+        );
+        assert!(matches!(
+            p.commands[2].params["path"],
+            ParamSpec::Path { .. }
+        ));
+        assert!(matches!(
+            p.commands[3].params["tag"],
+            ParamSpec::String { .. }
+        ));
+        assert_eq!(p.commands[0].approval, None);
+    }
+
+    #[test]
+    fn named_commands_round_trip_through_toml() {
+        let cfg = named_commands();
+        let written = toml::to_string_pretty(&cfg).unwrap();
+        let again: Config = toml::from_str(&written).unwrap();
+        assert_eq!(
+            serde_json::to_value(&again.preset).unwrap(),
+            serde_json::to_value(&cfg.preset).unwrap()
+        );
+    }
+
+    /// A typo in a command or a parameter must not be silently ignored:
+    /// `pattrn` instead of `pattern` would leave a parameter unchecked.
+    #[test]
+    fn unknown_fields_in_commands_and_params_are_refused() {
+        let base = include_str!("../../tests/fixtures/named_commands.toml");
+        for (from, to) in [
+            (
+                "template = \"mv {path} /srv/app/.trash/\"",
+                "template = \"mv {path} /srv/app/.trash/\"\nunknown = 1",
+            ),
+            ("type = \"path\", pattern", "type = \"path\", pattrn"),
+            (
+                "type = \"int\", min = 1, max = 500",
+                "type = \"int\", min = 1, max = 500, step = 2",
+            ),
+            ("type = \"enum\"", "type = \"regex\""),
+        ] {
+            assert!(base.contains(from), "{from}");
+            let edited = base.replacen(from, to, 1);
+            assert!(toml::from_str::<Config>(&edited).is_err(), "accepted: {to}");
+        }
+    }
+
+    /// Presets without commands serialise exactly as before 0.6.0, so their
+    /// stamps stay valid.
+    #[test]
+    fn presets_without_commands_serialise_without_the_new_fields() {
+        let cfg: Config =
+            toml::from_str(include_str!("../../tests/fixtures/ssh_preset.toml")).unwrap();
+        let json = serde_json::to_value(&cfg.preset[0]).unwrap();
+        for field in ["max_output_bytes", "expose_as_tools", "commands"] {
+            assert!(json.get(field).is_none(), "{field}");
+        }
+    }
+
+    /// One bad command stops the server, naming the preset and the command
+    /// (invariant 10).
+    #[test]
+    fn a_bad_named_command_refuses_the_whole_config() {
+        let base = include_str!("../../tests/fixtures/named_commands.toml");
+        let kc = InMemoryKeychain::new();
+        kc.set("deploy_key", Secret::new("k".into())).unwrap();
+        let ok: Config = toml::from_str(base).unwrap();
+        ok.validate(&kc).unwrap();
+        let bad: Config = toml::from_str(&base.replacen(
+            "mv {path} /srv/app/.trash/",
+            "mv {path} /srv/app/.trash/ ; id",
+            1,
+        ))
+        .unwrap();
+        let err = bad.validate(&kc).unwrap_err().to_string();
+        assert!(
+            err.contains("preset 'deploy': command 'trash_file'"),
+            "{err}"
+        );
+    }
+
+    #[test]
+    fn named_commands_are_for_ssh_presets_only() {
+        let mut cfg: Config =
+            toml::from_str(include_str!("../../tests/fixtures/valid_config.toml")).unwrap();
+        let commands = named_commands().preset[0].commands.clone();
+        cfg.preset[0].commands = commands;
+        let kc = InMemoryKeychain::new();
+        for name in ["github_pat", "gh_pat", "k"] {
+            kc.set(name, Secret::new("x".into())).unwrap();
+        }
+        let err = cfg.validate(&kc).unwrap_err().to_string();
+        assert!(err.contains("are for ssh presets"), "{err}");
+    }
+
+    #[test]
+    fn query_auth_names_are_checked() {
+        let kc = InMemoryKeychain::new();
+        kc.set("maps_key", Secret::new("x".into())).unwrap();
+        let config = |base: &str, name: &str| -> Config {
+            toml::from_str(&format!(
+                r#"
+                [[preset]]
+                name = "maps"
+                type = "http"
+                description = "x"
+                base_url = "{base}"
+                auth = {{ type = "query", name = "{name}", secret = "maps_key" }}
+                allowed_methods = ["GET"]
+                approval = "prompt"
+                "#
+            ))
+            .unwrap()
+        };
+        config("https://maps.example.com", "key")
+            .validate(&kc)
+            .unwrap();
+        for (base, name) in [
+            ("https://maps.example.com", ""),
+            ("https://maps.example.com", "a b"),
+            ("https://maps.example.com", "k&x"),
+            ("https://maps.example.com?KEY=1", "key"),
+        ] {
+            assert!(config(base, name).validate(&kc).is_err(), "{base} {name:?}");
+        }
+    }
+
+    #[test]
+    fn oauth2_presets_are_checked() {
+        let kc = InMemoryKeychain::new();
+        for name in ["cs", "rt", "other"] {
+            kc.set(name, Secret::new("x".into())).unwrap();
+        }
+        let config = |auth: &str, extra: &str| -> Config {
+            toml::from_str(&format!(
+                r#"
+                [[preset]]
+                name = "drive"
+                type = "http"
+                description = "x"
+                base_url = "https://www.googleapis.com"
+                allowed_methods = ["GET"]
+                approval = "prompt"
+                [preset.auth]
+                type = "oauth2"
+                client_id = "id"
+                {auth}
+                {extra}
+                "#
+            ))
+            .unwrap()
+        };
+        let ok = r#"grant = "refresh_token"
+            token_url = "https://oauth2.googleapis.com/token"
+            client_secret = "cs"
+            refresh_token = "rt""#;
+        config(ok, "").validate(&kc).unwrap();
+        config(
+            r#"grant = "client_credentials"
+            token_url = "http://localhost:8080/token"
+            client_secret = "cs"
+            scopes = ["a.read", "b:write"]"#,
+            "",
+        )
+        .validate(&kc)
+        .unwrap();
+        for bad in [
+            ok.replace(
+                "https://oauth2.googleapis.com",
+                "http://oauth2.googleapis.com",
+            ),
+            ok.replace("https://oauth2.googleapis.com/token", "file:///etc/token"),
+            ok.replace("refresh_token = \"rt\"", ""),
+            ok.replace("refresh_token = \"rt\"", "refresh_token = \"cs\""),
+            ok.replace("\"refresh_token\"\n", "\"client_credentials\"\n"),
+            ok.replace("refresh_token = \"rt\"", "refresh_token = \"missing\""),
+            ok.replace("refresh_token = \"rt\"", "refresh_token = \"stamp/key\""),
+            format!("{ok}\nscopes = [\"a b\"]"),
+            format!("{ok}\nscopes = [\"\"]"),
+        ] {
+            assert!(config(&bad, "").validate(&kc).is_err(), "{bad}");
+        }
+        // The refresh token's entry is written on rotation: nothing else
+        // may use it.
+        let shared = format!(
+            "{ok}\n[[preset]]\nname = \"other\"\ntype = \"http\"\ndescription = \"x\"\n\
+             base_url = \"https://api.example.com\"\nallowed_methods = [\"GET\"]\n\
+             approval = \"prompt\"\nauth = {{ type = \"bearer\", secret = \"rt\" }}"
+        );
+        let err = config(&shared, "").validate(&kc).unwrap_err().to_string();
+        assert!(err.contains("also used elsewhere"), "{err}");
     }
 }

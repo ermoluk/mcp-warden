@@ -269,9 +269,9 @@ impl Handler for WardenSftpHandler {
 
     async fn check_server_key(
         &mut self,
-        server_public_key: &ssh_key::PublicKey,
+        server_public_key: &russh::keys::PublicKeyOrCertificate,
     ) -> std::result::Result<bool, Self::Error> {
-        crate::executor::known_hosts::verify(
+        crate::executor::known_hosts::verify_presented(
             &self.host,
             self.port,
             server_public_key,
@@ -393,11 +393,9 @@ async fn transfer_inner(
     let mut session = client::connect(config, (host.as_str(), port), handler)
         .await
         .map_err(|e| WardenError::Executor(format!("connect: {e}")))?;
+    let key = super::ssh::signing_key(&session, private_key).await?;
     let auth = session
-        .authenticate_publickey(
-            &user,
-            russh::keys::PrivateKeyWithHashAlg::new(Arc::new(private_key), None),
-        )
+        .authenticate_publickey(&user, key)
         .await
         .map_err(|e| WardenError::Executor(format!("auth: {e}")))?;
     if !auth.success() {
@@ -483,6 +481,9 @@ pub(crate) mod tests {
             max_response_bytes: None,
             response_fields: vec![],
             allowed_local_paths: vec![],
+            max_output_bytes: None,
+            expose_as_tools: false,
+            commands: vec![],
         }
     }
 
