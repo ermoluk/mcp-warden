@@ -54,6 +54,9 @@ pub async fn run(args: DoctorArgs, config_dir: &Path, store: Arc<dyn KeychainSto
             "absent (created on first MCP call)"
         }
     );
+    if db_path.exists() {
+        println!("audit chain: {}", audit_chain_status(&db_path, kc));
+    }
     let names: Vec<String> = kc
         .list_names()
         .unwrap_or_default()
@@ -282,6 +285,39 @@ async fn run_probes(
         }
     }
     out
+}
+
+/// One line on the audit log's hash chain and its keychain anchor; the
+/// details are `mcp-warden audit verify`'s.
+pub(crate) fn audit_chain_status(db: &Path, kc: &dyn KeychainStore) -> String {
+    use mcp_warden_core::audit::AuditSink;
+    use mcp_warden_core::audit::anchor::{self, AnchorCheck};
+    let sink = match mcp_warden_core::audit::sqlite_sink::LocalSqlite::open(db) {
+        Ok(s) => s,
+        Err(e) => return format!("cannot open the audit log: {e}"),
+    };
+    let report = match sink.verify_chain() {
+        Ok(r) => r,
+        Err(e) => return format!("cannot check: {e}"),
+    };
+    if let Some(first) = report.problems.first() {
+        return format!(
+            "BROKEN — {} (`mcp-warden audit verify` lists everything)",
+            crate::cli::audit::for_terminal(first, 160)
+        );
+    }
+    let anchor = match anchor::check(kc, &sink, db) {
+        Ok(AnchorCheck::NotAnchored) => "not anchored yet".to_string(),
+        Ok(AnchorCheck::Anchored { seq, .. }) => format!("anchored through record {seq}"),
+        Ok(AnchorCheck::Removed { seq }) => {
+            format!("BROKEN — records up to the anchored {seq} are gone")
+        }
+        Ok(AnchorCheck::Rewritten { seq }) => {
+            format!("BROKEN — rewritten before the anchored record {seq}")
+        }
+        Err(e) => format!("anchor unreadable: {e}"),
+    };
+    format!("intact, {} records; {anchor}", report.records)
 }
 
 async fn probe_http(
@@ -840,6 +876,29 @@ mod tests {
         ] {
             assert!(pattern_warnings(&ssh_with(&[tight])).is_empty(), "{tight}");
         }
+    }
+
+    #[test]
+    fn doctor_reports_the_audit_chain() {
+        use mcp_warden_core::audit::AuditSink;
+        let dir = tempfile::tempdir().unwrap();
+        let db = dir.path().join("audit.db");
+        let sink = mcp_warden_core::audit::sqlite_sink::LocalSqlite::open(&db).unwrap();
+        sink.record_pending("p", "proxy_http", "GET /").unwrap();
+        let kc = mcp_warden_core::keychain::memory::InMemoryKeychain::new();
+        assert_eq!(
+            audit_chain_status(&db, &kc),
+            "intact, 2 records; not anchored yet"
+        );
+        mcp_warden_core::audit::anchor::advance(&kc, &sink, &db, None).unwrap();
+        assert_eq!(
+            audit_chain_status(&db, &kc),
+            "intact, 2 records; anchored through record 2"
+        );
+        let c = rusqlite::Connection::open(&db).unwrap();
+        c.execute_batch("UPDATE events SET summary = 'x' WHERE id = 1")
+            .unwrap();
+        assert!(audit_chain_status(&db, &kc).starts_with("BROKEN — event 1 changed"));
     }
 
     #[test]

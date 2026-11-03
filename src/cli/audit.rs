@@ -240,6 +240,6 @@ fn finish(ok: bool) -> Result<()> {
 /// Preset names, summaries and errors can be agent-supplied (refused calls
 /// record them verbatim): strip control characters so they cannot drive the
 /// terminal, and cap the width so one event stays one readable line.
-fn for_terminal(s: &str, max_chars: usize) -> String {
+pub(crate) fn for_terminal(s: &str, max_chars: usize) -> String {
     clip(&sanitise_for_prompt(s, usize::MAX), max_chars)
 }
