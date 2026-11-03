@@ -1,3 +1,4 @@
+pub mod generated;
 pub mod server;
 pub mod tools;
 

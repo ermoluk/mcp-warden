@@ -25,9 +25,9 @@ pub struct WardenServer {
     /// The only names `get_secret_for_env` may reveal: the secrets of the
     /// frozen presets and wrapped servers, never the Telegram bot token.
     revealable: Arc<std::collections::HashSet<String>>,
-    /// Populated by the `#[tool_router]` macro; read internally by the
-    /// generated `ServerHandler` impl from `#[tool_handler]`.
-    #[allow(dead_code)]
+    /// The tools served: the static ones from `#[tool_router]` and the
+    /// ones generated from the presets' named commands, built once in
+    /// [`WardenServer::new`]. `#[tool_handler]` lists and calls through it.
     tool_router: rmcp::handler::server::router::tool::ToolRouter<Self>,
 }
 
@@ -111,18 +111,19 @@ pub struct GetSecretForEnvResponse {
 #[tool_router]
 impl WardenServer {
     pub fn new(presets: Arc<dyn PresetSource>, executor: Arc<ActionExecutor>) -> Self {
-        let revealable = presets
-            .list()
-            .unwrap_or_default()
-            .iter()
-            .filter_map(preset_secret)
-            .collect();
+        let listed = presets.list().unwrap_or_default();
+        let revealable = listed.iter().filter_map(preset_secret).collect();
         Self {
             presets,
             executor,
             revealable: Arc::new(revealable),
-            tool_router: Self::tool_router(),
+            tool_router: Self::tool_router() + super::generated::router(&listed),
         }
+    }
+
+    /// Every tool this server offers, as `tools/list` returns them.
+    pub fn served_tools(&self) -> Vec<rmcp::model::Tool> {
+        self.tool_router.list_all()
     }
 
     /// Set the names `get_secret_for_env` may reveal (see `revealable`).
@@ -604,7 +605,7 @@ fn map_warden_err(e: mcp_warden_core::error::WardenError) -> McpError {
     }
 }
 
-#[tool_handler]
+#[tool_handler(router = self.tool_router)]
 impl ServerHandler for WardenServer {
     /// Record which client connected, so every audit event of this session
     /// names it. The name and version come from the client: sanitised and
