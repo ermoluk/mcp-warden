@@ -159,12 +159,44 @@ pub async fn mint(
         ));
     }
     if let Some(rotated) = token_field(&json, "refresh_token")? {
+        // A provider that rotates refresh tokens has just made the stored
+        // one unusable, so the new one is written back while the lock is
+        // still held. If that fails, so does the call: going on would leave
+        // a dead token in the keychain without anyone knowing.
+        if let (OAuth2Grant::RefreshToken, Some(entry)) = (grant, refresh_token)
+            && refresh_tokens
+                .first()
+                .is_some_and(|old| old.expose() != rotated.expose())
+        {
+            store_rotated(kc, &preset.name, entry, &rotated)?;
+        }
         refresh_tokens.push(rotated);
     }
     Ok(Minted {
         access_token,
         refresh_tokens,
     })
+}
+
+fn store_rotated(kc: &dyn KeychainStore, preset: &str, entry: &str, token: &Secret) -> Result<()> {
+    // Config validation already keeps reserved names out; never write one.
+    if mcp_warden_core::stamp::is_stamp_name(entry) {
+        return Err(WardenError::Validation(format!(
+            "preset '{preset}': refusing to write a rotated refresh token to '{entry}'"
+        )));
+    }
+    kc.set(entry, Secret::new(token.expose().to_string()))
+        .map_err(|e| {
+            tracing::error!(
+                "preset '{preset}': the provider rotated the refresh token but it could not be \
+                 stored in '{entry}': {e}"
+            );
+            WardenError::Executor(format!(
+                "the provider rotated the refresh token, but storing it in '{entry}' failed \
+                 ({e}); the stored token may no longer work — authorise again and run \
+                 `mcp-warden secret add {entry}`"
+            ))
+        })
 }
 
 /// A token string from the endpoint's answer: printable ASCII without
@@ -513,5 +545,101 @@ mod tests {
         .unwrap();
         assert_eq!(p.secret_names(), ["cs", "rt"]);
         assert!(p.revealable_secrets().is_empty());
+    }
+
+    /// A provider that rotates: each refresh token works once, and each
+    /// answer carries the next one.
+    async fn rotating_endpoint(server: &MockServer) -> Arc<Mutex<String>> {
+        let current = Arc::new(Mutex::new(REFRESH_TOKEN.to_string()));
+        let state = current.clone();
+        let issued = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+        Mock::given(method("POST"))
+            .and(path("/token"))
+            .respond_with(move |req: &wiremock::Request| {
+                let sent = form(req)["refresh_token"].clone();
+                let mut current = state.lock().unwrap();
+                if sent != *current {
+                    return ResponseTemplate::new(400)
+                        .set_body_json(serde_json::json!({"error": "invalid_grant"}));
+                }
+                let n = issued.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                *current = format!("rt-ROTATED-{n}");
+                ResponseTemplate::new(200).set_body_json(serde_json::json!({
+                    "access_token": format!("at-{n}"),
+                    "refresh_token": *current,
+                }))
+            })
+            .mount(server)
+            .await;
+        current
+    }
+
+    /// Two calls at once, as two agents' calls would be: the second waits
+    /// for the first to store the rotated token, so both succeed.
+    #[tokio::test]
+    async fn a_rotated_refresh_token_is_stored_and_calls_take_turns() {
+        let (api, token) = (MockServer::start().await, MockServer::start().await);
+        let current = rotating_endpoint(&token).await;
+        api_echoes(&api).await;
+        let s = setup(&api, &token, REFRESH);
+        let (a, b) = tokio::join!(get(&s), get(&s));
+        a.unwrap();
+        b.unwrap();
+        let stored = s.exec.keychain.get("rt").unwrap().unwrap();
+        assert_eq!(stored.expose(), current.lock().unwrap().as_str());
+        assert_eq!(stored.expose(), "rt-ROTATED-1");
+    }
+
+    /// The same across processes: the lock file in the config dir.
+    #[tokio::test]
+    async fn the_lock_file_serialises_callers_with_a_config_dir() {
+        let (api, token) = (MockServer::start().await, MockServer::start().await);
+        rotating_endpoint(&token).await;
+        api_echoes(&api).await;
+        let mut s = setup(&api, &token, REFRESH);
+        let dir = tempfile::tempdir().unwrap();
+        s.exec = s.exec.with_state_dir(dir.path().to_path_buf());
+        let (a, b) = tokio::join!(get(&s), get(&s));
+        a.unwrap();
+        b.unwrap();
+        let locks: Vec<_> = std::fs::read_dir(dir.path().join("locks"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().into_string().unwrap())
+            .collect();
+        assert_eq!(locks.len(), 1);
+        assert!(locks[0].starts_with("oauth2-"), "{locks:?}");
+    }
+
+    struct ReadOnly(CountingKeychain);
+    impl KeychainStore for ReadOnly {
+        fn set(&self, _: &str, _: Secret) -> Result<()> {
+            Err(WardenError::Keychain("locked".into()))
+        }
+        fn get(&self, name: &str) -> Result<Option<Secret>> {
+            self.0.get(name)
+        }
+        fn delete(&self, name: &str) -> Result<()> {
+            self.0.delete(name)
+        }
+        fn list_names(&self) -> Result<Vec<String>> {
+            self.0.list_names()
+        }
+    }
+
+    /// Fail closed: a rotated token that cannot be stored ends the call.
+    #[tokio::test]
+    async fn a_rotated_token_that_cannot_be_stored_fails_the_call() {
+        let (api, token) = (MockServer::start().await, MockServer::start().await);
+        rotating_endpoint(&token).await;
+        api_echoes(&api).await;
+        let mut s = setup(&api, &token, REFRESH);
+        let kc = CountingKeychain::default();
+        kc.set("cs", Secret::new(CLIENT_SECRET.into())).unwrap();
+        kc.set("rt", Secret::new(REFRESH_TOKEN.into())).unwrap();
+        s.exec.keychain = Arc::new(ReadOnly(kc));
+        let err = get(&s).await.unwrap_err().to_string();
+        assert!(err.contains("storing it in 'rt' failed"), "{err}");
+        assert!(!err.contains("rt-ROTATED"), "{err}");
+        assert!(api.received_requests().await.unwrap().is_empty());
     }
 }
