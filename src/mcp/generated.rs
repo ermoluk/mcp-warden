@@ -156,11 +156,38 @@ mod tests {
         cfg.preset
     }
 
+    /// What the generator writes: names, descriptions and input schemas.
+    /// The output schema is ssh_exec's, built by schemars, whose layout
+    /// changes between its releases: compared with ssh_exec's instead.
     #[test]
     fn generated_tools_are_pinned() {
         let mut presets = fixture();
         presets[0].commands[1].approval = Some(ApprovalPolicy::Deny);
-        insta::assert_json_snapshot!(tools(&presets));
+        let tools = tools(&presets);
+        let dir = tempfile::tempdir().unwrap();
+        let exec = Arc::new(ActionExecutor::new(
+            CountingKeychain::with(&[]),
+            CountingApproval::new(ApprovalDecision::Denied),
+            None,
+            Arc::new(LocalSqlite::open(&dir.path().join("audit.db")).unwrap()),
+        ));
+        let ssh_exec = WardenServer::new(Arc::new(FrozenSource::new(vec![])), exec)
+            .served_tools()
+            .into_iter()
+            .find(|t| t.name == "ssh_exec")
+            .and_then(|t| t.output_schema);
+        let pinned: Vec<Value> = tools
+            .iter()
+            .map(|t| {
+                assert_eq!(t.output_schema, ssh_exec, "{}", t.name);
+                json!({
+                    "name": t.name,
+                    "description": t.description,
+                    "inputSchema": *t.input_schema,
+                })
+            })
+            .collect();
+        insta::assert_json_snapshot!(pinned);
     }
 
     #[test]

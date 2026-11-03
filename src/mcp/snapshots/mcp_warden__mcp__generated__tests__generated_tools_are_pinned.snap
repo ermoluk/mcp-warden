@@ -1,6 +1,6 @@
 ---
 source: src/mcp/generated.rs
-expression: tools(&presets)
+expression: pinned
 ---
 [
   {
@@ -19,38 +19,6 @@ expression: tools(&presets)
         "lines"
       ],
       "additionalProperties": false
-    },
-    "outputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "title": "SshExecResponse",
-      "type": "object",
-      "properties": {
-        "stdout": {
-          "type": "string"
-        },
-        "stderr": {
-          "type": "string"
-        },
-        "exit_code": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "minimum": 0
-        },
-        "notice": {
-          "description": "Set when mcp-warden stopped reading the output (over the limit).",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "stdout",
-        "stderr"
-      ]
     }
   },
   {
@@ -71,38 +39,6 @@ expression: tools(&presets)
         "unit"
       ],
       "additionalProperties": false
-    },
-    "outputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "title": "SshExecResponse",
-      "type": "object",
-      "properties": {
-        "stdout": {
-          "type": "string"
-        },
-        "stderr": {
-          "type": "string"
-        },
-        "exit_code": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "minimum": 0
-        },
-        "notice": {
-          "description": "Set when mcp-warden stopped reading the output (over the limit).",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "stdout",
-        "stderr"
-      ]
     }
   },
   {
@@ -120,38 +56,6 @@ expression: tools(&presets)
         "path"
       ],
       "additionalProperties": false
-    },
-    "outputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "title": "SshExecResponse",
-      "type": "object",
-      "properties": {
-        "stdout": {
-          "type": "string"
-        },
-        "stderr": {
-          "type": "string"
-        },
-        "exit_code": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "minimum": 0
-        },
-        "notice": {
-          "description": "Set when mcp-warden stopped reading the output (over the limit).",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "stdout",
-        "stderr"
-      ]
     }
   },
   {
@@ -169,38 +73,6 @@ expression: tools(&presets)
         "tag"
       ],
       "additionalProperties": false
-    },
-    "outputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "title": "SshExecResponse",
-      "type": "object",
-      "properties": {
-        "stdout": {
-          "type": "string"
-        },
-        "stderr": {
-          "type": "string"
-        },
-        "exit_code": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "minimum": 0
-        },
-        "notice": {
-          "description": "Set when mcp-warden stopped reading the output (over the limit).",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "stdout",
-        "stderr"
-      ]
     }
   },
   {
@@ -219,38 +91,6 @@ expression: tools(&presets)
         "n"
       ],
       "additionalProperties": false
-    },
-    "outputSchema": {
-      "$schema": "https://json-schema.org/draft/2020-12/schema",
-      "title": "SshExecResponse",
-      "type": "object",
-      "properties": {
-        "stdout": {
-          "type": "string"
-        },
-        "stderr": {
-          "type": "string"
-        },
-        "exit_code": {
-          "type": [
-            "integer",
-            "null"
-          ],
-          "format": "uint32",
-          "minimum": 0
-        },
-        "notice": {
-          "description": "Set when mcp-warden stopped reading the output (over the limit).",
-          "type": [
-            "string",
-            "null"
-          ]
-        }
-      },
-      "required": [
-        "stdout",
-        "stderr"
-      ]
     }
   }
 ]
