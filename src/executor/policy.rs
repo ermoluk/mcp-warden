@@ -21,6 +21,11 @@ pub enum Request<'a> {
     Ssh {
         command: &'a str,
     },
+    /// `ssh_run`: a named command and its parameter values.
+    SshRun {
+        command: &'a str,
+        params: &'a BTreeMap<String, Value>,
+    },
     Sftp {
         remote: &'a str,
         local: &'a str,
@@ -47,6 +52,7 @@ impl<'a> Request<'a> {
         match self {
             Request::Http { .. } => "proxy_http",
             Request::Ssh { .. } => "ssh_exec",
+            Request::SshRun { .. } => "ssh_run",
             Request::Sftp { .. } => "sftp_transfer",
             Request::Db { .. } => "db_query",
         }
@@ -56,7 +62,7 @@ impl<'a> Request<'a> {
     fn needs(&self) -> &'static str {
         match self {
             Request::Http { .. } => "http",
-            Request::Ssh { .. } | Request::Sftp { .. } => "ssh",
+            Request::Ssh { .. } | Request::SshRun { .. } | Request::Sftp { .. } => "ssh",
             Request::Db { .. } => "database (postgres / mysql / redis)",
         }
     }
@@ -64,7 +70,9 @@ impl<'a> Request<'a> {
     fn fits(&self, kind: PresetType) -> bool {
         match self {
             Request::Http { .. } => kind == PresetType::Http,
-            Request::Ssh { .. } | Request::Sftp { .. } => kind == PresetType::Ssh,
+            Request::Ssh { .. } | Request::SshRun { .. } | Request::Sftp { .. } => {
+                kind == PresetType::Ssh
+            }
             Request::Db { .. } => matches!(
                 kind,
                 PresetType::Postgres | PresetType::Mysql | PresetType::Redis
@@ -97,6 +105,9 @@ pub fn check_request(preset: &Preset, req: &Request) -> Result<()> {
             super::http::check_query_and_body_keys(query, body)
         }
         Request::Ssh { command } => super::ssh::validate_command(preset, command),
+        Request::SshRun { command, params } => {
+            mcp_warden_core::commands::render(preset, command, params).map(drop)
+        }
         Request::Sftp { remote, local } => super::sftp::validate_transfer(preset, remote, local),
         Request::Db { query, params } => {
             super::db::find_query(preset, query, params.len()).map(drop)
@@ -135,7 +146,19 @@ pub fn simulate(preset: &Preset, req: &Request, now: DateTime<Utc>) -> Verdict {
     if let Err(e) = check_expiry(preset, now).and_then(|()| check_request(preset, req)) {
         return Verdict::Refused(e.to_string());
     }
-    match preset.approval {
+    let policy = match *req {
+        Request::SshRun { command, params } => {
+            match mcp_warden_core::commands::render(preset, command, params) {
+                Ok(r) => r.approval,
+                Err(e) => return Verdict::Refused(e.to_string()),
+            }
+        }
+        _ => preset.approval,
+    };
+    match policy {
+        ApprovalPolicy::Deny if preset.approval != ApprovalPolicy::Deny => {
+            Verdict::Refused("command policy is deny".into())
+        }
         ApprovalPolicy::Deny => Verdict::Refused("preset policy is deny".into()),
         ApprovalPolicy::Auto => Verdict::Allowed {
             policy: ApprovalPolicy::Auto,
@@ -357,6 +380,107 @@ mod tests {
             Verdict::Refused(why) => assert!(why.contains("DELETE"), "{why}"),
             other => panic!("{other:?}"),
         }
+    }
+
+    fn named() -> Preset {
+        let cfg: mcp_warden_core::config::Config =
+            toml::from_str(include_str!("../../tests/fixtures/named_commands.toml")).unwrap();
+        cfg.preset[0].clone()
+    }
+
+    fn params(v: Value) -> BTreeMap<String, Value> {
+        serde_json::from_value(v).unwrap()
+    }
+
+    #[test]
+    fn ssh_run_renders_through_the_same_check() {
+        let p = named();
+        let ok = params(serde_json::json!({"lines": 50}));
+        let req = Request::SshRun {
+            command: "tail_log",
+            params: &ok,
+        };
+        assert_eq!(req.tool(), "ssh_run");
+        check_request(&p, &req).unwrap();
+        let bad = params(serde_json::json!({"lines": "50 ; id"}));
+        let req = Request::SshRun {
+            command: "tail_log",
+            params: &bad,
+        };
+        assert!(check_request(&p, &req).is_err());
+        // Only SSH presets run commands.
+        let req = Request::SshRun {
+            command: "tail_log",
+            params: &ok,
+        };
+        let err = check_request(&http(ApprovalPolicy::Prompt), &req)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("ssh_run needs one"), "{err}");
+    }
+
+    #[test]
+    fn ssh_run_limits_come_first() {
+        let p = named();
+        let many = params(serde_json::Value::Object(
+            (0..17)
+                .map(|i| (format!("p{i}"), serde_json::json!(1)))
+                .collect(),
+        ));
+        let req = Request::SshRun {
+            command: "tail_log",
+            params: &many,
+        };
+        let err = check_request(&p, &req).unwrap_err().to_string();
+        assert!(err.contains("the limit is 16 parameters"), "{err}");
+        let long = params(serde_json::json!({"lines": "1".repeat(300)}));
+        let req = Request::SshRun {
+            command: "tail_log",
+            params: &long,
+        };
+        let err = check_request(&p, &req).unwrap_err().to_string();
+        assert!(err.contains("over the limit of 256 bytes"), "{err}");
+    }
+
+    #[test]
+    fn simulate_uses_the_command_policy() {
+        let mut p = named();
+        p.commands[0].approval = Some(ApprovalPolicy::Auto);
+        p.commands[1].approval = Some(ApprovalPolicy::Deny);
+        let lines = params(serde_json::json!({"lines": 5}));
+        let unit = params(serde_json::json!({"unit": "app.service"}));
+        let tail = Request::SshRun {
+            command: "tail_log",
+            params: &lines,
+        };
+        let restart = Request::SshRun {
+            command: "restart",
+            params: &unit,
+        };
+        assert_eq!(
+            simulate(&p, &tail, Utc::now()),
+            Verdict::Allowed {
+                policy: ApprovalPolicy::Auto,
+                window_seconds: None
+            }
+        );
+        assert_eq!(
+            simulate(&p, &restart, Utc::now()),
+            Verdict::Refused("command policy is deny".into())
+        );
+        p.commands[1].approval = None;
+        assert_eq!(
+            simulate(&p, &restart, Utc::now()),
+            Verdict::Allowed {
+                policy: ApprovalPolicy::Prompt,
+                window_seconds: Some(600)
+            }
+        );
+        p.approval = ApprovalPolicy::Deny;
+        assert_eq!(
+            simulate(&p, &tail, Utc::now()),
+            Verdict::Refused("preset policy is deny".into())
+        );
     }
 
     // -------- hostile-input corpus --------

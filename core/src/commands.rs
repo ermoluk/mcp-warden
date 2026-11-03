@@ -8,10 +8,13 @@
 //! accepted can only ever produce commands that pass the shell-syntax check
 //! and fit the length limit (invariants 5 and 10).
 
-use crate::config::{ParamSpec, Preset, anchored_regex};
+use crate::config::{ApprovalPolicy, NamedCommand, ParamSpec, Preset, anchored_regex};
 use crate::error::{Result, WardenError};
-use crate::limits::{MAX_SSH_COMMAND_BYTES, MAX_SSH_OUTPUT_BYTES, MAX_SSH_RUN_PARAM_BYTES};
+use crate::limits::{
+    MAX_SSH_COMMAND_BYTES, MAX_SSH_OUTPUT_BYTES, MAX_SSH_RUN_PARAM_BYTES, MAX_SSH_RUN_PARAMS,
+};
 use crate::ssh_words::check_words;
+use serde_json::Value;
 use std::collections::{BTreeMap, BTreeSet};
 
 /// The MCP tools mcp-warden always serves. A generated tool may not take
@@ -341,6 +344,206 @@ fn longest_value(spec: &ParamSpec) -> usize {
     }
 }
 
+/// A named command filled in for one call.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Rendered {
+    /// The command line, exactly as it is sent.
+    pub command: String,
+    /// The policy that applies to this command.
+    pub approval: ApprovalPolicy,
+    /// The most stdout and stderr, each, read from the host.
+    pub max_output: usize,
+}
+
+/// The preset's command called `name`.
+pub fn find<'a>(p: &'a Preset, name: &str) -> Result<&'a NamedCommand> {
+    p.commands.iter().find(|c| c.name == name).ok_or_else(|| {
+        let known: Vec<&str> = p.commands.iter().map(|c| c.name.as_str()).collect();
+        let shown = if is_identifier(name) {
+            format!("'{name}'")
+        } else {
+            "with that name".into()
+        };
+        WardenError::Validation(format!(
+            "preset '{}' has no command {shown}; it has: {}",
+            p.name,
+            if known.is_empty() {
+                "none".into()
+            } else {
+                known.join(", ")
+            }
+        ))
+    })
+}
+
+/// The command's own policy, else the preset's. A preset set to `deny` is
+/// off, whatever its commands say.
+pub fn effective_approval(p: &Preset, c: &NamedCommand) -> ApprovalPolicy {
+    match p.approval {
+        ApprovalPolicy::Deny => ApprovalPolicy::Deny,
+        preset => c.approval.unwrap_or(preset),
+    }
+}
+
+/// The command's output limit, else the preset's, never above
+/// [`MAX_SSH_OUTPUT_BYTES`].
+pub fn max_output(p: &Preset, c: Option<&NamedCommand>) -> usize {
+    c.and_then(|c| c.max_output_bytes)
+        .or(p.max_output_bytes)
+        .map_or(MAX_SSH_OUTPUT_BYTES, |m| {
+            usize::try_from(m).map_or(MAX_SSH_OUTPUT_BYTES, |m| m.min(MAX_SSH_OUTPUT_BYTES))
+        })
+}
+
+/// Fill in a named command from the agent's values, refusing anything that
+/// is not exactly what the parameter declares. Pure: nothing is read or
+/// sent. In order: the input limits, the exact set of parameters, each
+/// value by its type, then the whole command again (shell-syntax check and
+/// length), so a refusal never depends on a credential (invariant 3).
+pub fn render(p: &Preset, name: &str, params: &BTreeMap<String, Value>) -> Result<Rendered> {
+    let c = find(p, name)?;
+    let refuse = |why: String| {
+        WardenError::Validation(format!("preset '{}': command '{}': {why}", p.name, c.name))
+    };
+    if params.len() > MAX_SSH_RUN_PARAMS {
+        return Err(refuse(format!(
+            "{} parameters; the limit is {MAX_SSH_RUN_PARAMS}",
+            params.len()
+        )));
+    }
+    for key in params.keys() {
+        if !c.params.contains_key(key) {
+            let key = if is_identifier(key) {
+                format!("'{key}'")
+            } else {
+                "with that name".into()
+            };
+            return Err(refuse(format!(
+                "no parameter {key}; it takes: {}",
+                list(c.params.keys())
+            )));
+        }
+    }
+    let mut values = BTreeMap::new();
+    for (key, spec) in &c.params {
+        let value = params
+            .get(key)
+            .ok_or_else(|| refuse(format!("missing parameter '{key}'")))?;
+        let text =
+            check_value(spec, value).map_err(|why| refuse(format!("parameter '{key}': {why}")))?;
+        values.insert(key.as_str(), text);
+    }
+    let words = parse_template(&c.template).map_err(|e| refuse(error_text(e)))?;
+    let command = words
+        .iter()
+        .map(|w| match w {
+            TemplateWord::Literal(s) => s.clone(),
+            TemplateWord::Param {
+                prefix,
+                name,
+                suffix,
+            } => format!("{prefix}{}{suffix}", values[name.as_str()]),
+        })
+        .collect::<Vec<_>>()
+        .join(" ");
+    check_words(&command).map_err(|e| refuse(error_text(e)))?;
+    if command.len() > MAX_SSH_COMMAND_BYTES {
+        return Err(refuse(format!(
+            "the command is {} bytes; the limit is {MAX_SSH_COMMAND_BYTES}",
+            command.len()
+        )));
+    }
+    Ok(Rendered {
+        command,
+        approval: effective_approval(p, c),
+        max_output: max_output(p, Some(c)),
+    })
+}
+
+/// The value as it goes into the command, or why it is refused. The
+/// reason never repeats the value.
+fn check_value(spec: &ParamSpec, value: &Value) -> std::result::Result<String, String> {
+    let text = match (spec, value) {
+        (ParamSpec::Int { min, max }, Value::Number(n)) => {
+            let n = n.as_u64().ok_or("must be a whole number, 0 or more")?;
+            in_range(n, *min, *max)?
+        }
+        (ParamSpec::Int { min, max }, Value::String(s)) => {
+            let decimal = !s.is_empty()
+                && s.len() <= 20
+                && s.bytes().all(|b| b.is_ascii_digit())
+                && (s == "0" || !s.starts_with('0'));
+            let n = s
+                .parse::<u64>()
+                .ok()
+                .filter(|_| decimal)
+                .ok_or("must be a decimal number without sign or leading zeros")?;
+            in_range(n, *min, *max)?
+        }
+        (ParamSpec::Int { .. }, _) => return Err("must be a number".into()),
+        (ParamSpec::Enum { values }, Value::String(s)) => {
+            if !values.contains(s) {
+                return Err(format!("must be one of: {}", values.join(", ")));
+            }
+            s.clone()
+        }
+        (ParamSpec::Enum { values }, _) => {
+            return Err(format!("must be one of: {}", values.join(", ")));
+        }
+        (ParamSpec::String { pattern } | ParamSpec::Path { pattern }, Value::String(s)) => {
+            if s.len() > MAX_SSH_RUN_PARAM_BYTES {
+                return Err(format!(
+                    "{} bytes; the limit is {MAX_SSH_RUN_PARAM_BYTES}",
+                    s.len()
+                ));
+            }
+            if s.is_empty() || s.contains(' ') || check_words(s).is_err() {
+                return Err(
+                    "must be one word of letters, digits and - _ . / : = @ , + % (no leading \
+                     '=' or '%')"
+                        .into(),
+                );
+            }
+            if s.starts_with('-') {
+                return Err("must not start with '-': it would be read as an option".into());
+            }
+            if let ParamSpec::Path { .. } = spec {
+                if !s.starts_with('/') {
+                    return Err("must be an absolute path".into());
+                }
+                if s.contains("//") || s.split('/').any(|seg| seg == "." || seg == "..") {
+                    return Err("must not contain '//' or a '.' or '..' segment".into());
+                }
+            }
+            let rx = anchored_regex(pattern).map_err(|e| format!("bad pattern: {e}"))?;
+            if !rx.is_match(s) {
+                return Err(format!("does not match the pattern {pattern}"));
+            }
+            s.clone()
+        }
+        (ParamSpec::String { .. } | ParamSpec::Path { .. }, _) => {
+            return Err("must be a string".into());
+        }
+    };
+    Ok(text)
+}
+
+fn in_range(n: u64, min: u64, max: u64) -> std::result::Result<String, String> {
+    if n < min || n > max {
+        return Err(format!("must be from {min} to {max}"));
+    }
+    Ok(n.to_string())
+}
+
+fn list<'a>(names: impl Iterator<Item = &'a String>) -> String {
+    let names: Vec<&str> = names.map(String::as_str).collect();
+    if names.is_empty() {
+        "nothing".into()
+    } else {
+        names.join(", ")
+    }
+}
+
 /// A validation error's message without its "validation error:" prefix.
 fn error_text(e: WardenError) -> String {
     match e {
@@ -563,5 +766,123 @@ mod tests {
         assert!(err.contains("at most 32"), "{err}");
         cfg.preset[0].expose_as_tools = false;
         validate_tool_names(&cfg.preset).unwrap();
+    }
+
+    fn run(command: &str, params: serde_json::Value) -> Result<Rendered> {
+        let cfg = fixture();
+        let params: BTreeMap<String, Value> = serde_json::from_value(params).unwrap();
+        render(&cfg.preset[0], command, &params)
+    }
+
+    #[test]
+    fn values_fill_the_template() {
+        use serde_json::json;
+        let r = run("tail_log", json!({"lines": 50})).unwrap();
+        assert_eq!(r.command, "journalctl -u app -n 50 --no-pager");
+        assert_eq!(r.max_output, 262144);
+        assert_eq!(r.approval, ApprovalPolicy::Prompt);
+        assert_eq!(
+            run("tail_log", json!({"lines": "500"})).unwrap().command,
+            "journalctl -u app -n 500 --no-pager"
+        );
+        assert_eq!(
+            run("restart", json!({"unit": "worker.service"}))
+                .unwrap()
+                .command,
+            "sudo -n systemctl restart worker.service"
+        );
+        let r = run("trash_file", json!({"path": "/srv/app/uploads/a.png"})).unwrap();
+        assert_eq!(r.command, "mv /srv/app/uploads/a.png /srv/app/.trash/");
+        assert_eq!(r.max_output, 65536);
+        assert_eq!(
+            run("checkout", json!({"tag": "v1.2.3"})).unwrap().command,
+            "git -C /srv/app checkout v1.2.3"
+        );
+        assert_eq!(
+            run("head_log", json!({"n": 7})).unwrap().command,
+            "sed -n 1,7p /srv/app/log.txt"
+        );
+    }
+
+    #[test]
+    fn anything_but_the_declared_value_is_refused() {
+        use serde_json::json;
+        let cases = [
+            ("tail_log", json!({})),
+            ("tail_log", json!({"lines": 50, "extra": 1})),
+            ("tail_log", json!({"lines": 0})),
+            ("tail_log", json!({"lines": 501})),
+            ("tail_log", json!({"lines": -1})),
+            ("tail_log", json!({"lines": 1.5})),
+            ("tail_log", json!({"lines": "050"})),
+            ("tail_log", json!({"lines": "+5"})),
+            ("tail_log", json!({"lines": " 5"})),
+            ("tail_log", json!({"lines": "5;id"})),
+            ("tail_log", json!({"lines": "99999999999999999999999"})),
+            ("tail_log", json!({"lines": true})),
+            ("tail_log", json!({"lines": null})),
+            ("restart", json!({"unit": "APP.SERVICE"})),
+            ("restart", json!({"unit": "app.service "})),
+            ("restart", json!({"unit": ["app.service"]})),
+            ("trash_file", json!({"path": "uploads/a.png"})),
+            (
+                "trash_file",
+                json!({"path": "/srv/app/uploads/../../etc/passwd"}),
+            ),
+            ("trash_file", json!({"path": "/srv/app/uploads/./a"})),
+            ("trash_file", json!({"path": "/srv/app//uploads/a"})),
+            ("trash_file", json!({"path": "/srv/app/uploads/a b"})),
+            ("trash_file", json!({"path": "/srv/app/uploads/$(id)"})),
+            ("trash_file", json!({"path": "/srv/app/other/a.png"})),
+            ("trash_file", json!({"path": 5})),
+            ("checkout", json!({"tag": "-v1.2.3"})),
+            ("checkout", json!({"tag": "v1.2.3 --force"})),
+            ("checkout", json!({"tag": "v1.2"})),
+            ("checkout", json!({"tag": "v1.2.3\n"})),
+            ("checkout", json!({"tag": "v1.2.3\u{0}"})),
+            ("checkout", json!({"tag": "v１.2.3"})),
+            ("checkout", json!({"tag": ""})),
+            ("checkout", json!({"tag": "x".repeat(300)})),
+            ("nope", json!({})),
+        ];
+        for (command, params) in cases {
+            assert!(run(command, params.clone()).is_err(), "{command} {params}");
+        }
+        let many: BTreeMap<String, Value> = (0..17).map(|i| (format!("p{i}"), json!(1))).collect();
+        assert!(run("tail_log", serde_json::to_value(many).unwrap()).is_err());
+    }
+
+    /// Errors name the parameter, not the agent's value.
+    #[test]
+    fn refusals_do_not_repeat_the_value() {
+        use serde_json::json;
+        let err = run("checkout", json!({"tag": "v1.2.3 --upload-pack=/tmp/x"}))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("parameter 'tag'"), "{err}");
+        assert!(!err.contains("upload-pack"), "{err}");
+        let err = run("tail_log", json!({"evil$(id)": 1}))
+            .unwrap_err()
+            .to_string();
+        assert!(!err.contains("evil"), "{err}");
+    }
+
+    #[test]
+    fn a_command_policy_never_overrides_a_denied_preset() {
+        let mut p = fixture().preset[0].clone();
+        p.commands[0].approval = Some(ApprovalPolicy::Auto);
+        assert_eq!(effective_approval(&p, &p.commands[0]), ApprovalPolicy::Auto);
+        assert_eq!(
+            effective_approval(&p, &p.commands[1]),
+            ApprovalPolicy::Prompt
+        );
+        p.approval = ApprovalPolicy::Deny;
+        assert_eq!(effective_approval(&p, &p.commands[0]), ApprovalPolicy::Deny);
+        p.approval = ApprovalPolicy::Auto;
+        p.commands[1].approval = Some(ApprovalPolicy::Prompt);
+        assert_eq!(
+            effective_approval(&p, &p.commands[1]),
+            ApprovalPolicy::Prompt
+        );
     }
 }

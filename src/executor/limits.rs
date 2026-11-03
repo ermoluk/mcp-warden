@@ -73,6 +73,23 @@ pub fn check(req: &Request) -> Result<()> {
             let bytes = command.len();
             at_most("ssh_exec command", bytes, MAX_SSH_COMMAND_BYTES, "bytes")?;
         }
+        Request::SshRun { command, params } => {
+            at_most("ssh_run command name", command.len(), 64, "bytes")?;
+            at_most("ssh_run", params.len(), MAX_SSH_RUN_PARAMS, "parameters")?;
+            for (key, value) in params {
+                let over = key.len() > MAX_SSH_RUN_PARAM_BYTES
+                    || match value {
+                        Value::String(s) => s.len() > MAX_SSH_RUN_PARAM_BYTES,
+                        other => json_longer_than(other, MAX_SSH_RUN_PARAM_BYTES),
+                    };
+                if over {
+                    return Err(WardenError::Validation(format!(
+                        "an ssh_run parameter or its value is over the limit of \
+                         {MAX_SSH_RUN_PARAM_BYTES} bytes"
+                    )));
+                }
+            }
+        }
         Request::Sftp { remote, local } => {
             let max = MAX_SFTP_PATH_BYTES;
             at_most("sftp_transfer remote path", remote.len(), max, "bytes")?;
