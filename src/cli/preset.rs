@@ -426,6 +426,9 @@ fn add(args: AddArgs, config_path: &Path, kc: &dyn KeychainStore) -> Result<()> 
         max_response_bytes: args.max_response_bytes,
         response_fields: args.response_fields,
         allowed_local_paths: vec![],
+        max_output_bytes: None,
+        expose_as_tools: false,
+        commands: vec![],
     };
     if let Some(w) = unrestricted_paths_warning(&preset) {
         eprintln!("warning: {w}");

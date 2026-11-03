@@ -1,6 +1,7 @@
 use crate::error::{Result, WardenError};
 use crate::keychain::KeychainStore;
 use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use url::Url;
 
@@ -145,6 +146,22 @@ pub struct Preset {
     /// except the locations that hold credentials or run code.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub allowed_local_paths: Vec<String>,
+    // Named commands (v0.6.0). Every new field stays out of the JSON while
+    // unset: a stamp hashes the preset's JSON, and a field that appeared
+    // there would void every confirmed `auto` preset on upgrade.
+    /// SSH: largest stdout and stderr, each, that `ssh_exec` and `ssh_run`
+    /// read, in bytes; the default for this preset's named commands. It can
+    /// only lower mcp-warden's own ceiling (1 MiB); `None` uses that.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_bytes: Option<u64>,
+    /// SSH: also offer each named command as its own MCP tool,
+    /// `ssh_<preset>_<command>`. `ssh_run` works either way.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub expose_as_tools: bool,
+    /// SSH: commands the agent runs by name with typed parameters
+    /// (`ssh_run`), instead of composing a command line.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub commands: Vec<NamedCommand>,
 }
 
 /// One step of a `response_fields` path.
@@ -196,6 +213,45 @@ pub struct NamedQuery {
     pub param_types: Vec<String>,
     #[serde(default)]
     pub readonly: bool,
+}
+
+/// A command an SSH preset runs by name. The template is fixed; the agent
+/// supplies only typed parameter values, each of which becomes one word of
+/// the command (or, for `int` and `enum`, part of one).
+#[derive(Debug, Clone, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct NamedCommand {
+    pub name: String,
+    pub description: String,
+    /// Words separated by single spaces; `{param}` stands for a parameter.
+    pub template: String,
+    /// Ordered by name, so the preset's fingerprint is the same on every
+    /// start.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub params: BTreeMap<String, ParamSpec>,
+    /// Overrides the preset's policy for this command. `auto` counts only
+    /// once a human confirmed the preset (`preset confirm`); a preset set to
+    /// `deny` refuses every command whatever this says.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub approval: Option<ApprovalPolicy>,
+    /// Lowers the preset's `max_output_bytes` for this command.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_output_bytes: Option<u64>,
+}
+
+/// What a named command's parameter accepts.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(tag = "type", rename_all = "lowercase", deny_unknown_fields)]
+pub enum ParamSpec {
+    /// One word matching `pattern` (anchored).
+    String { pattern: String },
+    /// An absolute path matching `pattern` (anchored), with no `.` or `..`
+    /// segment and no `//`.
+    Path { pattern: String },
+    /// A decimal integer from `min` to `max`.
+    Int { min: u64, max: u64 },
+    /// One of `values`, exactly.
+    Enum { values: Vec<String> },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
@@ -1018,6 +1074,9 @@ mod tests {
                 max_response_bytes: None,
                 response_fields: vec![],
                 allowed_local_paths: vec![],
+                max_output_bytes: None,
+                expose_as_tools: false,
+                commands: vec![],
             }],
         };
         let s = toml::to_string(&cfg).unwrap();
@@ -1033,5 +1092,88 @@ mod tests {
         let kc = InMemoryKeychain::new();
         kc.set("redis_password", Secret::new("p".into())).unwrap();
         cfg.validate(&kc).unwrap();
+    }
+
+    fn named_commands() -> Config {
+        toml::from_str(include_str!("../../tests/fixtures/named_commands.toml")).unwrap()
+    }
+
+    #[test]
+    fn named_commands_parse() {
+        let cfg = named_commands();
+        let p = &cfg.preset[0];
+        assert!(p.expose_as_tools);
+        assert_eq!(p.max_output_bytes, Some(65536));
+        let names: Vec<_> = p.commands.iter().map(|c| c.name.as_str()).collect();
+        assert_eq!(
+            names,
+            ["tail_log", "restart", "trash_file", "checkout", "head_log"]
+        );
+        assert_eq!(
+            p.commands[0].params["lines"],
+            ParamSpec::Int { min: 1, max: 500 }
+        );
+        assert_eq!(p.commands[0].max_output_bytes, Some(262144));
+        assert_eq!(
+            p.commands[1].params["unit"],
+            ParamSpec::Enum {
+                values: vec!["app.service".into(), "worker.service".into()]
+            }
+        );
+        assert!(matches!(
+            p.commands[2].params["path"],
+            ParamSpec::Path { .. }
+        ));
+        assert!(matches!(
+            p.commands[3].params["tag"],
+            ParamSpec::String { .. }
+        ));
+        assert_eq!(p.commands[0].approval, None);
+    }
+
+    #[test]
+    fn named_commands_round_trip_through_toml() {
+        let cfg = named_commands();
+        let written = toml::to_string_pretty(&cfg).unwrap();
+        let again: Config = toml::from_str(&written).unwrap();
+        assert_eq!(
+            serde_json::to_value(&again.preset).unwrap(),
+            serde_json::to_value(&cfg.preset).unwrap()
+        );
+    }
+
+    /// A typo in a command or a parameter must not be silently ignored:
+    /// `pattrn` instead of `pattern` would leave a parameter unchecked.
+    #[test]
+    fn unknown_fields_in_commands_and_params_are_refused() {
+        let base = include_str!("../../tests/fixtures/named_commands.toml");
+        for (from, to) in [
+            (
+                "template = \"mv {path} /srv/app/.trash/\"",
+                "template = \"mv {path} /srv/app/.trash/\"\nunknown = 1",
+            ),
+            ("type = \"path\", pattern", "type = \"path\", pattrn"),
+            (
+                "type = \"int\", min = 1, max = 500",
+                "type = \"int\", min = 1, max = 500, step = 2",
+            ),
+            ("type = \"enum\"", "type = \"regex\""),
+        ] {
+            assert!(base.contains(from), "{from}");
+            let edited = base.replacen(from, to, 1);
+            assert!(toml::from_str::<Config>(&edited).is_err(), "accepted: {to}");
+        }
+    }
+
+    /// Presets without commands serialise exactly as before 0.6.0, so their
+    /// stamps stay valid.
+    #[test]
+    fn presets_without_commands_serialise_without_the_new_fields() {
+        let cfg: Config =
+            toml::from_str(include_str!("../../tests/fixtures/ssh_preset.toml")).unwrap();
+        let json = serde_json::to_value(&cfg.preset[0]).unwrap();
+        for field in ["max_output_bytes", "expose_as_tools", "commands"] {
+            assert!(json.get(field).is_none(), "{field}");
+        }
     }
 }
