@@ -179,4 +179,151 @@ mod tests {
             "npx -y @modelcontextprotocol/server-github"
         );
     }
+
+    // ---- Audit 2026-11-09, H1: the caller's environment ----------------
+    //
+    // `run` execs the server, which would replace the test process, so the
+    // real `run` runs in a child: this test binary again, filtered down to
+    // `audit_h1_child`. The child holds the server's key and a stamp for
+    // exactly its entry (a human confirmed it earlier), and its approval
+    // transport denies everything — so whatever the server receives, it
+    // receives without anyone being asked.
+
+    #[cfg(unix)]
+    const AUDIT_H1_SECRET: &str = "audit-h1-key-7f3a91c2";
+
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "helper: runs only in the child process the audit_h1 tests start"]
+    fn audit_h1_child() {
+        use mcp_warden_core::stamp;
+        let Ok(dir) = std::env::var("AUDIT_H1_DIR") else {
+            return;
+        };
+        let dir = std::path::PathBuf::from(dir);
+        let cfg_dir = dir.join("cfg");
+        let entry = std::fs::read_to_string(dir.join("server.toml")).unwrap();
+        std::fs::write(cfg_dir.join("config.toml"), format!("[[server]]\n{entry}")).unwrap();
+        let s: WrappedServer = toml::from_str(&entry).unwrap();
+        let kc: std::sync::Arc<dyn KeychainStore> = std::sync::Arc::new(InMemoryKeychain::new());
+        for var in &s.env {
+            kc.set(&s.secret_name(var), Secret::new(AUDIT_H1_SECRET.into()))
+                .unwrap();
+        }
+        stamp::record(
+            kc.as_ref(),
+            &stamp::server_stamp_name(&s.name),
+            &stamp::server_fingerprint(&s),
+        )
+        .unwrap();
+        let audit =
+            mcp_warden_core::audit::sqlite_sink::LocalSqlite::open(&cfg_dir.join("audit.db"))
+                .unwrap();
+        let rt = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        // Returns only if `run` refused or the exec failed.
+        let result = rt.block_on(run(&s.name, &cfg_dir, kc, &audit));
+        std::fs::write(dir.join("refused"), format!("{result:?}")).unwrap();
+    }
+
+    /// Start `audit_h1_child` for the `[[server]]` body `entry`, with
+    /// `caller_env` added to the environment `mcp-warden run` is started in.
+    #[cfg(unix)]
+    fn audit_h1_launch(entry: &str, caller_env: &[(&str, String)]) -> (tempfile::TempDir, String) {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempfile::tempdir().unwrap();
+        let cfg = dir.path().join("cfg");
+        std::fs::create_dir(&cfg).unwrap();
+        std::fs::set_permissions(&cfg, std::fs::Permissions::from_mode(0o700)).unwrap();
+        std::fs::write(dir.path().join("server.toml"), entry).unwrap();
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args([
+            "--exact",
+            "cli::run::tests::audit_h1_child",
+            "--ignored",
+            "--test-threads=1",
+        ])
+        .env("AUDIT_H1_DIR", dir.path())
+        .env("MCP_WARDEN_BACKEND", "memory")
+        .env("MCP_WARDEN_APPROVAL_TRANSPORT", "test-deny");
+        for (k, v) in caller_env {
+            cmd.env(k, v);
+        }
+        let out = cmd.output().unwrap();
+        let refused = std::fs::read_to_string(dir.path().join("refused")).unwrap_or_default();
+        let report = format!(
+            "status {:?}; refused: {refused}; stderr: {}",
+            out.status,
+            String::from_utf8_lossy(&out.stderr)
+        );
+        (dir, report)
+    }
+
+    /// A human confirmed `npx …` with its key. The caller — an agent with a
+    /// shell (`PATH=/tmp/x:$PATH mcp-warden run github`), or a client config
+    /// it edited — puts its own directory first on PATH. The key must not
+    /// reach a program the caller chose.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "audit 2026-11-09 H1: confirmed — fails until `run` stops resolving the command through the caller's PATH"]
+    fn audit_h1_the_callers_path_does_not_pick_the_program_that_gets_the_key() {
+        use std::os::unix::fs::PermissionsExt;
+        let evil = tempfile::tempdir().unwrap();
+        let dump = evil.path().join("dump");
+        let fake = evil.path().join("npx");
+        std::fs::write(&fake, format!("#!/bin/sh\nenv > '{}'\n", dump.display())).unwrap();
+        std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let path = format!(
+            "{}:{}",
+            evil.path().display(),
+            std::env::var("PATH").unwrap_or_default()
+        );
+        let (_dir, report) = audit_h1_launch(
+            "name = \"github\"\ncommand = \"npx\"\n\
+             args = [\"-y\", \"@modelcontextprotocol/server-github\"]\n\
+             env = [\"GITHUB_PERSONAL_ACCESS_TOKEN\"]\n",
+            &[("PATH", path)],
+        );
+        let seen = std::fs::read_to_string(&dump).unwrap_or_default();
+        assert!(
+            !seen.contains(AUDIT_H1_SECRET),
+            "the caller's own `npx` received the key, and nobody was asked ({report})"
+        );
+    }
+
+    /// The confirmed program itself runs, but with variables the caller set
+    /// that make it load the caller's code (`NODE_OPTIONS=--require …`,
+    /// `BASH_ENV`, `PYTHONPATH`, …), next to its key.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "audit 2026-11-09 H1: confirmed — fails until `run` stops passing the caller's environment to the server"]
+    fn audit_h1_the_callers_code_loading_variables_do_not_reach_the_server() {
+        let out = tempfile::tempdir().unwrap();
+        let dump = out.path().join("dump");
+        let (_dir, report) = audit_h1_launch(
+            &format!(
+                "name = \"node\"\ncommand = \"/bin/sh\"\n\
+                 args = [\"-c\", \"env > '{}'\"]\nenv = [\"TOKEN\"]\n",
+                dump.display()
+            ),
+            &[
+                ("NODE_OPTIONS", "--require /tmp/agent.js".into()),
+                ("BASH_ENV", "/tmp/agent.sh".into()),
+                ("PYTHONPATH", "/tmp/agent".into()),
+            ],
+        );
+        let seen = std::fs::read_to_string(&dump).unwrap_or_default();
+        assert!(
+            seen.contains(&format!("TOKEN={AUDIT_H1_SECRET}")),
+            "the confirmed server should start with its key ({report})"
+        );
+        for var in ["NODE_OPTIONS=", "BASH_ENV=", "PYTHONPATH="] {
+            assert!(
+                !seen.contains(var),
+                "{var}… from the caller reached the server next to its key ({report})"
+            );
+        }
+    }
 }

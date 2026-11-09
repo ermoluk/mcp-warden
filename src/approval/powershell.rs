@@ -187,6 +187,64 @@ mod tests {
     }
 
     /// The transport end to end, with a fake `powershell` that answers from
+    /// Audit 2026-11-09, H2 (helper): runs in the child process started by
+    /// the test below and writes down which program would show the dialog.
+    #[test]
+    #[ignore = "helper: runs only in the child process audit_h2 starts"]
+    fn audit_h2_child() {
+        let Ok(out) = std::env::var("AUDIT_H2_OUT") else {
+            return;
+        };
+        std::fs::write(
+            out,
+            PowerShellApproval::new()
+                .program
+                .to_string_lossy()
+                .as_bytes(),
+        )
+        .unwrap();
+    }
+
+    /// Audit 2026-11-09, H2. Whatever program the transport starts decides
+    /// the approval (see `replies_from_the_helper_become_decisions`). It is
+    /// `<SystemRoot>\System32\WindowsPowerShell\v1.0\powershell.exe`, and
+    /// `SystemRoot` is the caller's to set — `"env"` in an MCP client config
+    /// the agent edited, as T7 already assumes for `MCP_WARDEN_CONFIG_DIR`.
+    /// Without it, `powershell.exe` is looked up on the caller's PATH.
+    #[test]
+    #[ignore = "audit 2026-11-09 H2: confirmed — fails until the dialog program comes from the OS, not the environment"]
+    fn audit_h2_the_callers_environment_does_not_pick_the_dialog_program() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("program");
+        let evil = dir.path().join("evil");
+        let program_with = |system_root: Option<&std::path::Path>| {
+            let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+            cmd.args([
+                "--exact",
+                "approval::powershell::tests::audit_h2_child",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("AUDIT_H2_OUT", &out);
+            match system_root {
+                Some(root) => cmd.env("SystemRoot", root),
+                None => cmd.env_remove("SystemRoot"),
+            };
+            assert!(cmd.status().unwrap().success());
+            std::fs::read_to_string(&out).unwrap()
+        };
+        let chosen = program_with(Some(&evil));
+        assert!(
+            !chosen.starts_with(&*evil.to_string_lossy()),
+            "the approval dialog is a program under the caller's SystemRoot: {chosen}"
+        );
+        let chosen = program_with(None);
+        assert!(
+            std::path::Path::new(&chosen).is_absolute(),
+            "without SystemRoot the approval dialog is looked up on the caller's PATH: {chosen}"
+        );
+    }
+
     /// what it was given.
     #[cfg(unix)]
     #[tokio::test]

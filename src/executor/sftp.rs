@@ -548,6 +548,71 @@ pub(crate) mod tests {
         )
     }
 
+    /// Audit 2026-11-09, H4 (helper): runs in the child process started by
+    /// the test below and writes down what `validate_local_path` — with the
+    /// home directory it finds itself — says about `AUDIT_H4_PATH`.
+    #[test]
+    #[ignore = "helper: runs only in the child process audit_h4 starts"]
+    fn audit_h4_child() {
+        let (Ok(out), Ok(path)) = (
+            std::env::var("AUDIT_H4_OUT"),
+            std::env::var("AUDIT_H4_PATH"),
+        ) else {
+            return;
+        };
+        let verdict = match validate_local_path(&p(), &path) {
+            Ok(resolved) => format!("allowed {}", resolved.display()),
+            Err(e) => format!("refused {e}"),
+        };
+        std::fs::write(out, verdict).unwrap();
+    }
+
+    /// Audit 2026-11-09, H4. The `$HOME` root and every sensitive location
+    /// are taken from the `HOME` variable, which is the caller's to set
+    /// (`"env"` in a client config the agent edited). With `HOME` one level
+    /// up, the user's real shell startup file is no longer one to the check,
+    /// so `get` may write it. Only resolves paths; opens nothing.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "audit 2026-11-09 H4: confirmed — fails until the home directory comes from the account database, not HOME"]
+    fn audit_h4_the_callers_home_does_not_move_the_sensitive_locations() {
+        let real_home = std::fs::canonicalize(dirs::home_dir().unwrap()).unwrap();
+        // A startup file that is not a symlink (a symlink is refused anyway).
+        let target = [".zshenv", ".zlogout", ".bash_logout", ".profile"]
+            .iter()
+            .map(|f| real_home.join(f))
+            .find(|t| !std::fs::symlink_metadata(t).is_ok_and(|m| m.file_type().is_symlink()))
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("verdict");
+        let verdict_with = |home: &Path| {
+            let status = std::process::Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "executor::sftp::tests::audit_h4_child",
+                    "--ignored",
+                    "--test-threads=1",
+                ])
+                .env("AUDIT_H4_OUT", &out)
+                .env("AUDIT_H4_PATH", &target)
+                .env("HOME", home)
+                .status()
+                .unwrap();
+            assert!(status.success());
+            std::fs::read_to_string(&out).unwrap()
+        };
+        let own = verdict_with(&real_home);
+        assert!(own.starts_with("refused"), "with the real HOME: {own}");
+        let up = real_home.parent().unwrap();
+        let moved = verdict_with(up);
+        assert!(
+            moved.starts_with("refused"),
+            "with HOME={} the user's {} is fair game: {moved}",
+            up.display(),
+            target.display()
+        );
+    }
+
     #[test]
     fn hostile_corpus_local_paths_are_refused_under_home() {
         let entries = crate::testutil::corpus(include_str!("../../tests/corpus/local-paths.txt"));
