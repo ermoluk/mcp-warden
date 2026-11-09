@@ -339,7 +339,11 @@ fn audit_prints_what_the_agent_asked_for() {
         .assert()
         .success()
         .stdout(predicate::str::contains("DELETE /repos/me/app"))
-        .stdout(predicate::str::contains("Refused"));
+        // Plain words, not Rust's Debug form (`Some(Refused)`).
+        .stdout(predicate::str::contains(
+            "→ refused error: validation error: path not allowed",
+        ))
+        .stdout(predicate::str::contains("Some(").not());
 }
 
 fn seed_event(dir: &Path, summary: &str, decision: mcp_warden_core::audit::AuditDecision) {
