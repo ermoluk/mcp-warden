@@ -2,7 +2,7 @@
 
 All notable changes to this project will be documented in this file. The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [0.6.1]
 
 From the audit of 9 November 2026. Its theme: whoever starts an mcp-warden process — an agent that runs the CLI, or edits the `"env"` of an MCP client config — chooses that process's environment, and several security decisions read it. They now ask the OS instead. See threat model T11.
 
