@@ -71,7 +71,7 @@ openapiv3 = "2.2"
 serde_yaml = "0.9"
 axum = { version = "0.7", features = ["http1", "tokio"] }
 zeroize = { version = "1", features = ["zeroize_derive"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 tokio-postgres-rustls = "0.14"
 rustls-native-certs = "0.8"
 webpki-roots = "1"
