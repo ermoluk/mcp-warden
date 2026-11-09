@@ -1142,3 +1142,39 @@ fn import_without_a_terminal_needs_yes() {
         before
     );
 }
+
+/// `preset from-openapi --approval auto` needs `--confirm-auto`, like
+/// `preset add` (invariant 4), says how `auto` takes effect, and prints the
+/// allow-list it generated for review.
+#[cfg(unix)]
+#[test]
+fn from_openapi_auto_needs_confirm_auto_and_prints_the_allow_list() {
+    let cfg = tempfile::tempdir().unwrap();
+    fs::write(cfg.path().join("config.toml"), "").unwrap();
+    let specs = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+    let spec = specs.path().join("spec.json");
+    fs::write(
+        &spec,
+        r#"{"openapi": "3.0.0", "info": {"title": "Pets", "version": "1"},
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {"/pets/{id}": {"get": {"responses": {"200": {"description": "ok"}}}}}}"#,
+    )
+    .unwrap();
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", cfg.path())
+        .args(["preset", "from-openapi"])
+        .arg(&spec)
+        .args(["--approval", "auto"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("requires --confirm-auto"));
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", cfg.path())
+        .args(["preset", "from-openapi"])
+        .arg(&spec)
+        .args(["--approval", "auto", "--confirm-auto"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("/pets/[^/]+"))
+        .stderr(predicate::str::contains("mcp-warden preset confirm pets"));
+}

@@ -93,6 +93,10 @@ pub struct FromOpenapiArgs {
     /// Approval policy for the generated preset.
     #[arg(long, value_parser = ["auto", "prompt", "deny"], default_value = "prompt")]
     pub approval: String,
+    /// Required with `--approval auto` (invariant 4). The preset still runs
+    /// as `prompt` until `mcp-warden preset confirm` is approved.
+    #[arg(long)]
+    pub confirm_auto: bool,
     /// Print the generated TOML to stdout instead of writing to the config file.
     #[arg(long)]
     pub dry_run: bool,
@@ -301,6 +305,7 @@ fn scaffold(args: ScaffoldArgs, config_path: &Path) -> Result<()> {
     });
     let secret_commands = secret_add_commands(&preset, template.needs_host);
     let open_paths_warning = unrestricted_paths_warning(&preset);
+    let auto = matches!(preset.approval, ApprovalPolicy::Auto).then(|| auto_note(&preset_name));
 
     if args.dry_run {
         let open_paths_comment = open_paths_comment(&preset, template.open_paths_note);
@@ -351,6 +356,9 @@ fn scaffold(args: ScaffoldArgs, config_path: &Path) -> Result<()> {
     for line in template.setup_note {
         eprintln!("  {line}");
     }
+    if let Some(note) = auto {
+        eprintln!("{note}");
+    }
     if let Some(w) = open_paths_warning {
         eprintln!("warning: {w}");
     }
@@ -359,6 +367,12 @@ fn scaffold(args: ScaffoldArgs, config_path: &Path) -> Result<()> {
 
 async fn from_openapi(args: FromOpenapiArgs, config_path: &Path) -> Result<()> {
     use crate::cli::openapi::{FromOpenapiOptions, from_source};
+    if args.approval == "auto" && !args.confirm_auto {
+        return Err(WardenError::Validation(
+            "approval=auto requires --confirm-auto (auto-approve disables the prompt — invariant 4)"
+                .into(),
+        ));
+    }
     let approval = match args.approval.as_str() {
         "auto" => ApprovalPolicy::Auto,
         "deny" => ApprovalPolicy::Deny,
@@ -404,6 +418,7 @@ async fn from_openapi(args: FromOpenapiArgs, config_path: &Path) -> Result<()> {
     let raw = fs::read_to_string(config_path).map_err(WardenError::Io)?;
     let mut cfg: Config = toml::from_str(&raw).map_err(|e| WardenError::Config(e.to_string()))?;
     let preset_name = bootstrapped.preset.name.clone();
+    let review = review_lines(&bootstrapped.preset);
     if let Some(idx) = cfg.preset.iter().position(|p| p.name == preset_name) {
         if !args.force {
             return Err(WardenError::Validation(format!(
@@ -420,7 +435,47 @@ async fn from_openapi(args: FromOpenapiArgs, config_path: &Path) -> Result<()> {
         "✓ scaffolded preset '{}' from {} ({} operations).",
         preset_name, bootstrapped.source, bootstrapped.operation_count
     );
+    for line in review {
+        eprintln!("{line}");
+    }
     Ok(())
+}
+
+/// What a generated preset allows, for the human to review: the base URL,
+/// methods and allow-list (at most 20 paths), and how an `auto` preset
+/// becomes one.
+fn review_lines(p: &Preset) -> Vec<String> {
+    const SHOWN: usize = 20;
+    let mut out = vec![
+        format!("  base_url: {}", p.base_url.as_deref().unwrap_or("")),
+        format!("  methods:  {}", p.allowed_methods.join(", ")),
+        "  allowed_paths:".to_string(),
+    ];
+    out.extend(
+        p.allowed_paths
+            .iter()
+            .take(SHOWN)
+            .map(|a| format!("    {a}")),
+    );
+    if p.allowed_paths.len() > SHOWN {
+        out.push(format!(
+            "    … and {} more (see config.toml)",
+            p.allowed_paths.len() - SHOWN
+        ));
+    }
+    if matches!(p.approval, ApprovalPolicy::Auto) {
+        out.push(auto_note(&p.name));
+    }
+    out
+}
+
+/// An `auto` preset written by the CLI runs as `prompt` until a human
+/// approves `preset confirm` (the stamp); say so where it is written.
+fn auto_note(name: &str) -> String {
+    format!(
+        "  approval = \"auto\" takes effect only after `mcp-warden preset confirm {name}` \
+         is approved; until then every call asks."
+    )
 }
 
 #[derive(serde::Serialize)]
