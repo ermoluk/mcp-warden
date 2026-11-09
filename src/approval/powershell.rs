@@ -72,16 +72,65 @@ $timer.Stop()
 
 impl PowerShellApproval {
     pub fn new() -> Self {
-        // The system copy, by full path, so a `powershell.exe` earlier on
-        // PATH is never the one asked.
-        let program = std::env::var_os("SystemRoot")
-            .map(|root| PathBuf::from(root).join(r"System32\WindowsPowerShell\v1.0\powershell.exe"))
-            .unwrap_or_else(|| PathBuf::from("powershell.exe"));
         Self {
-            program,
+            program: system_powershell().unwrap_or_default(),
             leading_args: Vec::new(),
             grace: Duration::from_secs(10),
         }
+    }
+}
+
+/// The system copy of Windows PowerShell, found through the System known
+/// folder — never through `SystemRoot`, `windir` or `PATH`, which belong to
+/// whoever started mcp-warden (audit 2026-11-09, H2). Whatever program runs
+/// here decides every approval. Not found: an empty path, which fails to
+/// start, so nothing is approved.
+fn system_powershell() -> Option<PathBuf> {
+    #[cfg(windows)]
+    {
+        crate::osenv::system_dir().map(|d| d.join(r"WindowsPowerShell\v1.0\powershell.exe"))
+    }
+    #[cfg(not(windows))]
+    {
+        None
+    }
+}
+
+/// Variables that make PowerShell or the .NET runtime under it load code
+/// from elsewhere: a profiler DLL (`COR_PROFILER*`), runtime settings
+/// (`COMPLUS_*`, `DOTNET_*`), an execution policy. Removed from the dialog's
+/// environment; names compare ignoring case, as Windows does.
+fn is_code_loading(name: &std::ffi::OsStr) -> bool {
+    let name = name.to_string_lossy().to_ascii_uppercase();
+    ["COR_", "CORECLR_", "COMPLUS_", "DOTNET_"]
+        .iter()
+        .any(|prefix| name.starts_with(prefix))
+        || name == "PSEXECUTIONPOLICYPREFERENCE"
+}
+
+/// Where PowerShell looks for modules, programs and itself, set to the
+/// system's own directories (known folders), not the caller's.
+fn system_env() -> Vec<(&'static str, std::ffi::OsString)> {
+    #[cfg(windows)]
+    {
+        let mut env = Vec::new();
+        if let Some(windows) = crate::osenv::windows_dir() {
+            env.push(("SystemRoot", windows.clone().into()));
+            env.push(("windir", windows.into()));
+        }
+        if let Some(system) = crate::osenv::system_dir() {
+            env.push((
+                "PSModulePath",
+                system.join(r"WindowsPowerShell\v1.0\Modules").into(),
+            ));
+            env.push(("ComSpec", system.join("cmd.exe").into()));
+            env.push(("PATH", system.into()));
+        }
+        env
+    }
+    #[cfg(not(windows))]
+    {
+        Vec::new()
     }
 }
 
@@ -96,8 +145,12 @@ impl ApprovalTransport for PowerShellApproval {
     async fn request(&self, req: ApprovalRequest) -> Result<ApprovalDecision> {
         let window = window_button(&req);
         let mut cmd = tokio::process::Command::new(&self.program);
+        for (name, _) in std::env::vars_os().filter(|(k, _)| is_code_loading(k)) {
+            cmd.env_remove(name);
+        }
         cmd.args(&self.leading_args)
             .args(powershell_args())
+            .envs(system_env())
             .envs(dialog_env(&req, window.as_deref()));
         #[cfg(windows)]
         {
@@ -212,37 +265,119 @@ mod tests {
     /// the agent edited, as T7 already assumes for `MCP_WARDEN_CONFIG_DIR`.
     /// Without it, `powershell.exe` is looked up on the caller's PATH.
     #[test]
-    #[ignore = "audit 2026-11-09 H2: confirmed — fails until the dialog program comes from the OS, not the environment"]
     fn audit_h2_the_callers_environment_does_not_pick_the_dialog_program() {
         let dir = tempfile::tempdir().unwrap();
         let out = dir.path().join("program");
         let evil = dir.path().join("evil");
-        let program_with = |system_root: Option<&std::path::Path>| {
-            let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
-            cmd.args([
-                "--exact",
-                "approval::powershell::tests::audit_h2_child",
-                "--ignored",
-                "--test-threads=1",
-            ])
-            .env("AUDIT_H2_OUT", &out);
-            match system_root {
-                Some(root) => cmd.env("SystemRoot", root),
-                None => cmd.env_remove("SystemRoot"),
-            };
-            assert!(cmd.status().unwrap().success());
-            std::fs::read_to_string(&out).unwrap()
-        };
-        let chosen = program_with(Some(&evil));
+        let mut cmd = std::process::Command::new(std::env::current_exe().unwrap());
+        cmd.args([
+            "--exact",
+            "approval::powershell::tests::audit_h2_child",
+            "--ignored",
+            "--test-threads=1",
+        ])
+        .env("AUDIT_H2_OUT", &out)
+        .env("SystemRoot", &evil)
+        .env("windir", &evil)
+        .env("PATH", &evil);
+        assert!(cmd.output().unwrap().status.success());
+        let chosen = std::fs::read_to_string(&out).unwrap();
         assert!(
             !chosen.starts_with(&*evil.to_string_lossy()),
             "the approval dialog is a program under the caller's SystemRoot: {chosen}"
         );
-        let chosen = program_with(None);
+        // Off Windows there is no system PowerShell: an empty path, which
+        // cannot start. On Windows: the system copy, by full path.
+        #[cfg(not(windows))]
+        assert_eq!(chosen, "");
+        #[cfg(windows)]
         assert!(
-            std::path::Path::new(&chosen).is_absolute(),
-            "without SystemRoot the approval dialog is looked up on the caller's PATH: {chosen}"
+            std::path::Path::new(&chosen).is_absolute()
+                && chosen
+                    .to_ascii_lowercase()
+                    .ends_with(r"\windowspowershell\v1.0\powershell.exe"),
+            "{chosen}"
         );
+    }
+
+    #[test]
+    fn code_loading_variables_are_recognised_whatever_their_case() {
+        for name in [
+            "COR_PROFILER",
+            "cor_enable_profiling",
+            "COR_PROFILER_PATH_64",
+            "CORECLR_PROFILER",
+            "COMPlus_ETWEnabled",
+            "DOTNET_STARTUP_HOOKS",
+            "PSExecutionPolicyPreference",
+        ] {
+            assert!(is_code_loading(std::ffi::OsStr::new(name)), "{name}");
+        }
+        for name in ["MCPW_DIALOG_TITLE", "USERNAME", "TEMP", "CORP_PROXY"] {
+            assert!(!is_code_loading(std::ffi::OsStr::new(name)), "{name}");
+        }
+    }
+
+    /// Helper for the test below: in a child process started with profiler
+    /// and runtime-hook variables set, asks a fake dialog that approves only
+    /// if none of them reached it, and writes down the decision.
+    #[cfg(unix)]
+    #[test]
+    #[ignore = "helper: runs only in the child process the test below starts"]
+    fn dialog_env_child() {
+        let (Ok(out), Ok(fake)) = (
+            std::env::var("DIALOG_ENV_OUT"),
+            std::env::var("DIALOG_ENV_FAKE"),
+        ) else {
+            return;
+        };
+        let t = PowerShellApproval {
+            program: PathBuf::from("/bin/sh"),
+            leading_args: vec![PathBuf::from(fake)],
+            grace: Duration::ZERO,
+        };
+        let req = ApprovalRequest::new("p".into(), "proxy_http".into(), "GET /x".into());
+        let decision = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(t.request(req));
+        std::fs::write(out, format!("{decision:?}")).unwrap();
+    }
+
+    /// The dialog process does not inherit a .NET profiler or runtime hook
+    /// from whoever started mcp-warden (audit 2026-11-09, H2).
+    #[cfg(unix)]
+    #[test]
+    fn the_dialog_does_not_inherit_code_loading_variables() {
+        let dir = tempfile::tempdir().unwrap();
+        let fake = dir.path().join("fake-powershell.sh");
+        std::fs::write(
+            &fake,
+            "env | grep -qiE '^(COR_|COMPLUS_|DOTNET_|PSEXECUTIONPOLICY)' && exit 4\n\
+             printf '%s' \"$MCPW_DIALOG_BUTTONS\" | head -n 1\n",
+        )
+        .unwrap();
+        let out = dir.path().join("decision");
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "approval::powershell::tests::dialog_env_child",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env("DIALOG_ENV_OUT", &out)
+            .env("DIALOG_ENV_FAKE", &fake)
+            .env("COR_ENABLE_PROFILING", "1")
+            .env("COR_PROFILER_PATH", "/tmp/agent.dll")
+            .env("COMPlus_ETWEnabled", "0")
+            .env("DOTNET_STARTUP_HOOKS", "/tmp/agent.dll")
+            .env("PSExecutionPolicyPreference", "Bypass")
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        let decision = std::fs::read_to_string(&out).unwrap();
+        assert_eq!(decision, "Ok(Approved)");
     }
 
     /// what it was given.
