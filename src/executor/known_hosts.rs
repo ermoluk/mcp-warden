@@ -5,14 +5,18 @@ use std::path::PathBuf;
 
 /// Resolve the path to the user's known_hosts file.
 ///
-/// Honours the preset's explicit setting; otherwise `~/.ssh/known_hosts`.
+/// Honours the preset's explicit setting; otherwise `~/.ssh/known_hosts`
+/// in the account's home directory — not `$HOME`, which the caller chooses
+/// (audit 2026-11-09, H4). Without a home directory the path is empty, so
+/// the lookup fails and the connection is refused; never a file in the
+/// current directory.
 pub fn known_hosts_path(preset_path: Option<&str>) -> PathBuf {
     if let Some(p) = preset_path {
         return PathBuf::from(p);
     }
-    dirs::home_dir()
+    crate::osenv::account_home()
         .map(|h| h.join(".ssh").join("known_hosts"))
-        .unwrap_or_else(|| PathBuf::from("./known_hosts"))
+        .unwrap_or_default()
 }
 
 /// Returns Ok(true) if the host:port → key triple matches an entry in known_hosts.

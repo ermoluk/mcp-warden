@@ -110,11 +110,15 @@ const SENSITIVE_UNDER_HOME: &[&str] = &[
 
 /// Check a local `sftp_transfer` path and return it with its parent's
 /// symlinks resolved — the file that will really be read or written.
+///
+/// The home directory comes from the account database, not `$HOME`: the
+/// caller chooses the environment, and `HOME` one level up would move the
+/// root and every sensitive location with it (audit 2026-11-09, H4).
 pub fn validate_local_path(preset: &Preset, path: &str) -> Result<PathBuf> {
     check_local_path(
         preset,
         path,
-        dirs::home_dir().as_deref(),
+        crate::osenv::account_home().as_deref(),
         &crate::cli::config_dir_for_env(),
     )
 }
@@ -574,9 +578,8 @@ pub(crate) mod tests {
     /// so `get` may write it. Only resolves paths; opens nothing.
     #[cfg(unix)]
     #[test]
-    #[ignore = "audit 2026-11-09 H4: confirmed — fails until the home directory comes from the account database, not HOME"]
     fn audit_h4_the_callers_home_does_not_move_the_sensitive_locations() {
-        let real_home = std::fs::canonicalize(dirs::home_dir().unwrap()).unwrap();
+        let real_home = std::fs::canonicalize(crate::osenv::account_home().unwrap()).unwrap();
         // A startup file that is not a symlink (a symlink is refused anyway).
         let target = [".zshenv", ".zlogout", ".bash_logout", ".profile"]
             .iter()
@@ -596,9 +599,9 @@ pub(crate) mod tests {
                 .env("AUDIT_H4_OUT", &out)
                 .env("AUDIT_H4_PATH", &target)
                 .env("HOME", home)
-                .status()
+                .output()
                 .unwrap();
-            assert!(status.success());
+            assert!(status.status.success());
             std::fs::read_to_string(&out).unwrap()
         };
         let own = verdict_with(&real_home);
@@ -782,7 +785,7 @@ pub(crate) mod tests {
 
     #[test]
     fn local_path_rejects_traversal_out_of_home() {
-        let home = dirs::home_dir().unwrap();
+        let home = crate::osenv::account_home().unwrap();
         let evil = format!("{}/../../etc/passwd", home.display());
         assert!(validate_local_path(&p(), &evil).is_err());
         assert!(validate_local_path(&p(), "/tmp/../etc/passwd").is_err());
@@ -790,7 +793,7 @@ pub(crate) mod tests {
 
     #[test]
     fn local_path_rejects_sibling_of_home_with_same_prefix() {
-        let home = dirs::home_dir().unwrap();
+        let home = crate::osenv::account_home().unwrap();
         let sibling = format!("{}-evil/x.log", home.display());
         assert!(validate_local_path(&p(), &sibling).is_err());
     }
