@@ -131,6 +131,11 @@ abstraction is the product.
 - Do **not** cripple the OSS version to drive paid upgrades. Paid features
   must be additive (hosted infrastructure, team coordination), never gates
   on local single-user functionality.
+- Do **not** take a security decision from the inherited environment
+  (`HOME`, `PATH`, `SystemRoot`, proxies, …): whoever starts the process —
+  the agent included — chooses it. Use `src/osenv.rs` (account home,
+  Windows known folders), and start child processes with a cleared or
+  pinned environment (threat model T11).
 - Do **not** print to **stdout** in the MCP server. stdout is the JSON-RPC
   protocol channel. Logs go to stderr only. There is an integration test
   (`tests/mcp_integration.rs::stdout_contains_only_json`) that pins this.
@@ -159,6 +164,8 @@ implementations that talk to the outside world.
   `policy.rs` decides "would this call be allowed" for the tools and the
   `preset test` simulator alike, `auth.rs` / `oauth2.rs` carry HTTP
   credentials, `lock.rs` is the kill switch.
+- `src/osenv.rs` — the account's home directory and Windows system
+  directories from the OS, never from environment variables.
 - `src/scan/` — `mcp-warden scan` (read-only plaintext-key finder; output
   never carries secret material).
 - `src/mcp/` — `rmcp` server wiring + tool definitions; `generated.rs`

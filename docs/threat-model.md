@@ -63,7 +63,7 @@ Before this was fixed (see the CHANGELOG), only the startup secret check used th
 **Confirmations bound to the config they confirm.** Since v0.5.4 the decisions that let a credential be used without a prompt count only in the exact form a human confirmed through the approval transport — the dialog or Telegram, which the agent cannot answer (R1 aside):
 
 - An `auto` preset runs without asking only if the keychain entry `stamp/preset/<name>` holds the SHA-256 of the preset's canonical form (every field: destination, credential, allow-lists, policy, `expires_at`). `preset add --approval auto --confirm-auto`, `approval <name> auto --confirm-auto`, `preset grant` on an `auto` preset and the new `mcp-warden preset confirm [NAME]…` write the stamp, each after an approval prompt that spells out the policy, the secret, the destination and the allow-lists. Any edit voids it: the server then serves the preset as `prompt` and says so on stderr, and `doctor` lists it.
-- A `[[server]]` gets its keys from `mcp-warden run` only as the command a human confirmed (`stamp/server/<name>`: name, command, arguments, variables). The first launch, and the first after any edit — `command = "sh"`, `args = ["-c", "env > /tmp/x"]` — asks first, naming the command and the keys; denied, nothing starts.
+- A `[[server]]` gets its keys from `mcp-warden run` only as the program a human confirmed (`stamp/server/<name>`: name, command, arguments, variables, `path`, and — since v0.6.1 — the file the command resolved to). The first launch, the first after any edit — `command = "sh"`, `args = ["-c", "env > /tmp/x"]` — and the first after the command resolves to another file ask first, naming the program by full path and the keys; denied, nothing starts. See T11 for the environment it starts in.
 
 A stamp is not the fingerprint itself — anyone can hash a config — but its HMAC-SHA256 under a random key that lives only in the keychain (`stamp/key`) and is never shown. `mcp-warden secret add` and `secret remove` refuse every `stamp/` name, and no preset may use one as its secret, so neither the CLI (which an agent with a shell can run) nor `get_secret_for_env` can write a stamp or read the key.
 
@@ -112,6 +112,19 @@ Deeply nested JSON never reaches the recursive scrub and field selection: serde_
 
 The web UI binds 127.0.0.1 only and has no login, so any local process can read it — and, up to v0.5.3, so could any web page the user opened. A hostile page re-points its own domain at 127.0.0.1 (DNS rebinding); the browser then treats `http://evil.example:7077/audit` as same-origin and lets the page read the presets (hosts, paths, secret names) and the audit log. Since v0.5.4 the UI answers only requests whose `Host` header names it — `127.0.0.1:<port>`, `localhost:<port>` or `[::1]:<port>` — and refuses the rest with 421 before any handler runs; a rebinding page cannot make the browser send another `Host`. Requests other than GET / HEAD (none exist yet) must in addition carry an `Origin` naming the UI and no cross-site `Sec-Fetch-Site`, so a form on another site cannot post to future state-changing routes. Tested in `src/web/server.rs`.
 
+### T11. The caller's environment (v0.6.1)
+
+Whoever starts an mcp-warden process chooses its environment: an agent with a shell (`HOME=/Users mcp-warden mcp`, `PATH=./bin:$PATH mcp-warden run github`), or one that edits the `"env"` of an MCP client config — which T7 already assumes for `MCP_WARDEN_CONFIG_DIR`. Up to v0.6.0 several security decisions read that environment, and an audit on 9 November 2026 found four that could be turned:
+
+- **`mcp-warden run`** looked the wrapped server's command up on the caller's `PATH` and passed the caller's whole environment (`NODE_OPTIONS`, `BASH_ENV`, `PYTHONPATH`, …) and working directory (a project `.npmrc` is read by npx) to the server, next to its keys — after one confirmation, with no further prompt. R12 listed this as accepted.
+- **The Windows dialog** was `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`, or `powershell.exe` on `PATH`: a `SystemRoot` of the agent's choosing put its own program in charge of every approval.
+- **`sftp_transfer`** took the home root and its list of sensitive locations from `$HOME`; one level up, the user's real `~/.zshenv` and `~/.ssh` were fair game.
+- **`proxy_http`**, OAuth2 token requests and `doctor --deep` honoured `HTTP_PROXY` / `ALL_PROXY`, so a loopback `http://` credential went to the agent's proxy.
+
+Since v0.6.1 these values come from the OS (`src/osenv.rs`): the home directory from the account database (`getpwuid_r`; the Profile known folder on Windows), Windows directories from known folders. `run` resolves the command in the entry's own `path` (or a fixed default), starts the server with a cleared environment — `PATH` and `HOME` from mcp-warden, the caller's locale and terminal settings, its keys — in the account's home directory, and pins the resolved program in the confirmation. The Windows dialog gets `SystemRoot`, `PATH`, `PSModulePath` and `ComSpec` from known folders and none of the .NET profiler or runtime-hook variables. Plain-http requests bypass proxies; HTTPS keeps the system proxy, which TLS with webpki roots keeps out of the request. Each case has a test that starts the real code in a child process with a hostile environment.
+
+Still read from the environment, knowingly: `MCP_WARDEN_CONFIG_DIR` and `MCP_WARDEN_APPROVAL_TRANSPORT` (T7, R1); `$HOME` for `scan` and `import`, which discover client configs and decide nothing about secrets; the Linux session bus address (R1); `SSL_CERT_FILE` / `SSL_CERT_DIR` for database TLS (R10); HTTPS proxies.
+
 ## Out-of-scope threats (what `mcp-warden` does NOT defend against)
 
 ### N1. The user's machine is compromised
@@ -147,6 +160,8 @@ Up to v0.5.3 only `proxy_http` bodies were scrubbed, so a named query that reads
 ### R1. Local approval prompts trust the local screen
 
 On macOS approval is a native dialog shown with `osascript` (`src/approval/osascript.rs`). Deny is the default and the cancel button, so Return and Esc deny and approving takes a click; the dialog gives up after the request timeout (`timeout`). Request text reaches the fixed AppleScript as arguments, never as script source, and is sanitised as in T5. On Windows it is a Windows Forms window shown by the system Windows PowerShell (`src/approval/powershell.rs`) under the same rules; its script is a fixed `-EncodedCommand` and the request text reaches it only through environment variables. On Linux `notify-rust` shows a notification with Approve / Deny actions over DBus.
+
+Since v0.6.1 the Windows dialog program and its search paths come from known folders, not `SystemRoot` or `PATH` (T11). The Linux notification goes to the session bus named by `DBUS_SESSION_BUS_ADDRESS`, which the caller sets: an agent that can start mcp-warden with its own bus and run a notification server on it could answer Approve — the same exposure as screen control, with the same answer below.
 
 A local prompt is only as trustworthy as the screen it is on: an agent that can drive the desktop (computer-use tools) could click Approve. Users who give an agent screen control should approve through Telegram, which is out of band. Up to v0.5.3 that advice did not hold: a Telegram prompt that timed out was asked again in the local dialog (macOS, Windows) or the TUI, and `MCP_WARDEN_APPROVAL_TRANSPORT=desktop` — set in the MCP client's config, which an agent may edit — replaced Telegram entirely, so the agent could wait out the Telegram prompt or switch it off and click Approve itself. Since v0.5.4 a configured Telegram transport is the only one: a local fallback needs `desktop_fallback = true` in `[approval.telegram]`, and any other `MCP_WARDEN_APPROVAL_TRANSPORT` value stops the server from starting.
 
@@ -185,6 +200,8 @@ Since v0.6.0 a preset can avoid patterns altogether with **named commands** (`[[
 - `allowed_local_paths` in the preset narrows the roots to the directories listed.
 - The prompt and the audit summary show the resolved path, and the path as given when it differs.
 
+Up to v0.6.0 "home" was `$HOME`, which the caller sets; since v0.6.1 it is the account's home directory from the OS (T11).
+
 A deny-list cannot be complete: a preset that transfers files should set `allowed_local_paths` to a dedicated working directory.
 
 ### R6. DB password lifetime in driver internals (v0.2.0)
@@ -220,6 +237,8 @@ The residual risk: an agent that has the user's attention long enough to coerce 
 
 Since v0.4.1 `db_query` requires TLS with certificate and hostname verification for every non-loopback host — PostgreSQL (OS trust store + Mozilla roots), MySQL and Redis (Mozilla roots). Plaintext is used only for `localhost`, loopback IPs and Unix sockets, where traffic cannot leave the machine. There is no opt-out: a remote server without TLS, or with a certificate from a private CA the roots don't cover, is refused. Reach such servers through an SSH tunnel to `localhost` (e.g. `ssh -L 6379:localhost:6379 host`); for PostgreSQL a private CA can also be added to the OS trust store.
 
+The OS trust store is read through `rustls-native-certs`, which honours `SSL_CERT_FILE` and `SSL_CERT_DIR`: whoever starts mcp-warden can add a CA of their own for PostgreSQL and Redis. Using it still takes a position on the network path (DNS, routing), which a prompt-injected agent does not normally have; dropping the OS store would break databases behind a private CA, so it stays.
+
 HTTP presets follow the same rule since v0.5.4. Up to v0.5.3 a `base_url` with `http://` to any host only logged a warning, and the credential crossed the network in clear text; now the server refuses to start unless such a host is `localhost`, 127.0.0.0/8 or `::1`. There is no opt-out: use https, or an SSH tunnel to localhost.
 
 ### R11. HTTP redirects are not followed
@@ -232,9 +251,11 @@ HTTP presets follow the same rule since v0.5.4. Up to v0.5.3 a `base_url` with `
 
 `mcp-warden run <name>` takes keys out of client configs (no plaintext at rest), but it still hands them to the wrapped server through its environment, and from there:
 - any process running as the same user can read that environment (`ps eww`, `/proc/<pid>/environ`);
-- whoever launches `mcp-warden run` controls the rest of the environment and the working directory (`PATH`, `NODE_OPTIONS`, a local `node_modules`, …) and can get code into the server.
+- the server runs code and reads configuration from places the user can write: npx's package cache (`~/.npm/_npx`), global `node_modules`, `~/.npmrc`, uv's cache, the server's own config files. An agent that can write those can change what the server does with its key. `run` pins which program starts and with what environment, not what that program loads.
 
-So `run` protects against keys being read off disk, synced, committed or pasted into a transcript. It does not protect against an agent that already runs arbitrary code as the user (see N2).
+Up to v0.6.0 a third way was open: whoever launched `mcp-warden run` chose the rest of the environment and the working directory (`PATH`, `NODE_OPTIONS`, a project `.npmrc`, …) and could get code into the server with a single command. Since v0.6.1 the server's command is resolved in the entry's own `path`, it starts with a cleared environment in the account's home directory, and the resolved program is part of the confirmation (T11). That closes the agent whose file access is confined to a project directory; an agent that can write the user's whole home directory is closer to N2.
+
+So `run` protects against keys being read off disk, synced, committed or pasted into a transcript, and against an agent steering the launch. For keys an agent must never hold, prefer a preset (`proxy_http`, whose credential never leaves mcp-warden) to a wrapped server.
 
 What it does guarantee:
 - A wrapped server gets only the keys stored for it: `server/<name>/<VAR>`. The config lists variable names, not keychain entries, so no edit to it — and no `server add` — can bind a **preset's** secret to a command. Without this, `server add evil --env X=github_pat -- sh -c 'echo $X'` would have exfiltrated it.

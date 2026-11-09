@@ -87,6 +87,15 @@ Then, in the client config:
 
 `mcp-warden run github` reads the server's keys from the keychain, records the launch in the audit log (command line only), and execs the server with the keys in its environment. The server's stdio passes straight through, and nothing else goes to stdout.
 
+**Where the command is found.** Not on the `PATH` of whoever starts `run` — that is the caller's to choose. A bare name like `npx` is looked up in the entry's `path`, or, without one, in system locations (`/opt/homebrew/bin`, `/usr/local/bin`, `/usr/bin`, `/bin`, …) followed by `~/.local/bin`, `~/.cargo/bin` and the nix profiles. If your `npx` lives elsewhere (nvm, asdf, volta), record the directories once:
+
+```bash
+mcp-warden server add github --force --path "$PATH" --env GITHUB_PERSONAL_ACCESS_TOKEN -- \
+  npx -y @modelcontextprotocol/server-github
+```
+
+or give the command as an absolute path. The server gets that `PATH`, `HOME`, your locale and terminal settings and its keys — nothing else from the caller's environment — and starts in your home directory. The first launch asks you to confirm the program by its full path; so does any later launch where the command resolves to a different file.
+
 `run` refuses to start when:
 - a key is missing;
 - the name is unknown;
@@ -96,4 +105,4 @@ Other server commands: `server list` shows the wrapped servers, and `server remo
 
 **What `run` protects.** Keys are no longer in client config files. A wrapped server gets only keys stored for it (`server/<name>/<VAR>`), never a preset's secret: the config lists variable names, not keychain entries. The command is fixed in the config.
 
-**What it doesn't.** Once handed to the server, the key is in that process's environment. Other processes running as you can read it, and so can whoever launches `mcp-warden run`, by influencing the environment. See [threat model R12](threat-model.md).
+**What it doesn't.** Once handed to the server, the key is in that process's environment, where other processes running as you can read it. The server also runs code and reads settings from places you can write (npx's cache, `~/.npmrc`, …), so an agent that can write your home directory can change what the server does with the key. See [threat model R12](threat-model.md); for keys an agent must never hold, prefer a preset.

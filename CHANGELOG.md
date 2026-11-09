@@ -2,6 +2,25 @@
 
 All notable changes to this project will be documented in this file. The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+From the audit of 9 November 2026. Its theme: whoever starts an mcp-warden process — an agent that runs the CLI, or edits the `"env"` of an MCP client config — chooses that process's environment, and several security decisions read it. They now ask the OS instead. See threat model T11.
+
+### Security
+
+- **A wrapped server's key could reach a program the caller chose (High).** `mcp-warden run` looked the command up on the caller's `PATH` and gave the server the caller's whole environment and working directory, next to its keys. After a human confirmed `npx …` once, `PATH=./bin:$PATH mcp-warden run github`, `NODE_OPTIONS=--require …` or a project `.npmrc` handed the key to the agent's own code without a prompt. The threat model listed this as a residual risk (R12); it is now closed for the environment, `PATH` and working directory. The command is an absolute path or a bare name looked up in the entry's new `path` setting — or a fixed default (system locations, then `~/.local/bin`, `~/.cargo/bin` and the nix profiles) — never the caller's `PATH`. The server starts with a cleared environment (`PATH` and `HOME` set by mcp-warden, the caller's locale and terminal settings, its keys) in the account's home directory. The confirmation covers the file the command resolved to, so a program planted earlier on the path asks again, and the prompt names it by full path. `server add --path DIRS` sets `path`. **Behaviour change:** every wrapped server asks once more after upgrading, and one whose command lives outside the default path (nvm, asdf, …) needs `path` (`mcp-warden server add NAME --force --path "$PATH" …`) or an absolute command. What `run` cannot pin is the server's own code and configuration in your home directory (npm cache, `~/.npmrc`, …): see R12.
+- **Windows: the approval dialog could be any program (High).** The dialog was `%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe`, or `powershell.exe` on `PATH` without `SystemRoot` — and whatever program runs there decides the approval. An agent that started `mcp-warden mcp` with its own `SystemRoot`, or set it in a client config, approved every prompt, `get_secret_for_env` included. The program now comes from the System known folder, and the dialog gets `SystemRoot`, `PATH`, `PSModulePath` and `ComSpec` from known folders and none of the caller's .NET profiler or runtime-hook variables (`COR_PROFILER*`, `COMPLUS_*`, `DOTNET_*`).
+- **`sftp_transfer` trusted `$HOME` (Medium).** The home root and every sensitive location (`~/.ssh`, shell startup files, agent configs, …) were computed from `HOME`; with `HOME` one level up, `get` could write the user's real `~/.zshenv` and `put` could upload `~/.ssh/id_*`. The home directory now comes from the account database (`getpwuid_r`; the Profile known folder on Windows), and so does the default `known_hosts`, which no longer falls back to a file in the current directory.
+- **Plain-http credentials went to the caller's proxy (Low–Medium).** `proxy_http`, OAuth2 token requests and `doctor --deep` honoured `HTTP_PROXY` / `ALL_PROXY`, so a loopback `http://` preset sent its token to whatever proxy the caller named. Plain-http requests now bypass proxies; HTTPS keeps the system proxy (TLS keeps it out of the request).
+- **`preset from-openapi` could widen a preset through its spec.** A spec path was used as an allow-list pattern as written, so `/pets|/.*` allowed every path. Spec paths are now escaped, and each `{param}` matches one segment.
+- **Dependencies:** rusqlite 0.41 bundles SQLite 3.54.1 (RUSTSEC-2026-0459: uninitialised memory from a planted `audit.db` + `-wal` pair). RUSTSEC-2026-0462 (rmcp's HTTP *client* transports) is accepted with its reason: mcp-warden does not compile them.
+
+### Fixed
+
+- **`preset from-openapi` presets refused their own templated operations:** `/pets/{id}` matched only that literal text. It now becomes `/pets/[^/]+`. The command prints the generated base URL, methods and allow-list for review; `--approval auto` needs `--confirm-auto`, like `preset add`; a fetched spec is cut off at the 50 MB cap while it is read; spec files under `/tmp` are accepted on macOS.
+- **`mcp-warden audit` printed Rust's debug form** (`→ Some(Refused) Some(Err { message: … })`); it now prints `→ refused error: …`.
+- `preset scaffold` of an `auto` template says that `auto` takes effect only after `preset confirm` is approved.
+
 ## [0.6.0]
 
 Building from source now needs Rust 1.94.1 (AWS's `aws-sigv4` crate); prebuilt binaries and packages are unaffected.

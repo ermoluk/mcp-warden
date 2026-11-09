@@ -143,7 +143,7 @@ mcp-warden run github               # what the rewired entry runs: the server, w
 | `mcp-warden unlock`                        | Remove the lock after a human approves it in the dialog / Telegram |
 | `mcp-warden scan`                          | Find plaintext keys in MCP client configs and `.env` files (never prints values) |
 | `mcp-warden import`                        | Move the keys `scan` found into the keychain and point the client at `mcp-warden run` |
-| `mcp-warden server add <name> --env VAR -- <cmd…>` | Wrap another MCP server; its key is read from stdin into the keychain |
+| `mcp-warden server add <name> --env VAR [--path DIRS] -- <cmd…>` | Wrap another MCP server; its key is read from stdin into the keychain |
 | `mcp-warden run <name>`                    | Launch a wrapped MCP server with its keys injected (use as the client's command) |
 | `mcp-warden preset scaffold <template>` *(v0.3.0)* | Generate a preset from a built-in template (`--list` to discover) |
 | `mcp-warden preset from-openapi <src>` *(v0.3.0)* | Bootstrap a preset from an OpenAPI 3.x spec (URL or file) |
@@ -226,7 +226,7 @@ Compared with Keyward 0.1.1, Wundervault MCP server 2.1.0 and Janee 0.16.0, from
 - `mcp-warden lock` stops every running server at its next call; a server that has seen the lock stays locked until it restarts, and `unlock` needs a human to approve it.
 - Presets can cap and trim what `proxy_http` hands the agent (`max_response_bytes`, `response_fields`); a credential the upstream echoes back is always scrubbed.
 - `ssh_exec` refuses shell syntax whatever the preset's patterns allow, because sshd runs every command through the remote login shell. For a second allow-list on the server — a dedicated account, `command=` / `ForceCommand` and a gate script — see [`docs/ssh-hardening.md`](docs/ssh-hardening.md).
-- Wrapped servers (`mcp-warden run`) only get keys stored for them (`server/<name>/<VAR>`), never a preset's secret, and their command is fixed in the config. The key is still visible to the process it is handed to.
+- Wrapped servers (`mcp-warden run`) only get keys stored for them (`server/<name>/<VAR>`), never a preset's secret. Their command is fixed in the config and found in the entry's own `path`, not the caller's `PATH`; they start with a cleared environment, and the program is part of what you confirm. The key is still visible to the process it is handed to.
 - Stdout is the MCP protocol channel; all logs go to stderr.
 
 ## Links
