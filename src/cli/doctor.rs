@@ -191,12 +191,16 @@ async fn run_probes(
     exec: &ActionExecutor,
 ) -> Vec<ProbeResult> {
     let mut out = Vec::with_capacity(cfg.preset.len());
-    // Never follow redirects with credentials attached — see executor/http.rs.
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(args.timeout_seconds))
-        .build()
-        .ok();
+    // Never follow redirects with credentials attached, and never send a
+    // plain-http (loopback) probe through a proxy — see executor/http.rs.
+    let build = |plain: bool| {
+        crate::executor::http::direct_if_plain(reqwest::Client::builder(), plain)
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(args.timeout_seconds))
+            .build()
+            .ok()
+    };
+    let (client, direct) = (build(false), build(true));
 
     for p in &cfg.preset {
         let kind = match p.preset_type {
@@ -254,8 +258,13 @@ async fn run_probes(
                         continue;
                     }
                 };
+                let plain = p
+                    .base_url
+                    .as_deref()
+                    .is_some_and(|u| u.starts_with("http://"));
+                let probe_client = if plain { &direct } else { &client };
                 let (status, detail) =
-                    probe_http(p, kc, exec.state_dir.as_deref(), client.as_ref()).await;
+                    probe_http(p, kc, exec.state_dir.as_deref(), probe_client.as_ref()).await;
                 let _ = exec.audit.record_outcome(
                     event,
                     match status {

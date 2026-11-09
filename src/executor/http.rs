@@ -338,7 +338,7 @@ pub async fn execute(
         }
     }
 
-    let client = http_client()?;
+    let client = http_client(url.scheme() == "http")?;
     let method = method_upper
         .parse::<reqwest::Method>()
         .map_err(|_| WardenError::Validation(format!("bad method {method_upper}")))?;
@@ -431,13 +431,30 @@ pub(crate) fn error_text(e: reqwest::Error) -> String {
 /// reqwest strips `Authorization` cross-origin but not custom auth headers
 /// (`Auth::Header`) — or land on a path the allow-list never approved.
 /// The 3xx is returned to the agent as-is.
-fn http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+///
+/// `plain` (an `http://` URL, loopback only by config validation): the
+/// request carries its credential in clear text, so it never goes through a
+/// proxy named by `HTTP_PROXY` / `ALL_PROXY`, which belong to whoever
+/// started mcp-warden (audit 2026-11-09, H5). HTTPS keeps the system proxy
+/// — corporate networks need it, and TLS with webpki roots keeps the proxy
+/// out of the request.
+fn http_client(plain: bool) -> Result<reqwest::Client> {
+    direct_if_plain(reqwest::Client::builder(), plain)
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))
         .user_agent(format!("mcp-warden/{}", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| WardenError::Executor(e.to_string()))
+}
+
+/// No proxy for a plain-text request that carries a credential: see
+/// `http_client`. Used for proxy_http, the OAuth2 token request and
+/// `doctor --deep`.
+pub(crate) fn direct_if_plain(
+    builder: reqwest::ClientBuilder,
+    plain: bool,
+) -> reqwest::ClientBuilder {
+    if plain { builder.no_proxy() } else { builder }
 }
 
 #[cfg(test)]
@@ -906,7 +923,7 @@ mod tests {
             .mount(&api)
             .await;
 
-        let resp = http_client()
+        let resp = http_client(true)
             .unwrap()
             .get(format!("{}/users", api.uri()))
             .header("X-Api-Key", "SUPERSECRET")
@@ -1032,7 +1049,6 @@ mod tests {
     /// `http://` preset — the one plain-text kind the config allows — must
     /// not send its credential to a proxy the caller named.
     #[test]
-    #[ignore = "audit 2026-11-09 H5: confirmed — fails until proxy_http ignores proxy variables (or refuses them for credentialed calls)"]
     fn audit_h5_a_proxy_from_the_callers_environment_never_sees_the_credential() {
         use std::io::{Read, Write};
         let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
@@ -1073,9 +1089,9 @@ mod tests {
             .env("ALL_PROXY", &proxy_url)
             .env_remove("NO_PROXY")
             .env_remove("no_proxy")
-            .status()
+            .output()
             .unwrap();
-        assert!(status.success());
+        assert!(status.status.success());
         let seen = seen.lock().unwrap().clone();
         assert!(
             !seen.contains(AUDIT_H5_SECRET),

@@ -91,12 +91,18 @@ pub async fn mint(
     let timeout = preset
         .timeout_seconds
         .map_or(MAX_TOKEN_SECONDS, |t| t.clamp(1, MAX_TOKEN_SECONDS));
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(timeout))
-        .user_agent(format!("mcp-warden/{}", env!("CARGO_PKG_VERSION")))
-        .build()
-        .map_err(|e| WardenError::Executor(e.to_string()))?;
+    // A loopback `http://` token endpoint gets the client secret and the
+    // refresh token in clear text: never through a proxy (audit 2026-11-09,
+    // H5).
+    let client = crate::executor::http::direct_if_plain(
+        reqwest::Client::builder(),
+        token_url.starts_with("http://"),
+    )
+    .redirect(reqwest::redirect::Policy::none())
+    .timeout(Duration::from_secs(timeout))
+    .user_agent(format!("mcp-warden/{}", env!("CARGO_PKG_VERSION")))
+    .build()
+    .map_err(|e| WardenError::Executor(e.to_string()))?;
     let mut request = client.post(token_url);
     match (client_auth, client_secret) {
         // RFC 6749 §2.3.1: both form-encoded, then HTTP Basic.
@@ -332,6 +338,91 @@ mod tests {
             preset,
             _dir: dir,
         }
+    }
+
+    /// Audit 2026-11-09, H5 (helper): mints a token from a loopback
+    /// `http://` endpoint in a child process whose environment names a
+    /// proxy.
+    #[test]
+    #[ignore = "helper: runs only in the child process the test below starts"]
+    fn proxy_child() {
+        let Ok(token_url) = std::env::var("PROXY_CHILD_TOKEN_URL") else {
+            return;
+        };
+        let kc = mcp_warden_core::keychain::memory::InMemoryKeychain::new();
+        let preset: Preset = toml::from_str(&format!(
+            r#"
+            name = "drive"
+            type = "http"
+            description = "x"
+            base_url = "http://127.0.0.1:9"
+            allowed_methods = ["GET"]
+            approval = "auto"
+            timeout_seconds = 2
+            [auth]
+            type = "oauth2"
+            token_url = "{token_url}"
+            client_id = "app"
+            grant = "client_credentials"
+            client_secret = "cs"
+            "#
+        ))
+        .unwrap();
+        let secret = Secret::new(CLIENT_SECRET.into());
+        let _ = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+            .block_on(mint(&kc, None, &preset, Some(&secret)));
+    }
+
+    /// The token request to a loopback `http://` endpoint carries the
+    /// client secret in clear text; a proxy the caller named never gets it.
+    #[test]
+    fn a_plain_http_token_request_never_goes_through_the_callers_proxy() {
+        use std::io::Read;
+        let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_url = format!("http://{}", proxy.local_addr().unwrap());
+        let token_port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let seen = Arc::new(std::sync::Mutex::new(String::new()));
+        let seen_by_proxy = seen.clone();
+        std::thread::spawn(move || {
+            if let Ok((mut conn, _)) = proxy.accept() {
+                conn.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut buf = [0u8; 8192];
+                let n = conn.read(&mut buf).unwrap_or(0);
+                *seen_by_proxy.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).into();
+            }
+        });
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "executor::oauth2::tests::proxy_child",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env(
+                "PROXY_CHILD_TOKEN_URL",
+                format!("http://127.0.0.1:{token_port}/token"),
+            )
+            .env("HTTP_PROXY", &proxy_url)
+            .env("http_proxy", &proxy_url)
+            .env("ALL_PROXY", &proxy_url)
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
+            .output()
+            .unwrap();
+        assert!(out.status.success());
+        let seen = seen.lock().unwrap().clone();
+        assert!(
+            seen.is_empty(),
+            "the caller's proxy got the token request:\n{seen}"
+        );
     }
 
     const REFRESH: &str = r#"grant = "refresh_token"
