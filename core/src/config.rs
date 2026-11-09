@@ -46,6 +46,13 @@ pub struct WrappedServer {
     /// Environment variables `run` sets from this server's keychain entries.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub env: Vec<String>,
+    /// Directories (`:`-separated, `;` on Windows, all absolute) that `run`
+    /// searches for `command` and gives the server as its `PATH`. Unset:
+    /// system locations plus the usual per-user install directories. Never
+    /// the caller's `PATH`, which an agent can choose (audit 2026-11-09, H1).
+    /// Part of the entry, so changing it asks for confirmation again.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 impl WrappedServer {
@@ -887,6 +894,14 @@ impl Config {
             if !seen.insert(s.name.as_str()) {
                 return Err(WardenError::Validation(format!(
                     "two [[server]] entries are named '{}'",
+                    s.name
+                )));
+            }
+            if let Some(path) = &s.path
+                && (path.is_empty() || std::env::split_paths(path).any(|d| !d.is_absolute()))
+            {
+                return Err(WardenError::Validation(format!(
+                    "server '{}': every directory in `path` must be absolute",
                     s.name
                 )));
             }

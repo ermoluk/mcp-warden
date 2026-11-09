@@ -716,10 +716,17 @@ fn access_warnings(
         kc,
     ));
     for s in &cfg.server {
+        let program = match crate::cli::run::program(s) {
+            Ok(program) => program,
+            Err(e) => {
+                out.push(format!("{e}; `mcp-warden run {}` will refuse", s.name));
+                continue;
+            }
+        };
         let confirmed = mcp_warden_core::stamp::check(
             kc,
             &mcp_warden_core::stamp::server_stamp_name(&s.name),
-            &mcp_warden_core::stamp::server_fingerprint(s),
+            &mcp_warden_core::stamp::server_fingerprint(s, &program),
         )
         .is_ok_and(|c| c == mcp_warden_core::stamp::Confirmation::Confirmed);
         if !confirmed {
@@ -778,6 +785,9 @@ mod tests {
             "#,
         )
         .unwrap();
+        // A program that exists on every platform the tests run on.
+        let program = std::env::current_exe().unwrap();
+        cfg.server[0].command = program.display().to_string();
         cfg.preset[0].expires_at = Some(now - chrono::Duration::minutes(1));
         let kc = InMemoryKeychain::new();
         kc.set("server/github/A", Secret::new("v".into())).unwrap();
@@ -792,7 +802,7 @@ mod tests {
         mcp_warden_core::stamp::record(
             &kc,
             &mcp_warden_core::stamp::server_stamp_name("github"),
-            &mcp_warden_core::stamp::server_fingerprint(&cfg.server[0]),
+            &mcp_warden_core::stamp::server_fingerprint(&cfg.server[0], &program),
         )
         .unwrap();
         assert!(access_warnings(&cfg, &kc, now).is_empty());

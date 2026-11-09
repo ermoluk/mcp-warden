@@ -28,6 +28,13 @@ pub fn windows_dir() -> Option<PathBuf> {
     dirs_sys::known_folder(windows_sys::Win32::UI::Shell::FOLDERID_Windows)
 }
 
+/// The Program Files directory, from its known folder — never from
+/// `ProgramFiles`.
+#[cfg(windows)]
+pub fn program_files_dir() -> Option<PathBuf> {
+    dirs_sys::known_folder(windows_sys::Win32::UI::Shell::FOLDERID_ProgramFiles)
+}
+
 #[cfg(unix)]
 mod imp {
     use std::ffi::{CStr, OsStr};

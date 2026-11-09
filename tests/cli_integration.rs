@@ -805,10 +805,13 @@ fn preset_grant_and_revoke_set_and_clear_expiry() {
 fn server_add_list_remove() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
+    // A program that exists wherever the tests run, by absolute path.
+    let program = assert_cmd::cargo::cargo_bin("mcp-warden");
     cmd()
         .env("MCP_WARDEN_CONFIG_DIR", dir)
         .args(["server", "add", "github", "--env", "GITHUB_TOKEN", "--"])
-        .args(["npx", "-y", "@modelcontextprotocol/server-github"])
+        .arg(&program)
+        .args(["-y", "@modelcontextprotocol/server-github"])
         .write_stdin("test-value\n")
         .assert()
         .success()
@@ -842,6 +845,30 @@ fn server_add_list_remove() {
             .unwrap()
             .contains("[[server]]")
     );
+}
+
+/// `run` looks a bare command up in the server's own path, never the
+/// caller's PATH; `server add` says so before it asks for any value.
+#[test]
+fn server_add_refuses_a_command_outside_the_servers_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["server", "add", "gh", "--env", "TOKEN", "--"])
+        .args(["mcpw-no-such-program", "x"])
+        .write_stdin("must-not-be-read\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("'mcpw-no-such-program' is not in"))
+        .stderr(predicate::str::contains("--path"));
+    assert!(!tmp.path().join("config.toml").exists());
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["server", "add", "gh", "--path", "relative/bin", "--"])
+        .arg(assert_cmd::cargo::cargo_bin("mcp-warden"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("must be absolute"));
 }
 
 /// The value of a server key never goes on the command line, and the

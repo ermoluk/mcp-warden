@@ -78,6 +78,13 @@ webpki-roots = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 libc = "0.2"
 
+# Windows: system, profile and Program Files directories from known folders,
+# never from variables the caller sets (`osenv`). Both crates are already in
+# the tree through `dirs`.
+[target.'cfg(windows)'.dependencies]
+dirs-sys = "0.4"
+windows-sys = { version = "0.48", features = ["Win32_UI_Shell"] }
+
 [dev-dependencies]
 insta = { version = "1", features = ["yaml", "json"] }
 assert_cmd = "2"

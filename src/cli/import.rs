@@ -222,6 +222,7 @@ fn move_server(
         command,
         args,
         env: vars.clone(),
+        path: None,
     };
 
     for var in &vars {
