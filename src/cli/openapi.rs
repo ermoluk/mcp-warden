@@ -336,6 +336,38 @@ mod tests {
         }
     }
 
+    /// Audit 2026-11-09 (functional). Spec paths are copied into
+    /// `allowed_paths` verbatim, where an entry is an exact string or a
+    /// full-match regex — `{id}` is neither a placeholder nor, as a regex,
+    /// a wildcard. The preset should allow the operations the spec lists.
+    #[test]
+    #[ignore = "audit 2026-11-09: confirmed — templated spec paths are refused until {param} becomes a one-segment pattern"]
+    fn audit_generated_presets_allow_the_specs_own_operations() {
+        let api = parse_spec(PETSTORE_JSON.as_bytes(), "test.json").unwrap();
+        let b = build_preset(api, opts()).unwrap();
+        crate::executor::http::validate_request(&b.preset, "GET", "/pets").unwrap();
+        crate::executor::http::validate_request(&b.preset, "GET", "/pets/123")
+            .expect("GET /pets/{id} is in the spec");
+    }
+
+    /// Audit 2026-11-09. A spec path that holds regex syntax becomes an
+    /// allow-list pattern as it stands, so a spec — fetched from a URL —
+    /// can widen the preset past the operations it lists.
+    #[test]
+    #[ignore = "audit 2026-11-09: confirmed — fails until spec paths are escaped before they become patterns"]
+    fn audit_spec_paths_cannot_widen_the_allow_list() {
+        let spec = r#"{"openapi": "3.0.0", "info": {"title": "T", "version": "1"},
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {"/pets|/.*": {"get": {"responses": {"200": {"description": "ok"}}}}}}"#;
+        let api = parse_spec(spec.as_bytes(), "test.json").unwrap();
+        let b = build_preset(api, opts()).unwrap();
+        assert!(
+            crate::executor::http::validate_request(&b.preset, "GET", "/admin/users").is_err(),
+            "allowed_paths {:?} let /admin/users through",
+            b.preset.allowed_paths
+        );
+    }
+
     #[test]
     fn parses_petstore_json() {
         let api = parse_spec(PETSTORE_JSON.as_bytes(), "test.json").unwrap();
