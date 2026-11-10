@@ -122,6 +122,14 @@ impl McpSession {
     /// Start the server on `config_dir` (memory keychain) and return once it
     /// has answered `initialize` — by then the startup config check has run.
     fn start(config_dir: &Path) -> Self {
+        let mut session = Self::spawn(config_dir);
+        session.initialize(1, "2024-11-05");
+        session.send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+        session
+    }
+
+    /// Start the server on `config_dir` without the MCP handshake.
+    fn spawn(config_dir: &Path) -> Self {
         let mut child = Command::new(cargo_bin("mcp-warden"))
             .arg("mcp")
             .env("MCP_WARDEN_BACKEND", "memory")
@@ -144,22 +152,24 @@ impl McpSession {
             }
         });
 
-        let mut session = Self {
+        Self {
             child,
             stdin,
             responses,
-        };
-        session.request(
-            1,
+        }
+    }
+
+    /// Send `initialize` asking for protocol `version`; returns the response.
+    fn initialize(&mut self, id: u64, version: &str) -> Value {
+        self.request(
+            id,
             "initialize",
             json!({
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": version,
                 "capabilities": {},
                 "clientInfo": { "name": "warden-frozen-test", "version": "0.0.0" }
             }),
-        );
-        session.send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
-        session
+        )
     }
 
     fn send(&mut self, msg: Value) {
@@ -333,6 +343,41 @@ fn audit_events_name_the_client_and_session() {
         events[0].session, events[1].session,
         "one session per server process"
     );
+}
+
+/// Every session opens with `initialize`, which names the client for the
+/// audit log. Protocol 2026-07-28 drops the handshake (each request carries
+/// its metadata inline, the client's name optional); mcp-warden does not
+/// offer it, so such a request is refused and the client falls back to
+/// `initialize`, which is answered with the newest version that has one.
+#[test]
+fn every_session_opens_with_initialize() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let mut server = McpSession::spawn(tmp.path());
+
+    let inline = server.request(
+        1,
+        "tools/call",
+        json!({
+            "name": "list_presets",
+            "arguments": {},
+            "_meta": {
+                "io.modelcontextprotocol/protocolVersion": "2026-07-28",
+                "io.modelcontextprotocol/clientCapabilities": {},
+                "io.modelcontextprotocol/clientInfo": { "name": "inline", "version": "1" }
+            }
+        }),
+    );
+    assert!(
+        inline["error"].is_object() && inline["result"].is_null(),
+        "a request without `initialize` must be refused: {inline}"
+    );
+
+    let init = server.initialize(2, "2026-07-28");
+    assert_eq!(init["result"]["protocolVersion"], "2025-11-25", "{init}");
+    server.send(json!({ "jsonrpc": "2.0", "method": "notifications/initialized" }));
+    let listed = server.call_tool(3, "list_presets", json!({}));
+    assert!(listed["error"].is_null(), "{listed}");
 }
 
 /// A14: what reaches stdin that is not a well-formed message — broken JSON,

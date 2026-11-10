@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file. The format is loosely based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- **MCP SDK: rmcp 3.9** (was 1.6), still built with its server and stdio parts only. RUSTSEC-2026-0462 (unbounded buffering in rmcp's HTTP *client* transports) no longer applies and is no longer ignored by `cargo deny` / `cargo audit`. Tool descriptions are unchanged. What clients may notice:
+  - Arguments that do not match a tool's input schema are answered as a tool result with `isError: true` (same message) instead of a JSON-RPC error, so the agent can correct the call.
+  - `initialize` with a protocol version mcp-warden does not know is answered with `2025-11-25` instead of the version echoed back.
+  - A request sent before `initialize` gets an error and the server waits for `initialize`, instead of ending the session.
+  - Output schemas no longer carry a root `title`; `ssh_exec` and `ssh_run` list `exit_code` (always sent, may be `null`) as required.
+- **Every session still opens with `initialize`.** rmcp 3 also offers protocol 2026-07-28, which drops the handshake and makes the client's name optional; the audit log takes the client's name from `initialize`, so mcp-warden keeps to versions 2024-11-05 to 2025-11-25. A 2026-07-28 client is told so and falls back to `initialize`.
+
+### Fixed
+
+- **`list_presets` declared `commands` as required** in its output schema but leaves it out for presets without named commands, so a client that checks results against the schema rejected the answer for any HTTP or database preset.
+
 ## [0.6.1]
 
 From the audit of 9 November 2026. Its theme: whoever starts an mcp-warden process — an agent that runs the CLI, or edits the `"env"` of an MCP client config — chooses that process's environment, and several security decisions read it. They now ask the OS instead. See threat model T11.

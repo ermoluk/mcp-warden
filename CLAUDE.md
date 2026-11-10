@@ -26,7 +26,7 @@ client. README and marketing position this as agent-agnostic.
 |----------------------------|--------------------------------|
 | Cross-platform keychain    | `keyring-core` 1 + the OS stores (`apple-native-keyring-store`, `windows-native-keyring-store`, `linux-keyutils-keyring-store`) |
 | CLI                        | `clap` 4 (derive)              |
-| MCP server (stdio)         | `rmcp` 1.6 (official SDK)      |
+| MCP server (stdio)         | `rmcp` 3.9 (official SDK)      |
 | Async runtime              | `tokio` 1                      |
 | HTTP client                | `reqwest` 0.12 (rustls)        |
 | SSH client                 | `russh` 0.65                   |

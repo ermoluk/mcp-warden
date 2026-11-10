@@ -41,7 +41,11 @@ pub fn router(presets: &[Preset]) -> ToolRouter<WardenServer> {
             definition(p, c),
             move |ctx: ToolCallContext<'_, WardenServer>| {
                 let (preset, command) = (preset.clone(), command.clone());
-                Box::pin(async move { call(ctx.service, &preset, &command, ctx.arguments).await })
+                Box::pin(async move {
+                    call(ctx.service, &preset, &command, ctx.arguments)
+                        .await
+                        .map(Into::into)
+                })
             },
         ));
     }

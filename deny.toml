@@ -14,11 +14,6 @@ ignore = [
     # what the attack targets. It goes away only if RSA keys are dropped
     # (owner decision 2026-11-03: keep them) or rsa ships a fix.
     { id = "RUSTSEC-2023-0071", reason = "rsa via russh: no fix released; signing only" },
-    # rmcp < 3.9: its Streamable HTTP *clients* buffer response bodies without
-    # a limit. mcp-warden builds rmcp with `server`, `macros`, `schemars` and
-    # `transport-io` only — no client transport is compiled in (check with
-    # `cargo tree -i rmcp -e features`). Goes away with the rmcp 3.x upgrade.
-    { id = "RUSTSEC-2026-0462", reason = "rmcp HTTP client transports are not compiled in" },
 ]
 # Unmaintained and unsound crates deep in the tree are reported, not fatal:
 # each is listed by `cargo deny check advisories` and reviewed per release.
