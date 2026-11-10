@@ -7,12 +7,14 @@ use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::wrapper::{Json, Parameters},
     model::{
-        Implementation, InitializeRequestParams, InitializeResult, ServerCapabilities, ServerConfig,
+        Implementation, InitializeRequestParams, InitializeResult, ProtocolVersion,
+        ServerCapabilities, ServerConfig,
     },
     service::{RequestContext, RoleServer},
     tool, tool_handler, tool_router,
 };
 use serde::{Deserialize, Serialize};
+use std::borrow::Cow;
 use std::sync::Arc;
 
 /// State for the mcp-warden MCP server.
@@ -612,10 +614,21 @@ impl ServerHandler for WardenServer {
             &request.client_info.name,
             &request.client_info.version,
         ));
+        let result = self.negotiate_initialize(&request);
         if context.peer.peer_info().is_none() {
             context.peer.set_peer_info(request);
         }
-        Ok(self.get_info())
+        result
+    }
+
+    /// Only the protocol versions that open with `initialize`, the one
+    /// place a client says who it is: rmcp also knows 2026-07-28, whose
+    /// requests skip the handshake and need not name the client, which
+    /// would leave the session's audit events without one.
+    fn supported_protocol_versions(&self) -> Cow<'static, [ProtocolVersion]> {
+        Cow::Borrowed(ProtocolVersion::known_up_to(
+            &ProtocolVersion::LATEST_WITH_INITIALIZE,
+        ))
     }
 
     fn get_info(&self) -> ServerConfig {
