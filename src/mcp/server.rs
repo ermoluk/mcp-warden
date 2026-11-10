@@ -7,7 +7,7 @@ use rmcp::{
     ErrorData as McpError, ServerHandler,
     handler::server::wrapper::{Json, Parameters},
     model::{
-        Implementation, InitializeRequestParams, InitializeResult, ServerCapabilities, ServerInfo,
+        Implementation, InitializeRequestParams, InitializeResult, ServerCapabilities, ServerConfig,
     },
     service::{RequestContext, RoleServer},
     tool, tool_handler, tool_router,
@@ -618,8 +618,8 @@ impl ServerHandler for WardenServer {
         Ok(self.get_info())
     }
 
-    fn get_info(&self) -> ServerInfo {
-        let mut info = ServerInfo::default();
+    fn get_info(&self) -> ServerConfig {
+        let mut info = ServerConfig::default();
         info.capabilities = ServerCapabilities::builder().enable_tools().build();
         info.server_info = Implementation::new("mcp-warden", env!("CARGO_PKG_VERSION"));
         info.instructions = Some(
@@ -932,6 +932,47 @@ mod tests {
             .collect();
         served.sort();
         assert_eq!(served, mcp_warden_core::commands::STATIC_TOOL_NAMES);
+    }
+
+    /// A strict client checks `structuredContent` against `outputSchema`, so
+    /// a field the schema requires must be in every response — also when it
+    /// is empty and left out (`commands`), or null (`exit_code`).
+    #[test]
+    fn output_schemas_require_only_what_is_always_sent() {
+        let tools = WardenServer::tool_router().list_all();
+        let output = |name: &str| {
+            let tool = tools.iter().find(|t| t.name == name).unwrap();
+            Value::Object((**tool.output_schema.as_ref().unwrap()).clone())
+        };
+        let assert_required_present = |schema: &Value, sent: &Value, at: &str| {
+            for key in schema["required"].as_array().unwrap() {
+                let key = key.as_str().unwrap();
+                assert!(sent.get(key).is_some(), "{at} requires {key}: {sent}");
+            }
+        };
+
+        let preset = serde_json::to_value(PresetSummary {
+            name: "gh".into(),
+            description: "x".into(),
+            kind: "http".into(),
+            approval: "prompt".into(),
+            expires_at: None,
+            commands: vec![],
+        })
+        .unwrap();
+        let list = output("list_presets");
+        assert_required_present(&list["$defs"]["PresetSummary"], &preset, "PresetSummary");
+
+        let ssh = serde_json::to_value(crate::executor::ssh::SshExecResponse {
+            stdout: String::new(),
+            stderr: String::new(),
+            exit_code: None,
+            notice: None,
+        })
+        .unwrap();
+        for tool in ["ssh_exec", "ssh_run"] {
+            assert_required_present(&output(tool), &ssh, tool);
+        }
     }
 
     #[test]
