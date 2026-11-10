@@ -536,10 +536,30 @@ mod tests {
         assert_eq!(s.verify_chain().unwrap().records, 7);
     }
 
-    /// Several processes write one file: the chain stays one line. Kept
-    /// small: SQLite does not queue waiters, and on a slow disk (Windows
-    /// CI, a commit takes tens of milliseconds) hundreds of commits from
-    /// four threads can keep one waiting past the busy timeout.
+    /// `two_calls`, each access run again while another writer holds the
+    /// file (see `until_unlocked`).
+    fn two_calls_under_contention(s: &LocalSqlite) {
+        use crate::audit::until_unlocked as again;
+        let summary = "GET https://api.github.com/user";
+        let a = again(|| s.record_pending("gh", "proxy_http", summary));
+        again(|| s.record_decision(a, AuditDecision::Approved));
+        again(|| s.record_outcome(a, AuditOutcome::Ok { status: 200 }));
+        let b = again(|| s.record_pending("gh", "proxy_http", summary));
+        again(|| s.record_windowed(b, a));
+        again(|| {
+            s.record_outcome(
+                b,
+                AuditOutcome::Err {
+                    message: "boom".into(),
+                },
+            )
+        });
+    }
+
+    /// Several processes write one file: the chain stays one line and holds
+    /// every write. A writer that waits past the busy timeout (SQLite does
+    /// not queue waiters; on Windows CI a commit can take tens of
+    /// milliseconds) tries again, as the next call would in production.
     #[test]
     fn writers_in_parallel_make_one_chain() {
         let dir = tempfile::tempdir().unwrap();
@@ -548,9 +568,10 @@ mod tests {
             .map(|_| {
                 let path = dir.path().to_path_buf();
                 std::thread::spawn(move || {
-                    let s = sink(&path);
+                    let s =
+                        crate::audit::until_unlocked(|| LocalSqlite::open(&path.join("audit.db")));
                     for _ in 0..3 {
-                        two_calls(&s);
+                        two_calls_under_contention(&s);
                     }
                 })
             })
