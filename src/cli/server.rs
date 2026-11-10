@@ -27,6 +27,13 @@ pub struct ServerAddArgs {
     /// several. Values are read from stdin, never taken as arguments.
     #[arg(long = "env", value_name = "VAR")]
     pub env: Vec<String>,
+    /// Directories to find the command in and to give the server as its
+    /// PATH (`:`-separated, `;` on Windows, absolute). Default: system
+    /// locations plus ~/.local/bin, ~/.cargo/bin and the nix profiles —
+    /// never the PATH `run` is started with. Pass `--path "$PATH"` if the
+    /// command lives elsewhere (nvm, asdf, …).
+    #[arg(long, value_name = "DIRS")]
+    pub path: Option<String>,
     /// Replace an existing server with the same name.
     #[arg(long)]
     pub force: bool,
@@ -87,12 +94,16 @@ fn add(args: ServerAddArgs, config_path: &Path, kc: &dyn KeychainStore) -> Resul
         command: command.next().unwrap_or_default(),
         args: command.collect(),
         env: args.env,
+        path: args.path,
     };
     // Validate before asking for any value.
     let mut probe = load(config_path)?;
     probe.server.retain(|s| s.name != server.name);
     probe.server.push(server.clone());
     probe.validate_servers()?;
+    // `run` will look the command up in the server's own path; say now if
+    // it is not there rather than at the first launch.
+    let program = crate::cli::run::program(&server)?;
     for var in &server.env {
         let entry = server.secret_name(var);
         if kc.get(&entry)?.is_none() {
@@ -104,9 +115,11 @@ fn add(args: ServerAddArgs, config_path: &Path, kc: &dyn KeychainStore) -> Resul
         .map(|p| p.display().to_string())
         .unwrap_or_else(|_| "mcp-warden".into());
     eprintln!(
-        "Added server '{}'. In your MCP client config, launch it as:\n  \
+        "Added server '{}' (runs {}). In your MCP client config, launch it as:\n  \
          {{ \"command\": \"{exe}\", \"args\": [\"run\", \"{}\"] }}",
-        args.name, args.name
+        args.name,
+        program.display(),
+        args.name
     );
     Ok(())
 }
@@ -119,11 +132,15 @@ fn list(config_path: &Path) -> Result<()> {
     }
     for s in &cfg.server {
         println!(
-            "{:20} {} {}  [{}]",
+            "{:20} {} {}  [{}]{}",
             s.name,
             s.command,
             s.args.join(" "),
-            s.env.join(", ")
+            s.env.join(", "),
+            s.path
+                .as_deref()
+                .map(|p| format!("  PATH {p}"))
+                .unwrap_or_default()
         );
     }
     Ok(())

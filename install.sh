@@ -9,7 +9,7 @@
 # nothing that runs again later: to update, run it again.
 #
 # Environment:
-#   MCP_WARDEN_VERSION       release to install, e.g. 0.6.0 (default: the latest)
+#   MCP_WARDEN_VERSION       release to install, e.g. 0.6.1 (default: the latest)
 #   MCP_WARDEN_INSTALL_DIR   where the binary goes (default: ~/.local/bin)
 #   MCP_WARDEN_DOWNLOAD_URL  base URL of the release assets, for mirrors and
 #                            tests (default: GitHub releases)

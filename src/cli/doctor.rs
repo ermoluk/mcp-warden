@@ -191,12 +191,16 @@ async fn run_probes(
     exec: &ActionExecutor,
 ) -> Vec<ProbeResult> {
     let mut out = Vec::with_capacity(cfg.preset.len());
-    // Never follow redirects with credentials attached — see executor/http.rs.
-    let client = reqwest::Client::builder()
-        .redirect(reqwest::redirect::Policy::none())
-        .timeout(Duration::from_secs(args.timeout_seconds))
-        .build()
-        .ok();
+    // Never follow redirects with credentials attached, and never send a
+    // plain-http (loopback) probe through a proxy — see executor/http.rs.
+    let build = |plain: bool| {
+        crate::executor::http::direct_if_plain(reqwest::Client::builder(), plain)
+            .redirect(reqwest::redirect::Policy::none())
+            .timeout(Duration::from_secs(args.timeout_seconds))
+            .build()
+            .ok()
+    };
+    let (client, direct) = (build(false), build(true));
 
     for p in &cfg.preset {
         let kind = match p.preset_type {
@@ -254,8 +258,13 @@ async fn run_probes(
                         continue;
                     }
                 };
+                let plain = p
+                    .base_url
+                    .as_deref()
+                    .is_some_and(|u| u.starts_with("http://"));
+                let probe_client = if plain { &direct } else { &client };
                 let (status, detail) =
-                    probe_http(p, kc, exec.state_dir.as_deref(), client.as_ref()).await;
+                    probe_http(p, kc, exec.state_dir.as_deref(), probe_client.as_ref()).await;
                 let _ = exec.audit.record_outcome(
                     event,
                     match status {
@@ -716,10 +725,17 @@ fn access_warnings(
         kc,
     ));
     for s in &cfg.server {
+        let program = match crate::cli::run::program(s) {
+            Ok(program) => program,
+            Err(e) => {
+                out.push(format!("{e}; `mcp-warden run {}` will refuse", s.name));
+                continue;
+            }
+        };
         let confirmed = mcp_warden_core::stamp::check(
             kc,
             &mcp_warden_core::stamp::server_stamp_name(&s.name),
-            &mcp_warden_core::stamp::server_fingerprint(s),
+            &mcp_warden_core::stamp::server_fingerprint(s, &program),
         )
         .is_ok_and(|c| c == mcp_warden_core::stamp::Confirmation::Confirmed);
         if !confirmed {
@@ -778,6 +794,9 @@ mod tests {
             "#,
         )
         .unwrap();
+        // A program that exists on every platform the tests run on.
+        let program = std::env::current_exe().unwrap();
+        cfg.server[0].command = program.display().to_string();
         cfg.preset[0].expires_at = Some(now - chrono::Duration::minutes(1));
         let kc = InMemoryKeychain::new();
         kc.set("server/github/A", Secret::new("v".into())).unwrap();
@@ -792,7 +811,7 @@ mod tests {
         mcp_warden_core::stamp::record(
             &kc,
             &mcp_warden_core::stamp::server_stamp_name("github"),
-            &mcp_warden_core::stamp::server_fingerprint(&cfg.server[0]),
+            &mcp_warden_core::stamp::server_fingerprint(&cfg.server[0], &program),
         )
         .unwrap();
         assert!(access_warnings(&cfg, &kc, now).is_empty());

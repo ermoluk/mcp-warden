@@ -219,6 +219,30 @@ pub fn redact(input: &str, secrets: &[&str]) -> String {
     out
 }
 
+/// Test support for the parallel-writer tests: run an audit read or write
+/// again while another connection holds the database.
+///
+/// SQLite does not queue processes waiting for its lock. With several
+/// writers on a slow disk (Windows CI: every commit creates and deletes the
+/// rollback journal) one can wait past the busy timeout. In production that
+/// call fails closed, and the next one goes through (threat model R3,
+/// residual risks); this does the same, so the tests check what they are
+/// for — one linear chain holding every write — not the disk's speed. A
+/// failed write leaves nothing behind (`BEGIN IMMEDIATE`, or a `COMMIT` that
+/// is rolled back), so running it again is safe. Any other error panics.
+#[cfg(test)]
+pub(crate) fn until_unlocked<T>(mut access: impl FnMut() -> Result<T>) -> T {
+    let deadline = std::time::Instant::now() + std::time::Duration::from_secs(300);
+    loop {
+        match access() {
+            Ok(value) => return value,
+            Err(crate::error::WardenError::Audit(m))
+                if m.contains("database is locked") && std::time::Instant::now() < deadline => {}
+            Err(e) => panic!("{e}"),
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

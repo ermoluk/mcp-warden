@@ -338,7 +338,7 @@ pub async fn execute(
         }
     }
 
-    let client = http_client()?;
+    let client = http_client(url.scheme() == "http")?;
     let method = method_upper
         .parse::<reqwest::Method>()
         .map_err(|_| WardenError::Validation(format!("bad method {method_upper}")))?;
@@ -431,13 +431,30 @@ pub(crate) fn error_text(e: reqwest::Error) -> String {
 /// reqwest strips `Authorization` cross-origin but not custom auth headers
 /// (`Auth::Header`) — or land on a path the allow-list never approved.
 /// The 3xx is returned to the agent as-is.
-fn http_client() -> Result<reqwest::Client> {
-    reqwest::Client::builder()
+///
+/// `plain` (an `http://` URL, loopback only by config validation): the
+/// request carries its credential in clear text, so it never goes through a
+/// proxy named by `HTTP_PROXY` / `ALL_PROXY`, which belong to whoever
+/// started mcp-warden (audit 2026-11-09, H5). HTTPS keeps the system proxy
+/// — corporate networks need it, and TLS with webpki roots keeps the proxy
+/// out of the request.
+fn http_client(plain: bool) -> Result<reqwest::Client> {
+    direct_if_plain(reqwest::Client::builder(), plain)
         .redirect(reqwest::redirect::Policy::none())
         .timeout(Duration::from_secs(30))
         .user_agent(format!("mcp-warden/{}", env!("CARGO_PKG_VERSION")))
         .build()
         .map_err(|e| WardenError::Executor(e.to_string()))
+}
+
+/// No proxy for a plain-text request that carries a credential: see
+/// `http_client`. Used for proxy_http, the OAuth2 token request and
+/// `doctor --deep`.
+pub(crate) fn direct_if_plain(
+    builder: reqwest::ClientBuilder,
+    plain: bool,
+) -> reqwest::ClientBuilder {
+    if plain { builder.no_proxy() } else { builder }
 }
 
 #[cfg(test)]
@@ -906,7 +923,7 @@ mod tests {
             .mount(&api)
             .await;
 
-        let resp = http_client()
+        let resp = http_client(true)
             .unwrap()
             .get(format!("{}/users", api.uri()))
             .header("X-Api-Key", "SUPERSECRET")
@@ -989,6 +1006,97 @@ mod tests {
             query: None,
         };
         execute(&exec, &preset, req).await.unwrap()
+    }
+
+    /// Audit 2026-11-09, H5 (helper): runs in the child process started by
+    /// the test below. A loopback `http://` preset with bearer auth, `auto`,
+    /// one call — in whatever environment the child was started with.
+    #[tokio::test]
+    #[ignore = "helper: runs only in the child process audit_h5 starts"]
+    async fn audit_h5_child() {
+        use crate::approval::always_deny::AlwaysDeny;
+        use mcp_warden_core::audit::sqlite_sink::LocalSqlite;
+        use mcp_warden_core::keychain::KeychainStore;
+        use mcp_warden_core::keychain::memory::InMemoryKeychain;
+        use std::sync::Arc;
+        let Ok(upstream) = std::env::var("AUDIT_H5_UPSTREAM") else {
+            return;
+        };
+        let keychain = InMemoryKeychain::new();
+        keychain
+            .set("k", Secret::new(AUDIT_H5_SECRET.into()))
+            .unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        let audit = Arc::new(LocalSqlite::open(&dir.path().join("audit.db")).unwrap());
+        let exec = ActionExecutor::new(Arc::new(keychain), Arc::new(AlwaysDeny), None, audit);
+        let mut preset = p();
+        preset.base_url = Some(upstream);
+        preset.timeout_seconds = Some(3);
+        let req = HttpRequest {
+            preset_name: preset.name.clone(),
+            path: "/users/abc".into(),
+            method: "GET".into(),
+            body: None,
+            query: None,
+        };
+        let _ = execute(&exec, &preset, req).await;
+    }
+
+    const AUDIT_H5_SECRET: &str = "audit-h5-token-5c1e";
+
+    /// Audit 2026-11-09, H5. `HTTP_PROXY` / `ALL_PROXY` are the caller's to
+    /// set (`"env"` in a client config the agent edited). A loopback
+    /// `http://` preset — the one plain-text kind the config allows — must
+    /// not send its credential to a proxy the caller named.
+    #[test]
+    fn audit_h5_a_proxy_from_the_callers_environment_never_sees_the_credential() {
+        use std::io::{Read, Write};
+        let proxy = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let proxy_port = proxy.local_addr().unwrap().port();
+        // Nothing listens upstream: a direct request is simply refused.
+        let upstream_port = std::net::TcpListener::bind("127.0.0.1:0")
+            .unwrap()
+            .local_addr()
+            .unwrap()
+            .port();
+        let seen = std::sync::Arc::new(std::sync::Mutex::new(String::new()));
+        let seen_by_proxy = seen.clone();
+        proxy.set_nonblocking(false).unwrap();
+        std::thread::spawn(move || {
+            if let Ok((mut conn, _)) = proxy.accept() {
+                conn.set_read_timeout(Some(std::time::Duration::from_secs(5)))
+                    .unwrap();
+                let mut buf = [0u8; 8192];
+                let n = conn.read(&mut buf).unwrap_or(0);
+                *seen_by_proxy.lock().unwrap() = String::from_utf8_lossy(&buf[..n]).into();
+                let _ = conn.write_all(b"HTTP/1.1 502 Bad Gateway\r\ncontent-length: 0\r\n\r\n");
+            }
+        });
+        let proxy_url = format!("http://127.0.0.1:{proxy_port}");
+        let status = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "executor::http::tests::audit_h5_child",
+                "--ignored",
+                "--test-threads=1",
+            ])
+            .env(
+                "AUDIT_H5_UPSTREAM",
+                format!("http://127.0.0.1:{upstream_port}"),
+            )
+            .env("HTTP_PROXY", &proxy_url)
+            .env("http_proxy", &proxy_url)
+            .env("ALL_PROXY", &proxy_url)
+            .env_remove("NO_PROXY")
+            .env_remove("no_proxy")
+            .output()
+            .unwrap();
+        assert!(status.status.success());
+        let seen = seen.lock().unwrap().clone();
+        assert!(
+            !seen.contains(AUDIT_H5_SECRET),
+            "the caller's proxy received the credential:\n{seen}"
+        );
     }
 
     /// reqwest puts the request URL in its error text. A query-parameter

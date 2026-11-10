@@ -143,7 +143,7 @@ mcp-warden run github               # what the rewired entry runs: the server, w
 | `mcp-warden unlock`                        | Remove the lock after a human approves it in the dialog / Telegram |
 | `mcp-warden scan`                          | Find plaintext keys in MCP client configs and `.env` files (never prints values) |
 | `mcp-warden import`                        | Move the keys `scan` found into the keychain and point the client at `mcp-warden run` |
-| `mcp-warden server add <name> --env VAR -- <cmd…>` | Wrap another MCP server; its key is read from stdin into the keychain |
+| `mcp-warden server add <name> --env VAR [--path DIRS] -- <cmd…>` | Wrap another MCP server; its key is read from stdin into the keychain |
 | `mcp-warden run <name>`                    | Launch a wrapped MCP server with its keys injected (use as the client's command) |
 | `mcp-warden preset scaffold <template>` *(v0.3.0)* | Generate a preset from a built-in template (`--list` to discover) |
 | `mcp-warden preset from-openapi <src>` *(v0.3.0)* | Bootstrap a preset from an OpenAPI 3.x spec (URL or file) |
@@ -177,21 +177,24 @@ Restart Claude Code and run `/mcp-warden:setup`. If you previously added the ser
 
 Other MCP clients: see [`docs/claude-code-setup.md`](docs/claude-code-setup.md) and [`docs/cursor-setup.md`](docs/cursor-setup.md) for manual setup.
 
-## What's new in v0.6.0
+## What's new in v0.6.1
 
-- **Named SSH commands.** Declare the commands an agent may run, with typed parameters (`int`, `enum`, `string`, `path`); the agent calls `ssh_run` with a name and values, and never composes a command line. Every template is checked at startup, every value before the key is read, and the prompt shows the full command. Each command can have its own approval policy and window, and `expose_as_tools` makes each one its own MCP tool. Try one with `mcp-warden preset test NAME --run CMD --param k=v`; start from `mcp-warden preset scaffold ssh-deploy`.
-- **More ways to authenticate HTTP:** an API key as a query parameter, OAuth2 (a fresh access token for each call, refresh-token rotation handled across processes) and AWS SigV4, with templates for Google Maps, Google Drive and S3.
-- **A tamper-evident audit log.** Every write is hash-chained, the chain is anchored in the keychain, and `mcp-warden audit verify` names any edited, deleted or rolled-back entry. A rewritten log is never anchored.
-- **Dependencies:** russh 0.65, mysql_async 0.37 and notify-rust 4.18 clear seven of the eight accepted RustSec advisories; RSA SSH keys now sign with SHA-2, so they work with current OpenSSH.
-- **Plus:** `max_output_bytes` for SSH presets, `doctor` warnings for catch-all command patterns and destructive templates, `scan` recognises AWS temporary keys and Google OAuth credentials, and upstream errors no longer include the request URL.
+A security release from an audit of 0.6.0. Its theme was the environment an mcp-warden process starts in: it belongs to whoever starts the process, an agent included, and several security checks read it. Upgrade.
+
+- **`mcp-warden run` ignores the caller's `PATH`, environment and working directory.** A wrapped server's command is found in its entry's own `path` (or a fixed default), the server starts with a cleared environment in your home directory, and the program the command resolves to is part of what you confirm. `PATH=./bin:$PATH mcp-warden run github` or `NODE_OPTIONS=…` can no longer hand the server's key to other code.
+- **Windows: the approval dialog is the system's own PowerShell,** found through the OS rather than `SystemRoot`, so no other program can answer your prompts.
+- **SFTP's protected locations** (`~/.ssh`, shell startup files, agent configs) follow your real home directory, not `$HOME`.
+- **Plain-http credentials never go through a proxy** (loopback `http://` presets, OAuth2 token endpoints, `doctor --deep`).
+- **`preset from-openapi` handles templated paths** (`/pets/{id}` becomes `/pets/[^/]+`), escapes everything else, and prints the allow-list it generated.
+- **Plus:** SQLite 3.54 (RUSTSEC-2026-0459) and readable `mcp-warden audit` output.
 
 **After upgrading:**
 
-1. Restart your MCP clients, so no 0.5.x server keeps writing to the audit log without the chain.
-2. If you give a named command `approval = "auto"`, run `mcp-warden preset confirm` for its preset; until then it asks.
-3. Building from source now needs Rust 1.94.1. Prebuilt binaries and packages are unaffected.
+1. Each wrapped server asks for confirmation once more on its next launch, naming the program by its full path.
+2. If a wrapped server's command lives outside the default path (nvm, asdf, volta), add it again with `mcp-warden server add NAME --force --path "$PATH" --env VAR -- …`, or give the command as an absolute path. `mcp-warden doctor` names any server whose command it cannot find.
+3. `preset from-openapi --approval auto` now needs `--confirm-auto`.
 
-Every change: [CHANGELOG.md](CHANGELOG.md). The re-audit of this release is in [`docs/security/security-audit-2026-11.md`](docs/security/security-audit-2026-11.md).
+Every change, with the behaviour changes marked: [CHANGELOG.md](CHANGELOG.md). The audit: [`docs/security/security-audit-2026-11-09.md`](docs/security/security-audit-2026-11-09.md).
 
 ## How it compares
 
@@ -226,7 +229,7 @@ Compared with Keyward 0.1.1, Wundervault MCP server 2.1.0 and Janee 0.16.0, from
 - `mcp-warden lock` stops every running server at its next call; a server that has seen the lock stays locked until it restarts, and `unlock` needs a human to approve it.
 - Presets can cap and trim what `proxy_http` hands the agent (`max_response_bytes`, `response_fields`); a credential the upstream echoes back is always scrubbed.
 - `ssh_exec` refuses shell syntax whatever the preset's patterns allow, because sshd runs every command through the remote login shell. For a second allow-list on the server — a dedicated account, `command=` / `ForceCommand` and a gate script — see [`docs/ssh-hardening.md`](docs/ssh-hardening.md).
-- Wrapped servers (`mcp-warden run`) only get keys stored for them (`server/<name>/<VAR>`), never a preset's secret, and their command is fixed in the config. The key is still visible to the process it is handed to.
+- Wrapped servers (`mcp-warden run`) only get keys stored for them (`server/<name>/<VAR>`), never a preset's secret. Their command is fixed in the config and found in the entry's own `path`, not the caller's `PATH`; they start with a cleared environment, and the program is part of what you confirm. The key is still visible to the process it is handed to.
 - Stdout is the MCP protocol channel; all logs go to stderr.
 
 ## Links

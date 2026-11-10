@@ -13,6 +13,7 @@ pub mod cli;
 pub mod executor;
 pub mod fsutil;
 pub mod mcp;
+pub mod osenv;
 pub mod scan;
 #[cfg(test)]
 mod testutil;

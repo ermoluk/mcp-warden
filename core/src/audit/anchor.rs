@@ -329,13 +329,17 @@ mod tests {
             .map(|_| {
                 let (db, locks, kc) = (db.clone(), locks.clone(), kc.clone());
                 std::thread::spawn(move || {
-                    let s = LocalSqlite::open(&db).unwrap();
+                    use crate::audit::until_unlocked as again;
+                    let s = again(|| LocalSqlite::open(&db));
                     let mut last = 0;
-                    // Few rounds, as in chain::writers_in_parallel_make_one_chain.
+                    // Few rounds, as in chain::writers_in_parallel_make_one_chain;
+                    // an access that waits past the busy timeout tries again.
                     for _ in 0..4 {
-                        calls(&s, 1);
-                        advance(kc.as_ref(), &s, &db, Some(&locks)).unwrap();
-                        if let Some(a) = read(kc.as_ref(), &db).unwrap() {
+                        let id = again(|| s.record_pending("gh", "proxy_http", "GET /user"));
+                        again(|| s.record_decision(id, AuditDecision::Approved));
+                        again(|| s.record_outcome(id, AuditOutcome::Ok { status: 200 }));
+                        again(|| advance(kc.as_ref(), &s, &db, Some(&locks)));
+                        if let Some(a) = again(|| read(kc.as_ref(), &db)) {
                             assert!(a.seq >= last, "{} after {last}", a.seq);
                             last = a.seq;
                         }

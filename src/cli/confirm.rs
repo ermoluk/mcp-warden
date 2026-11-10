@@ -52,29 +52,40 @@ pub async fn confirm_preset(exec: &ActionExecutor, p: &Preset) -> Result<()> {
     Ok(())
 }
 
-/// A wrapped server gets its keys only as the command a human confirmed:
-/// the first launch, and the first after any edit to its entry, asks.
-pub async fn ensure_server_confirmed(exec: &ActionExecutor, s: &WrappedServer) -> Result<()> {
+/// A wrapped server gets its keys only as the program a human confirmed:
+/// the first launch, the first after any edit to its entry, and the first
+/// after its command resolves to another file (`program`) ask. The prompt
+/// names the program by its full path, and the entry's `path` if it sets
+/// one.
+pub async fn ensure_server_confirmed(
+    exec: &ActionExecutor,
+    s: &WrappedServer,
+    program: &Path,
+) -> Result<()> {
     let entry = stamp::server_stamp_name(&s.name);
-    let fingerprint = stamp::server_fingerprint(s);
+    let fingerprint = stamp::server_fingerprint(s, program);
     let why = match stamp::check(exec.keychain.as_ref(), &entry, &fingerprint)? {
         Confirmation::Confirmed => return Ok(()),
         Confirmation::Missing => "first launch",
-        Confirmation::Changed => "its entry changed since it was confirmed",
+        Confirmation::Changed => "its entry or program changed since it was confirmed",
     };
     let keys: Vec<String> = s.env.iter().map(|v| s.secret_name(v)).collect();
     let summary = format!(
-        "Start wrapped server '{}' ({why}): {} — with keys {}",
+        "Start wrapped server '{}' ({why}): {} — with keys {}{}",
         s.name,
-        std::iter::once(s.command.as_str())
-            .chain(s.args.iter().map(String::as_str))
+        std::iter::once(program.display().to_string())
+            .chain(s.args.iter().cloned())
             .collect::<Vec<_>>()
             .join(" "),
         if keys.is_empty() {
             "none".to_string()
         } else {
             keys.join(", ")
-        }
+        },
+        s.path
+            .as_deref()
+            .map(|p| format!(" — PATH {p}"))
+            .unwrap_or_default()
     );
     let event = exec
         .authorise(&prompt_preset(), "confirm_server", &summary, true)
@@ -327,24 +338,46 @@ mod tests {
             command: "npx".into(),
             args: vec!["-y".into(), "@github/mcp".into()],
             env: vec!["GITHUB_TOKEN".into()],
+            path: None,
         };
-        ensure_server_confirmed(&exec, &s).await.unwrap();
-        ensure_server_confirmed(&exec, &s).await.unwrap();
+        let npx = Path::new("/opt/homebrew/bin/npx");
+        ensure_server_confirmed(&exec, &s, npx).await.unwrap();
+        ensure_server_confirmed(&exec, &s, npx).await.unwrap();
         assert_eq!(approval.calls(), 1);
+        let first = approval.shown.lock().unwrap()[0].summary.clone();
+        assert!(
+            first.contains("/opt/homebrew/bin/npx -y @github/mcp"),
+            "{first}"
+        );
+        // The same entry, but `npx` now resolves to a file planted earlier
+        // on the path.
+        let planted = Path::new("/Users/me/.local/bin/npx");
+        ensure_server_confirmed(&exec, &s, planted).await.unwrap();
+        assert_eq!(approval.calls(), 2);
+        let summary = approval.shown.lock().unwrap()[1].summary.clone();
+        assert!(summary.contains("/Users/me/.local/bin/npx"), "{summary}");
         // The agent swaps the command: the key would go to `sh -c env`.
         s.command = "sh".into();
         s.args = vec!["-c".into(), "env > /tmp/x".into()];
-        ensure_server_confirmed(&exec, &s).await.unwrap();
-        assert_eq!(approval.calls(), 2);
-        let summary = approval.shown.lock().unwrap()[1].summary.clone();
+        s.path = Some("/tmp/agent:/bin".into());
+        ensure_server_confirmed(&exec, &s, Path::new("/bin/sh"))
+            .await
+            .unwrap();
+        assert_eq!(approval.calls(), 3);
+        let summary = approval.shown.lock().unwrap()[2].summary.clone();
         assert!(
             summary.contains("changed since it was confirmed"),
             "{summary}"
         );
-        assert!(summary.contains("sh -c env > /tmp/x"), "{summary}");
+        assert!(summary.contains("/bin/sh -c env > /tmp/x"), "{summary}");
         assert!(summary.contains("server/github/GITHUB_TOKEN"), "{summary}");
+        assert!(summary.contains("PATH /tmp/agent:/bin"), "{summary}");
 
         let (denying, _, _dir2) = super::tests::exec(ApprovalDecision::Denied);
-        assert!(ensure_server_confirmed(&denying, &s).await.is_err());
+        assert!(
+            ensure_server_confirmed(&denying, &s, Path::new("/bin/sh"))
+                .await
+                .is_err()
+        );
     }
 }

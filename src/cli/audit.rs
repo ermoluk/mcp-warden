@@ -118,12 +118,14 @@ pub fn run(
             .via_event
             .map(|n| format!(" via approval #{n}"))
             .unwrap_or_default();
-        let outcome = e.outcome.map(|o| match o {
-            AuditOutcome::Err { message } => AuditOutcome::Err {
-                message: for_terminal(&message, MESSAGE_WIDTH),
-            },
-            ok => ok,
-        });
+        let decision = e.decision.map_or("pending", |d| d.as_str());
+        let outcome = match e.outcome {
+            Some(AuditOutcome::Ok { status }) => format!(" ok {status}"),
+            Some(AuditOutcome::Err { message }) => {
+                format!(" error: {}", for_terminal(&message, MESSAGE_WIDTH))
+            }
+            None => String::new(),
+        };
         let who = match (&e.client, &e.session) {
             (Some(c), Some(s)) => format!("  ({}, session {s})", for_terminal(c, CLIENT_WIDTH)),
             (None, Some(s)) => format!("  (session {s})"),
@@ -131,14 +133,12 @@ pub fn run(
             (None, None) => String::new(),
         };
         println!(
-            "{} [{}] {:24} {} {} → {:?}{via} {:?}{who}",
+            "{} [{}] {:24} {} {} → {decision}{via}{outcome}{who}",
             e.created_at.to_rfc3339(),
             e.id,
             for_terminal(&e.preset, PRESET_WIDTH),
             e.action,
             for_terminal(&e.summary, SUMMARY_WIDTH),
-            e.decision,
-            outcome,
         );
     }
     Ok(())

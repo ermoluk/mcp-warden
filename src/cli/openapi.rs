@@ -3,8 +3,9 @@
 //! Given a JSON or YAML OpenAPI spec (file path or http(s) URL), extract:
 //! - the first server URL → preset `base_url`
 //! - the union of operation methods → `allowed_methods`
-//! - the operation paths (literal, with `{param}` placeholders preserved) →
-//!   `allowed_paths`
+//! - the operation paths → `allowed_paths`, each as a full-match pattern:
+//!   a `{param}` becomes one path segment (`[^/]+`), everything else is
+//!   matched literally (regex syntax in a spec path is escaped)
 //! - the first Bearer or APIKey security scheme → auth choice
 //!
 //! Defaults to `approval = "prompt"` because we don't want to auto-approve
@@ -39,18 +40,26 @@ pub struct Bootstrapped {
 }
 
 pub async fn from_source(opts: FromOpenapiOptions<'_>) -> Result<Bootstrapped> {
-    let bytes = fetch(opts.source).await?;
+    let bytes = fetch(opts.source, MAX_SPEC_BYTES).await?;
     let api = parse_spec(&bytes, opts.source)?;
     build_preset(api, opts)
 }
 
-async fn fetch(source: &str) -> Result<Vec<u8>> {
+fn too_large(max: usize) -> WardenError {
+    WardenError::Validation(format!(
+        "spec too large (cap {} bytes, {} MB)",
+        max,
+        max / 1024 / 1024
+    ))
+}
+
+async fn fetch(source: &str, max: usize) -> Result<Vec<u8>> {
     if source.starts_with("http://") || source.starts_with("https://") {
         let client = reqwest::Client::builder()
             .timeout(std::time::Duration::from_secs(30))
             .build()
             .map_err(|e| WardenError::Validation(format!("http client: {e}")))?;
-        let resp = client
+        let mut resp = client
             .get(source)
             .send()
             .await
@@ -61,40 +70,47 @@ async fn fetch(source: &str) -> Result<Vec<u8>> {
                 resp.status()
             )));
         }
-        let bytes = resp
-            .bytes()
-            .await
-            .map_err(|e| WardenError::Validation(format!("read body: {e}")))?;
-        if bytes.len() > MAX_SPEC_BYTES {
-            return Err(WardenError::Validation(format!(
-                "spec too large ({} bytes, cap {} MB)",
-                bytes.len(),
-                MAX_SPEC_BYTES / 1024 / 1024
-            )));
+        // Counted while reading: a server that streams without end, or
+        // claims a huge length, is cut off at the cap, not buffered whole.
+        if resp.content_length().is_some_and(|n| n > max as u64) {
+            return Err(too_large(max));
         }
-        Ok(bytes.to_vec())
+        let mut bytes = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
+            .await
+            .map_err(|e| WardenError::Validation(format!("read body: {e}")))?
+        {
+            if bytes.len() + chunk.len() > max {
+                return Err(too_large(max));
+            }
+            bytes.extend_from_slice(&chunk);
+        }
+        Ok(bytes)
     } else {
-        // Treat as filesystem path. Reject anything outside $HOME or /tmp to
-        // avoid trickery (e.g. reading /etc/* via a fake spec arg).
+        // Treat as filesystem path. Reject anything outside the account's
+        // home or the temporary directories, compared with symlinks
+        // resolved on both sides (/tmp is /private/tmp on macOS).
         let path = Path::new(source);
         let canonical = path
             .canonicalize()
             .map_err(|e| WardenError::Validation(format!("cannot resolve path: {e}")))?;
-        let home = std::env::var("HOME")
-            .map(std::path::PathBuf::from)
-            .unwrap_or_else(|_| std::path::PathBuf::from("/"));
-        if !(canonical.starts_with(&home) || canonical.starts_with("/tmp")) {
+        let roots: Vec<std::path::PathBuf> = crate::osenv::account_home()
+            .into_iter()
+            .chain(["/tmp", "/var/tmp"].map(std::path::PathBuf::from))
+            .filter_map(|r| r.canonicalize().ok())
+            .collect();
+        if !roots.iter().any(|r| canonical.starts_with(r)) {
             return Err(WardenError::Validation(
-                "path must be under $HOME or /tmp/".into(),
+                "path must be under your home directory or /tmp/".into(),
             ));
         }
+        if std::fs::metadata(&canonical).is_ok_and(|m| m.len() > max as u64) {
+            return Err(too_large(max));
+        }
         let bytes = std::fs::read(&canonical).map_err(WardenError::Io)?;
-        if bytes.len() > MAX_SPEC_BYTES {
-            return Err(WardenError::Validation(format!(
-                "spec too large ({} bytes, cap {} MB)",
-                bytes.len(),
-                MAX_SPEC_BYTES / 1024 / 1024
-            )));
+        if bytes.len() > max {
+            return Err(too_large(max));
         }
         Ok(bytes)
     }
@@ -159,7 +175,7 @@ fn build_preset(api: OpenAPI, opts: FromOpenapiOptions<'_>) -> Result<Bootstrapp
                     continue;
                 }
             }
-            paths.insert(path.clone());
+            paths.insert(path_pattern(path));
             methods.insert(method.clone());
             op_count += 1;
         }
@@ -212,6 +228,31 @@ fn build_preset(api: OpenAPI, opts: FromOpenapiOptions<'_>) -> Result<Bootstrapp
         source: opts.source.to_string(),
         preset,
     })
+}
+
+/// An OpenAPI path as an `allowed_paths` pattern: each `{param}` matches
+/// one path segment, everything else matches itself — regex syntax in the
+/// spec is escaped, so a spec cannot widen the preset past the paths it
+/// lists. A path with neither stays the literal string.
+fn path_pattern(path: &str) -> String {
+    let mut out = String::new();
+    let mut rest = path;
+    while let Some(open) = rest.find('{') {
+        let name_end = rest[open + 1..].find('}').map(|i| open + 1 + i);
+        match name_end {
+            Some(close) if close > open + 1 && !rest[open + 1..close].contains(['/', '{']) => {
+                out.push_str(&regex::escape(&rest[..open]));
+                out.push_str("[^/]+");
+                rest = &rest[close + 1..];
+            }
+            _ => {
+                out.push_str(&regex::escape(&rest[..=open]));
+                rest = &rest[open + 1..];
+            }
+        }
+    }
+    out.push_str(&regex::escape(rest));
+    out
 }
 
 fn operations(item: &openapiv3::PathItem) -> Vec<(String, &openapiv3::Operation)> {
@@ -336,6 +377,107 @@ mod tests {
         }
     }
 
+    /// Audit 2026-11-09 (functional). Spec paths are copied into
+    /// `allowed_paths` verbatim, where an entry is an exact string or a
+    /// full-match regex — `{id}` is neither a placeholder nor, as a regex,
+    /// a wildcard. The preset should allow the operations the spec lists.
+    #[test]
+    fn audit_generated_presets_allow_the_specs_own_operations() {
+        let api = parse_spec(PETSTORE_JSON.as_bytes(), "test.json").unwrap();
+        let b = build_preset(api, opts()).unwrap();
+        crate::executor::http::validate_request(&b.preset, "GET", "/pets").unwrap();
+        crate::executor::http::validate_request(&b.preset, "GET", "/pets/123")
+            .expect("GET /pets/{id} is in the spec");
+    }
+
+    /// Audit 2026-11-09. A spec path that holds regex syntax becomes an
+    /// allow-list pattern as it stands, so a spec — fetched from a URL —
+    /// can widen the preset past the operations it lists.
+    #[test]
+    fn audit_spec_paths_cannot_widen_the_allow_list() {
+        let spec = r#"{"openapi": "3.0.0", "info": {"title": "T", "version": "1"},
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {"/pets|/.*": {"get": {"responses": {"200": {"description": "ok"}}}}}}"#;
+        let api = parse_spec(spec.as_bytes(), "test.json").unwrap();
+        let b = build_preset(api, opts()).unwrap();
+        assert!(
+            crate::executor::http::validate_request(&b.preset, "GET", "/admin/users").is_err(),
+            "allowed_paths {:?} let /admin/users through",
+            b.preset.allowed_paths
+        );
+    }
+
+    #[test]
+    fn spec_paths_become_one_segment_patterns_and_literals() {
+        use crate::executor::http::validate_request;
+        let mut p = Preset {
+            allowed_methods: vec!["GET".into()],
+            ..build_preset(
+                parse_spec(PETSTORE_JSON.as_bytes(), "test.json").unwrap(),
+                opts(),
+            )
+            .unwrap()
+            .preset
+        };
+        for (spec_path, allowed, refused) in [
+            ("/pets/{id}", "/pets/abc-1", "/pets/a/b"),
+            ("/files/{name}.json", "/files/x.json", "/files/xjson"),
+            ("/v1/a.b", "/v1/a.b", "/v1/aXb"),
+            ("/odd{", "/odd{", "/oddX"),
+            ("/empty/{}", "/empty/{}", "/empty/x"),
+        ] {
+            p.allowed_paths = vec![path_pattern(spec_path)];
+            assert!(
+                validate_request(&p, "GET", allowed).is_ok(),
+                "{spec_path} → {:?} should allow {allowed}",
+                p.allowed_paths
+            );
+            assert!(
+                validate_request(&p, "GET", refused).is_err(),
+                "{spec_path} → {:?} should refuse {refused}",
+                p.allowed_paths
+            );
+        }
+        assert_eq!(path_pattern("/pets"), "/pets");
+    }
+
+    /// The spec is counted while it is read: a server that streams more
+    /// than the cap is cut off.
+    #[tokio::test]
+    async fn an_oversized_spec_is_refused_while_reading() {
+        use wiremock::matchers::any;
+        use wiremock::{Mock, MockServer, ResponseTemplate};
+        let server = MockServer::start().await;
+        Mock::given(any())
+            .respond_with(ResponseTemplate::new(200).set_body_string("x".repeat(4096)))
+            .mount(&server)
+            .await;
+        let err = fetch(&format!("{}/spec.json", server.uri()), 1024)
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("too large"), "{err}");
+        assert_eq!(
+            fetch(&format!("{}/spec.json", server.uri()), 8192)
+                .await
+                .unwrap()
+                .len(),
+            4096
+        );
+    }
+
+    /// A spec under /tmp is accepted — on macOS /tmp is /private/tmp, which
+    /// the check used to miss.
+    #[cfg(unix)]
+    #[tokio::test]
+    async fn a_spec_under_tmp_is_accepted() {
+        let dir = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+        let file = dir.path().join("spec.json");
+        std::fs::write(&file, PETSTORE_JSON).unwrap();
+        let bytes = fetch(file.to_str().unwrap(), MAX_SPEC_BYTES).await.unwrap();
+        assert_eq!(bytes.len(), PETSTORE_JSON.len());
+        assert!(fetch("/etc/hosts", MAX_SPEC_BYTES).await.is_err());
+    }
+
     #[test]
     fn parses_petstore_json() {
         let api = parse_spec(PETSTORE_JSON.as_bytes(), "test.json").unwrap();
@@ -351,7 +493,7 @@ mod tests {
         assert!(methods.contains("DELETE"));
         let paths: BTreeSet<String> = b.preset.allowed_paths.iter().cloned().collect();
         assert!(paths.contains("/pets"));
-        assert!(paths.contains("/pets/{id}"));
+        assert!(paths.contains("/pets/[^/]+"));
         assert!(paths.contains("/healthz"));
         match b.preset.auth.as_ref().unwrap() {
             Auth::Bearer { secret } => assert_eq!(secret, "api_token"),
@@ -405,7 +547,7 @@ components:
         o.tag_filter = Some(&tags);
         let b = build_preset(api, o).unwrap();
         assert_eq!(b.preset.allowed_methods, vec!["DELETE".to_string()]);
-        assert_eq!(b.preset.allowed_paths, vec!["/pets/{id}".to_string()]);
+        assert_eq!(b.preset.allowed_paths, vec!["/pets/[^/]+".to_string()]);
     }
 
     #[test]

@@ -339,7 +339,11 @@ fn audit_prints_what_the_agent_asked_for() {
         .assert()
         .success()
         .stdout(predicate::str::contains("DELETE /repos/me/app"))
-        .stdout(predicate::str::contains("Refused"));
+        // Plain words, not Rust's Debug form (`Some(Refused)`).
+        .stdout(predicate::str::contains(
+            "→ refused error: validation error: path not allowed",
+        ))
+        .stdout(predicate::str::contains("Some(").not());
 }
 
 fn seed_event(dir: &Path, summary: &str, decision: mcp_warden_core::audit::AuditDecision) {
@@ -805,10 +809,13 @@ fn preset_grant_and_revoke_set_and_clear_expiry() {
 fn server_add_list_remove() {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path();
+    // A program that exists wherever the tests run, by absolute path.
+    let program = assert_cmd::cargo::cargo_bin("mcp-warden");
     cmd()
         .env("MCP_WARDEN_CONFIG_DIR", dir)
         .args(["server", "add", "github", "--env", "GITHUB_TOKEN", "--"])
-        .args(["npx", "-y", "@modelcontextprotocol/server-github"])
+        .arg(&program)
+        .args(["-y", "@modelcontextprotocol/server-github"])
         .write_stdin("test-value\n")
         .assert()
         .success()
@@ -842,6 +849,30 @@ fn server_add_list_remove() {
             .unwrap()
             .contains("[[server]]")
     );
+}
+
+/// `run` looks a bare command up in the server's own path, never the
+/// caller's PATH; `server add` says so before it asks for any value.
+#[test]
+fn server_add_refuses_a_command_outside_the_servers_path() {
+    let tmp = tempfile::tempdir().unwrap();
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["server", "add", "gh", "--env", "TOKEN", "--"])
+        .args(["mcpw-no-such-program", "x"])
+        .write_stdin("must-not-be-read\n")
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("'mcpw-no-such-program' is not in"))
+        .stderr(predicate::str::contains("--path"));
+    assert!(!tmp.path().join("config.toml").exists());
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", tmp.path())
+        .args(["server", "add", "gh", "--path", "relative/bin", "--"])
+        .arg(assert_cmd::cargo::cargo_bin("mcp-warden"))
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("must be absolute"));
 }
 
 /// The value of a server key never goes on the command line, and the
@@ -1114,4 +1145,40 @@ fn import_without_a_terminal_needs_yes() {
         fs::read_to_string(project.path().join(".mcp.json")).unwrap(),
         before
     );
+}
+
+/// `preset from-openapi --approval auto` needs `--confirm-auto`, like
+/// `preset add` (invariant 4), says how `auto` takes effect, and prints the
+/// allow-list it generated for review.
+#[cfg(unix)]
+#[test]
+fn from_openapi_auto_needs_confirm_auto_and_prints_the_allow_list() {
+    let cfg = tempfile::tempdir().unwrap();
+    fs::write(cfg.path().join("config.toml"), "").unwrap();
+    let specs = tempfile::Builder::new().tempdir_in("/tmp").unwrap();
+    let spec = specs.path().join("spec.json");
+    fs::write(
+        &spec,
+        r#"{"openapi": "3.0.0", "info": {"title": "Pets", "version": "1"},
+            "servers": [{"url": "https://api.example.com"}],
+            "paths": {"/pets/{id}": {"get": {"responses": {"200": {"description": "ok"}}}}}}"#,
+    )
+    .unwrap();
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", cfg.path())
+        .args(["preset", "from-openapi"])
+        .arg(&spec)
+        .args(["--approval", "auto"])
+        .assert()
+        .failure()
+        .stderr(predicate::str::contains("requires --confirm-auto"));
+    cmd()
+        .env("MCP_WARDEN_CONFIG_DIR", cfg.path())
+        .args(["preset", "from-openapi"])
+        .arg(&spec)
+        .args(["--approval", "auto", "--confirm-auto"])
+        .assert()
+        .success()
+        .stderr(predicate::str::contains("/pets/[^/]+"))
+        .stderr(predicate::str::contains("mcp-warden preset confirm pets"));
 }

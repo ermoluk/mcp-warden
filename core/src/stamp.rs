@@ -48,10 +48,15 @@ pub fn preset_fingerprint(p: &Preset) -> String {
     hash(&serde_json::to_vec(p).unwrap_or_default())
 }
 
-/// SHA-256, hex, of the server entry as JSON: name, command, arguments and
-/// the variables it receives.
-pub fn server_fingerprint(s: &WrappedServer) -> String {
-    hash(&serde_json::to_vec(s).unwrap_or_default())
+/// SHA-256, hex, of the server entry as JSON — name, command, arguments,
+/// the variables it receives and its `path` — and of `program`, the file
+/// the command resolved to. A program planted earlier on the search path
+/// changes the fingerprint, so the launch asks again and names it.
+pub fn server_fingerprint(s: &WrappedServer, program: &std::path::Path) -> String {
+    let mut bytes = serde_json::to_vec(s).unwrap_or_default();
+    bytes.push(b'\n');
+    bytes.extend_from_slice(program.as_os_str().as_encoded_bytes());
+    hash(&bytes)
 }
 
 fn hash(bytes: &[u8]) -> String {
@@ -364,20 +369,32 @@ mod tests {
     }
 
     #[test]
-    fn server_fingerprint_covers_command_args_and_env() {
+    fn server_fingerprint_covers_command_args_env_path_and_program() {
+        use std::path::Path;
         let server = |command: &str, args: &[&str], env: &[&str]| WrappedServer {
             name: "github".into(),
             command: command.into(),
             args: args.iter().map(|s| s.to_string()).collect(),
             env: env.iter().map(|s| s.to_string()).collect(),
+            path: None,
         };
-        let base = server_fingerprint(&server("npx", &["-y", "gh-mcp"], &["GITHUB_TOKEN"]));
-        for other in [
-            server("sh", &["-y", "gh-mcp"], &["GITHUB_TOKEN"]),
-            server("npx", &["-c", "env"], &["GITHUB_TOKEN"]),
-            server("npx", &["-y", "gh-mcp"], &["GITHUB_TOKEN", "OTHER"]),
+        let npx = Path::new("/opt/homebrew/bin/npx");
+        let s = server("npx", &["-y", "gh-mcp"], &["GITHUB_TOKEN"]);
+        let base = server_fingerprint(&s, npx);
+        let mut with_path = s.clone();
+        with_path.path = Some("/opt/homebrew/bin:/usr/bin".into());
+        for (other, program) in [
+            (server("sh", &["-y", "gh-mcp"], &["GITHUB_TOKEN"]), npx),
+            (server("npx", &["-c", "env"], &["GITHUB_TOKEN"]), npx),
+            (
+                server("npx", &["-y", "gh-mcp"], &["GITHUB_TOKEN", "OTHER"]),
+                npx,
+            ),
+            (with_path, npx),
+            // The same entry, but `npx` now resolves to another file.
+            (s.clone(), Path::new("/Users/me/.local/bin/npx")),
         ] {
-            assert_ne!(server_fingerprint(&other), base);
+            assert_ne!(server_fingerprint(&other, program), base);
         }
     }
 

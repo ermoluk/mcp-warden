@@ -4,7 +4,7 @@ resolver = "2"
 
 [package]
 name = "mcp-warden"
-version = "0.6.0"
+version = "0.6.1"
 edition = "2024"
 rust-version = "1.94.1"
 license = "Apache-2.0"
@@ -27,7 +27,7 @@ pkg-url = "{ repo }/releases/download/v{ version }/mcp-warden-{ target }.zip"
 pkg-fmt = "zip"
 
 [dependencies]
-mcp-warden-core = { version = "0.6.0", path = "core" }
+mcp-warden-core = { version = "0.6.1", path = "core" }
 clap = { version = "4.5", features = ["derive"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "io-std", "io-util", "process", "signal", "time", "sync", "fs"] }
 serde = { version = "1", features = ["derive"] }
@@ -71,12 +71,19 @@ openapiv3 = "2.2"
 serde_yaml = "0.9"
 axum = { version = "0.7", features = ["http1", "tokio"] }
 zeroize = { version = "1", features = ["zeroize_derive"] }
-rusqlite = { version = "0.32", features = ["bundled"] }
+rusqlite = { version = "0.41", features = ["bundled"] }
 tokio-postgres-rustls = "0.14"
 rustls-native-certs = "0.8"
 webpki-roots = "1"
 rustls = { version = "0.23", default-features = false, features = ["ring", "std", "tls12"] }
 libc = "0.2"
+
+# Windows: system, profile and Program Files directories from known folders,
+# never from variables the caller sets (`osenv`). Both crates are already in
+# the tree through `dirs`.
+[target.'cfg(windows)'.dependencies]
+dirs-sys = "0.4"
+windows-sys = { version = "0.48", features = ["Win32_UI_Shell"] }
 
 [dev-dependencies]
 insta = { version = "1", features = ["yaml", "json"] }
